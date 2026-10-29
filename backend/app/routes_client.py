@@ -9,6 +9,7 @@ feature extractor's job.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import timedelta
 from typing import Any
 
 import httpx
@@ -44,10 +45,17 @@ class RouteRequest:
     origin: LatLng
     destination: LatLng
     via: tuple[LatLng, ...] = ()
+    # Direction of travel at each via point, degrees clockwise from north. It
+    # tells Google which way to pass the point on a two-way road.
+    via_headings: tuple[int, ...] = ()
     avoid_highways: bool = False
     # TRAFFIC_AWARE moves the request from the Essentials SKU to the Pro SKU,
-    # which has a smaller free allowance. Off by default.
+    # which has a smaller free allowance. Headings are a Pro feature too.
     traffic_aware: bool = False
+
+    def __post_init__(self) -> None:
+        if self.via_headings and len(self.via_headings) != len(self.via):
+            raise ValueError("via_headings must have one heading per via point")
 
     def to_body(self) -> dict[str, Any]:
         body: dict[str, Any] = {
@@ -61,18 +69,23 @@ class RouteRequest:
             "units": "METRIC",
         }
         if self.via:
-            body["intermediates"] = [_waypoint(point, via=True) for point in self.via]
+            headings = self.via_headings or (None,) * len(self.via)
+            body["intermediates"] = [
+                _waypoint(point, via=True, heading=heading) for point, heading in zip(self.via, headings, strict=True)
+            ]
         if self.avoid_highways:
             body["routeModifiers"] = {"avoidHighways": True}
         return body
 
 
-def _waypoint(point: LatLng, *, via: bool = False) -> dict[str, Any]:
+def _waypoint(point: LatLng, *, via: bool = False, heading: int | None = None) -> dict[str, Any]:
     # Rounding to 6 decimals (~0.1 m) keeps cache keys stable when the same
     # point is reached through slightly different floating-point math.
     waypoint: dict[str, Any] = {
         "location": {"latLng": {"latitude": round(point.lat, 6), "longitude": round(point.lng, 6)}}
     }
+    if heading is not None:
+        waypoint["location"]["heading"] = heading
     if via:
         # Pass through without stopping; doesn't split the route into legs.
         waypoint["via"] = True
@@ -95,9 +108,13 @@ class RoutesClient:
         *,
         http: httpx.Client | None = None,
         timeout_s: float = 10.0,
+        traffic_fresh_for: timedelta = timedelta(minutes=5),
     ) -> None:
         self._api_key = api_key
         self.cache = cache
+        # Live traffic goes stale fast, so record mode re-fetches traffic-aware
+        # answers older than this. Replay mode still serves them.
+        self.traffic_fresh_for = traffic_fresh_for
         self._owns_http = http is None
         self._http = http or httpx.Client(timeout=timeout_s)
         # Requests that actually went to Google, i.e. the potentially billable ones.
@@ -106,14 +123,15 @@ class RoutesClient:
     @classmethod
     def from_settings(cls, settings: Settings) -> RoutesClient:
         cache = ResponseCache(settings.cache_dir, settings.cache_mode, max_age=settings.cache_max_age)
-        return cls(settings.google_maps_api_key, cache)
+        return cls(settings.google_maps_api_key, cache, traffic_fresh_for=settings.traffic_fresh_for)
 
     def compute_routes(self, request: RouteRequest) -> list[dict[str, Any]]:
         """Return the raw `routes` array for a request; empty when Google found no route."""
         body = request.to_body()
         # Everything that changes Google's answer is part of the cache key. The API key is not.
         cache_request = {"endpoint": ROUTES_ENDPOINT, "fieldMask": FIELD_MASK, "body": body}
-        response = self.cache.get_or_fetch(cache_request, lambda: self._post(body))
+        fresh_for = self.traffic_fresh_for if request.traffic_aware else None
+        response = self.cache.get_or_fetch(cache_request, lambda: self._post(body), fresh_for=fresh_for)
         # When no route exists Google may omit `routes` entirely.
         return response.get("routes", [])
 

@@ -78,6 +78,23 @@ def test_entries_expire(tmp_path):
     assert fetch.calls == 2  # expired entry was re-recorded
 
 
+def test_live_data_is_refetched_in_record_mode_but_replayed_as_is(tmp_path):
+    clock = Clock()
+    fetch = CountingFetch()
+    five_minutes = timedelta(minutes=5)
+    ResponseCache(tmp_path, CacheMode.RECORD, clock=clock).get_or_fetch(REQUEST, fetch, fresh_for=five_minutes)
+
+    clock.now += timedelta(minutes=2)
+    ResponseCache(tmp_path, CacheMode.RECORD, clock=clock).get_or_fetch(REQUEST, fetch, fresh_for=five_minutes)
+    assert fetch.calls == 1  # still fresh
+
+    clock.now += timedelta(minutes=10)
+    assert ResponseCache(tmp_path, CacheMode.REPLAY, clock=clock).get_or_fetch(REQUEST, fetch, fresh_for=five_minutes)
+    assert fetch.calls == 1  # replay serves the recording
+    ResponseCache(tmp_path, CacheMode.RECORD, clock=clock).get_or_fetch(REQUEST, fetch, fresh_for=five_minutes)
+    assert fetch.calls == 2  # record mode wants live data
+
+
 def test_corrupt_entry_is_treated_as_a_miss(tmp_path):
     (tmp_path / f"{ResponseCache.key_for(REQUEST)}.json").write_text("{not json", encoding="utf-8")
     fetch = CountingFetch()

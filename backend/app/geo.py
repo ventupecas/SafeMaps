@@ -104,6 +104,34 @@ def path_length_m(points: Sequence[Point]) -> float:
     return sum(haversine_m(p, q) for p, q in pairwise(points))
 
 
+def point_along(points: Sequence[Point], distance_m: float) -> tuple[Point, float]:
+    """The point distance_m along a path, and the path's bearing there."""
+    if len(points) < 2:
+        raise ValueError("A path needs at least two points")
+    remaining = max(0.0, distance_m)
+    for a, b in pairwise(points):
+        segment = haversine_m(a, b)
+        if segment > 0 and remaining <= segment:
+            bearing = initial_bearing_deg(a, b)
+            return destination_point(a, bearing, remaining), bearing
+        remaining -= segment
+    return points[-1], initial_bearing_deg(points[-2], points[-1])
+
+
+def densify(points: Sequence[Point], spacing_m: float) -> list[Point]:
+    """The path's points, plus extra ones so no gap is longer than spacing_m."""
+    if not points:
+        return []
+    dense = [points[0]]
+    for a, b in pairwise(points):
+        segment = haversine_m(a, b)
+        steps = max(1, math.ceil(segment / spacing_m))
+        bearing = initial_bearing_deg(a, b)
+        dense.extend(destination_point(a, bearing, segment * k / steps) for k in range(1, steps))
+        dense.append(b)
+    return dense
+
+
 def total_heading_change_deg(points: Sequence[Point], min_segment_m: float = 30.0) -> float:
     """Sum of absolute heading changes along a path, in degrees.
 

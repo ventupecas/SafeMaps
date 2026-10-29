@@ -4,7 +4,7 @@ Expo prototype. The backend fetches every route Google will offer between two
 points, re-scores each one against a driver profile, and returns the winner's
 polyline. The frontend just draws it.
 
-**Status:** the backend engine (Routes client, cache, candidate generation, scoring, CLI) is done.
+**Status:** the backend engine is done: Routes client, cache, candidate generation, scoring, CLI, and the engine's own router on OpenStreetMap roads with Google live-traffic pricing.
 The HTTP API (FastAPI) and the web map frontend come next.
 
 ```
@@ -18,9 +18,15 @@ backend/
     hotspots.py       Crash-data index: recorded crashes near a junction
     scoring.py        Pure scoring and ranking; the part you tune
     profiles.py       Preset personas (fastest, highway-averse, scenic, calm, eco)
+    overpass.py       Downloads OpenStreetMap roads for an area (Overpass API)
+    roadgraph.py      Turns OSM data into a drivable road graph with turn restrictions
+    build_graph.py    Command that downloads and builds the graph
+    router.py         Our own router: personalized A* search with turn costs, plus alternatives
+    pricing.py        Sends our routes to Google for live-traffic times; measures how closely Google followed
     engine.py         The pipeline the API and CLI call
     cli.py            Run and tune from the terminal
-  tests/              94 tests, no network needed
+  data/               Downloaded OSM tiles and built graphs (gitignored)
+  tests/              154 tests, no network needed
 ```
 
 ## Setup (PowerShell)
@@ -43,7 +49,9 @@ pytest
 5. Leave `ROUTES_TRAFFIC_AWARE=false`. Traffic-aware routing bills at the Pro SKU, which has a smaller free allowance. Every other request this backend sends stays on Essentials.
    See Google's [pricing page](https://developers.google.com/maps/billing-and-pricing/pricing) for the current free caps.
 
-Each new trip costs 2 requests (plain + avoid-highways), plus up to 2 via-offset requests when Google offers fewer than 3 distinct routes. A repeat of the same trip costs nothing.
+Without the router, each new trip costs 2 Essentials requests (plain + avoid-highways), plus up to 2 via-offset requests when Google offers fewer than 3 distinct routes. A repeat of the same trip costs nothing.
+
+With the router (see below), each trip costs 1 live-traffic request for Google's own suggestions plus 1 per route our router designs: up to 4, all at the **Pro** tier. Live-traffic answers are only reused for 5 minutes in record mode, so set the daily quota cap before a demo.
 
 ## Running the engine
 
@@ -81,7 +89,7 @@ The weight-tuning loop:
 2. Switch to `replay` and iterate on `--set` overrides or `app/profiles.py` as much as you like.
 3. Once the weights feel right, copy them into the presets.
 
-Entries expire after 30 days (`ROUTES_CACHE_MAX_AGE_DAYS`) because Google's terms limit how long Maps content may be stored. The cache directory is gitignored. Delete it to start fresh.
+Entries expire after 30 days (`ROUTES_CACHE_MAX_AGE_DAYS`) because Google's terms limit how long Maps content may be stored. Live-traffic answers are fetched again in record mode once they're older than 5 minutes (`ROUTES_TRAFFIC_FRESH_MINUTES`); replay mode still serves them as recorded. The cache directory is gitignored. Delete it to start fresh.
 
 ## How a route is chosen
 
@@ -126,3 +134,49 @@ python -m app.cli --from 51.5007,-0.1246 --to 51.5194,-0.1270 --country GB --pro
 ```
 
 The engine only picks among the routes Google returns; it can't make Google build a route made of right turns. The more distinct candidates there are, the more often a safer one is available.
+
+## Own router (Milwaukee metro)
+
+The engine can design its own routes on OpenStreetMap roads, and Google prices them with live traffic.
+
+### Build the road map (once)
+
+From `backend/`:
+
+```powershell
+python -m app.build_graph milwaukee-metro
+```
+
+This command:
+- downloads drivable roads, traffic signals and turn restrictions for Milwaukee, Waukesha, Ozaukee and Washington counties from the public Overpass API, in 9 tiles saved under `data/osm/`
+- writes `data/graphs/milwaukee-metro.json.gz`, which is where `ROUTES_GRAPH` points by default
+- reuses tiles already on disk, so rebuilding after a code change doesn't download again
+- splits a tile into four smaller queries (and those into four again) when Overpass keeps failing on it because it's overloaded or ran out of time; a rerun picks up from the saved pieces
+- with `--endpoint https://overpass.kumi.systems/api/interpreter`, uses a mirror if the main server is busy
+
+Routes built from this data must credit **"© OpenStreetMap contributors"** (ODbL) on the map.
+
+### How a trip works
+
+1. Google's own suggestions are fetched with live traffic (1 request).
+2. Our router designs up to 3 routes for the profile. With `--all-profiles` it designs each profile's best route, skipping duplicates. The router works like this:
+   - It snaps each end of the trip to the nearest junction a car can start from (not a freeway or a ramp).
+   - It searches road segments rather than junctions, so every turn has a cost. The cost of each segment and turn uses the same perceived-minutes weights as the scorer. Turns across oncoming traffic at busy or crash-prone junctions cost extra. A turn between two one-way streets doesn't count as crossing, because there's no oncoming traffic.
+   - It obeys turn restrictions, and only allows U-turns at dead ends.
+3. Each design goes to Google as a live-traffic request that must pass through up to 25 points along it: one just after each turn, plus one every 3 km on long straights, each with the direction of travel. Google returns its version of the route with a live-traffic time.
+4. The scorer ranks everything on Google's numbers. Each of our routes shows `[NN%]`, the share of Google's version that follows our design.
+
+### CLI flags
+
+| Flag | Effect |
+|---|---|
+| none | Router mode, used whenever the graph file exists |
+| `--no-pricing` | Our routes use the graph's own time estimates (marked `~`). Google's suggestions are fetched without traffic if possible. Without an API key they're skipped with a note, and the run continues with our routes only. Use this for free weight tuning. |
+| `--no-router` | Google's routes only, the original behavior |
+
+### Limits
+
+- **Time estimates without pricing:** these come from posted speeds (or typical values by road type), a factor for junctions, and 12 s per traffic signal. Live times only come from pricing.
+- **Some turn restrictions are skipped.** A restriction that goes through a stretch of road rather than a single junction can't be modeled. These are mostly U-turn bans across medians, and the build summary counts them. The router still only U-turns at dead ends.
+- **Pass-through points and headings are untested against the live API.** Check the `[NN%]` match on your first real trips. If Google often wanders, add points or remove the headings in `pricing.py`.
+- **Trips beyond the map:** a trip starting or ending more than 1 km from the map falls back to Google's routes only, with a note.

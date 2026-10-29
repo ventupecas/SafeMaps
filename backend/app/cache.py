@@ -66,18 +66,28 @@ class ResponseCache:
         canonical = json.dumps(request, sort_keys=True, separators=(",", ":"))
         return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
-    def get_or_fetch(self, request: Mapping[str, Any], fetch: Callable[[], JsonDict]) -> JsonDict:
+    def get_or_fetch(
+        self,
+        request: Mapping[str, Any],
+        fetch: Callable[[], JsonDict],
+        *,
+        fresh_for: timedelta | None = None,
+    ) -> JsonDict:
         """Return the response for request, calling fetch only when the mode allows and the cache can't answer.
 
         request must describe everything that changes the response (endpoint,
         field mask, body) and must never contain credentials: it is written to
         disk alongside the response.
+
+        fresh_for is for time-sensitive answers such as live traffic: in record
+        mode an older entry is fetched again. Replay mode ignores it, since its
+        point is to serve what was recorded.
         """
         if self.mode is CacheMode.OFF:
             return fetch()
 
         key = self.key_for(request)
-        cached = self._load(key)
+        cached = self._load(key, fresh_for if self.mode is CacheMode.RECORD else None)
         if cached is not None:
             self.hits += 1
             return cached
@@ -100,7 +110,7 @@ class ResponseCache:
     def _path(self, key: str) -> Path:
         return self.directory / f"{key}.json"
 
-    def _load(self, key: str) -> JsonDict | None:
+    def _load(self, key: str, fresh_for: timedelta | None = None) -> JsonDict | None:
         path = self._path(key)
         try:
             entry = json.loads(path.read_text(encoding="utf-8"))
@@ -116,6 +126,9 @@ class ResponseCache:
 
         if age > self.max_age:
             logger.info("Cache entry %s expired (age %s)", path.name, age)
+            return None
+        if fresh_for is not None and age > fresh_for:
+            logger.info("Cache entry %s is stale for live data (age %s)", path.name, age)
             return None
         return response
 

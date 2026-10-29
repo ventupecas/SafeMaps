@@ -24,6 +24,8 @@ class Settings:
     default_country: str | None
     crash_data_path: Path | None
     crash_min_count: float
+    graph_path: Path
+    traffic_fresh_for: timedelta
 
     @classmethod
     def from_env(cls) -> Settings:
@@ -51,6 +53,8 @@ class Settings:
             default_country=os.getenv("ROUTES_DEFAULT_COUNTRY") or None,
             crash_data_path=_backend_path(crash_data) if crash_data else None,
             crash_min_count=crash_min_count,
+            graph_path=_backend_path(os.getenv("ROUTES_GRAPH") or "data/graphs/milwaukee-metro.json.gz"),
+            traffic_fresh_for=timedelta(minutes=float(os.getenv("ROUTES_TRAFFIC_FRESH_MINUTES") or 5)),
         )
 
 

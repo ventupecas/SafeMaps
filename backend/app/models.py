@@ -142,10 +142,15 @@ class CandidateRoute(BaseModel):
     model_config = ConfigDict(frozen=True)
 
     id: str
-    source: str = Field(description="How it was generated: google, avoid-highways or via-offset.")
-    description: str = Field("", description="Google's short summary, usually the main road name.")
+    source: str = Field(description="How it was generated: google, avoid-highways, via-offset or own (our router).")
+    description: str = Field("", description="Short summary, usually the main road name.")
     encoded_polyline: str
     is_google_default: bool = Field(False, description="True for the route Google itself would choose.")
+    live_traffic: bool = Field(False, description="True when the travel time includes Google's live traffic.")
+    design_match: float | None = Field(
+        None,
+        description="For our router's routes priced by Google: share of Google's route that follows our design.",
+    )
     features: RouteFeatures
 
 

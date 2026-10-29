@@ -8,8 +8,15 @@ Run from the backend/ directory:
     python -m app.cli --from ... --to ... --profile calm --json
     python -m app.cli --from 51.5007,-0.1246 --to 51.5194,-0.1270 --country GB --turns
 
-Candidates are fetched once per run through the cache and ranked locally, so
-re-running with different weights costs no API calls.
+When a road graph has been built (python -m app.build_graph milwaukee-metro),
+our own router designs routes too and Google prices them with live traffic.
+--no-pricing keeps our routes on the graph's estimates (no extra API calls);
+--no-router uses Google's routes only.
+
+Google's routes are fetched once per run through the cache and ranked
+locally. Re-ranking them with different weights costs no API calls. In router
+mode our designs change with the weights, and each new design is a new
+pricing call.
 """
 
 from __future__ import annotations
@@ -24,10 +31,20 @@ from dataclasses import replace
 from app.cache import CacheMiss, CacheMode
 from app.candidates import CandidateOptions
 from app.config import Settings
-from app.engine import NoRouteFoundError, build_candidates, load_hotspots, make_turn_context, plan_from_candidates
+from app.engine import (
+    NoRouteFoundError,
+    build_candidates,
+    build_router_candidates,
+    load_graph,
+    load_hotspots,
+    make_turn_context,
+    plan_from_candidates,
+)
 from app.features import TurnContext
 from app.models import CandidateRoute, LatLng, RoutePlan
 from app.profiles import PRESETS, get_profile
+from app.roadgraph import RoadGraph
+from app.router import Router
 from app.routes_client import RoutesApiError, RoutesClient
 
 
@@ -49,13 +66,22 @@ def main(argv: Sequence[str] | None = None) -> int:
             settings = replace(settings, cache_mode=CacheMode(args.cache_mode))
         profile = get_profile(args.profile, _parse_overrides(args.overrides))
         context = make_turn_context(settings, load_hotspots(settings), args.country)
+        graph = None if args.no_router else load_graph(settings)
     except (ValueError, OSError) as exc:
         return _fail(exc)
 
-    options = CandidateOptions(traffic_aware=settings.traffic_aware)
+    profiles = list(PRESETS.values()) if args.all_profiles else [profile]
+    notes: list[str] = []
     with RoutesClient.from_settings(settings) as client:
         try:
-            candidates = build_candidates(client, args.origin, args.destination, options, context)
+            if graph is not None:
+                pool = build_router_candidates(
+                    client, Router(graph, context), args.origin, args.destination, profiles, price=not args.no_pricing
+                )
+                candidates, notes = pool.candidates, pool.notes
+            else:
+                options = CandidateOptions(traffic_aware=settings.traffic_aware)
+                candidates = build_candidates(client, args.origin, args.destination, options, context)
         except (RoutesApiError, CacheMiss, NoRouteFoundError) as exc:
             return _fail(exc)
         usage = (
@@ -63,22 +89,23 @@ def main(argv: Sequence[str] | None = None) -> int:
             f"{client.cache.hits} served from cache ({settings.cache_mode} mode)"
         )
 
-    if args.all_profiles:
-        plans = [plan_from_candidates(candidates, preset) for preset in PRESETS.values()]
-    else:
-        plans = [plan_from_candidates(candidates, profile)]
-
+    plans = [plan_from_candidates(candidates, each) for each in profiles]
     if args.json:
         payload = [plan.model_dump(mode="json") for plan in plans]
         print(json.dumps(payload if args.all_profiles else payload[0], indent=2))
     else:
         print(_describe_context(context, args.country or settings.default_country))
+        print(_describe_router(graph, args, settings.graph_path))
         if args.all_profiles:
             _print_comparison(candidates, plans)
         else:
             _print_plan(plans[0])
         if args.turns:
             _print_turns(candidates)
+        if notes:
+            print("\nNotes:")
+            for note in notes:
+                print(f"  {note}")
 
     print(usage, file=sys.stderr)  # stderr keeps --json output pipeable
     return 0
@@ -108,6 +135,12 @@ def _parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
         help="two-letter country of the trip; decides which turns cross traffic (default: ROUTES_DEFAULT_COUNTRY)",
     )
     parser.add_argument("--turns", action="store_true", help="list every turn across oncoming traffic")
+    parser.add_argument("--no-router", action="store_true", help="use Google's routes only, even if a road graph exists")
+    parser.add_argument(
+        "--no-pricing",
+        action="store_true",
+        help="keep our routes on the graph's no-traffic estimates instead of asking Google (fewer API calls)",
+    )
     parser.add_argument("--cache-mode", choices=[mode.value for mode in CacheMode], help="override ROUTES_CACHE_MODE")
     parser.add_argument("--json", action="store_true", help="print the API-shaped JSON instead of a table")
     parser.add_argument("-v", "--verbose", action="store_true", help="log cache activity")
@@ -138,7 +171,9 @@ def _fail(exc: Exception) -> int:
 FEATURE_HEADER = f"{'km':>6} {'min':>6} {'hwy':>6} {'delay':>6} {'turns':>5} {'x-busy':>6} {'x-hot':>5} {'wind':>6}"
 LEGEND = (
     "(G) = Google's default. hwy, delay and wind are minutes; cost is perceived minutes.\n"
-    "x-busy / x-hot = turns across oncoming traffic at busy / crash-prone junctions."
+    "x-busy / x-hot = turns across oncoming traffic at busy / crash-prone junctions.\n"
+    "own-N = our router's design; [NN%] = how much of Google's priced version follows it;\n"
+    "~ = estimated time without live traffic."
 )
 
 
@@ -151,7 +186,21 @@ def _feature_cells(route: CandidateRoute) -> str:
 
 
 def _label(route: CandidateRoute) -> str:
-    return route.id + (" (G)" if route.is_google_default else "")
+    label = route.id + (" (G)" if route.is_google_default else "")
+    if route.design_match is not None:
+        label += f" [{route.design_match:.0%}]"
+    if route.source == "own" and not route.live_traffic:
+        label += " ~"
+    return label
+
+
+def _describe_router(graph: RoadGraph | None, args: argparse.Namespace, graph_path: object) -> str:
+    if args.no_router:
+        return "Own router: off (--no-router)\n"
+    if graph is None:
+        return f"Own router: off (no road graph at {graph_path}; run python -m app.build_graph milwaukee-metro)\n"
+    pricing = "estimated times only (--no-pricing)" if args.no_pricing else "priced by Google with live traffic"
+    return f"Own router: {graph.area} graph, {graph.node_count:,} junctions; {pricing}\n"
 
 
 def _describe_context(context: TurnContext, country: str | None) -> str:
@@ -183,8 +232,10 @@ def _print_plan(plan: RoutePlan) -> None:
         )
 
     print(f"\n{LEGEND}")
-    if plan.overrides_google:
-        default = next((route.id for route in plan.candidates if route.is_google_default), "none")
+    default = next((route.id for route in plan.candidates if route.is_google_default), None)
+    if default is None:
+        print(f"Winner: {plan.winner.id} (no Google route to compare against).")
+    elif plan.overrides_google:
         print(f"Winner: {plan.winner.id}, overriding Google's default ({default}).")
     else:
         print(f"Winner: {plan.winner.id}, the same as Google's default.")
@@ -197,9 +248,10 @@ def _print_comparison(candidates: Sequence[CandidateRoute], plans: Sequence[Rout
         print(f"  {_label(route):<{width}}  {_feature_cells(route)}  {route.description[:28]}")
     print(f"\n{LEGEND}")
 
+    has_google = any(route.is_google_default for route in candidates)
     print(f"\n  {'profile':<16} {'winner':<{width}} {'cost':>7}  vs Google")
     for plan in plans:
-        verdict = "override" if plan.overrides_google else "same"
+        verdict = ("override" if plan.overrides_google else "same") if has_google else "n/a"
         print(f"  {plan.profile.name:<16} {plan.winner.id:<{width}} {plan.winner.breakdown.total:7.1f}  {verdict}")
 
 
