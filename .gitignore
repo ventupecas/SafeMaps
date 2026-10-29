@@ -1,0 +1,15 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+.pytest_cache/
+
+# Secrets
+.env
+
+# Downloaded crash datasets: large, and easy to fetch again.
+backend/data/
+
+# Recorded Google API responses. Google's terms limit storing Maps content,
+# so these stay local and are never committed.
+backend/.cache/
