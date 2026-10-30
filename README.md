@@ -24,7 +24,8 @@ backend/
     roadgraph.py      Turns OSM data into a drivable road graph with turn restrictions
     build_graph.py    Command that downloads and builds the graph
     router.py         Our own router: personalized A* search with turn costs, plus alternatives
-    road_events.py    Closures, lane closures and jams: WZDx work zones, Wisconsin 511, Google traffic speeds, Apify (opt-in)
+    road_events.py    Closures, lane closures and jams: WZDx work zones, Wisconsin 511, TomTom, Google traffic speeds, Apify (opt-in)
+    traffic_tiles.py  TomTom's traffic map for the OpenStreetMap page, fetched by the server so its key stays private
     pricing.py        Sends our routes to Google for live-traffic times; measures how closely Google followed
     engine.py         The pipeline the API and CLI call
     main.py           HTTP API (FastAPI); also serves the web map
@@ -32,7 +33,7 @@ backend/
     crash_data.py     Downloads fatal crashes (NHTSA FARS) for the crash-prone junction rule
     evaluate.py       Runs 20 Milwaukee trips and writes RESULTS.md: what the engine changes
   data/               Downloaded OSM tiles and built graphs (gitignored)
-  tests/              284 tests, no network needed
+  tests/              298 tests, no network needed
 frontend/
   index.html, app.js, styles.css   The web map: place search, routes drawn and explained, driving mode
   maps.js                          The map underneath: Google's or OpenStreetMap's (ROUTES_MAP)
@@ -108,11 +109,12 @@ Until then, the page shows these steps in place of the map. On the page:
 - **`osm`:** an OpenStreetMap map through [Leaflet](https://leafletjs.com), with no Google logo and no Google at all. Google's terms don't allow its results (routes, places, traffic) on another map, so in this mode:
   - **Place search** uses [Photon](https://photon.komoot.io), which is built on OpenStreetMap data.
   - **Our router designs every route.** The "standard route" to compare with is its fastest one.
-  - **Live traffic comes from Wisconsin 511 instead** (with `WI511_API_KEY`): see "511 travel times" below. Google's Live traffic toggle is hidden, and **Show traffic** draws the 511 slowdowns instead of Google's traffic layer.
+  - **Live traffic comes from TomTom and Wisconsin 511 instead** (with `TOMTOM_API_KEY` and `WI511_API_KEY`): see "TomTom: traffic on every street" and "511 travel times" below. Google's Live traffic toggle is hidden.
+  - **Show traffic** shows TomTom's traffic map: every street colored green to red by speed, credited "Traffic © TomTom". Without a TomTom key it draws the 511 slowdowns instead.
   - **Still on:** work zones, 511, crash data, school zones and rail crossings.
   - **Keys:** neither Google key is needed, any port works, and the page credits "© OpenStreetMap contributors".
 
-  Leaflet loads from unpkg.com, map tiles from tile.openstreetmap.org, and search from photon.komoot.io. All three are free for light use like a demo, with fair-use policies, so don't use them for heavy traffic.
+  Leaflet loads from unpkg.com, map tiles from tile.openstreetmap.org, and search from photon.komoot.io. All three are free for light use like a demo, with fair-use policies, so don't use them for heavy traffic. TomTom's traffic tiles come through this server, so the TomTom key never reaches a browser.
 
 **Sharing the demo over a link.** A free tunnel gives the laptop a public https address, so visitors can open the app on their phones, driving mode included. Anyone with the address could use your Google requests, so set an access code: with `ROUTES_ACCESS_CODE=...` in `backend/.env`, route requests without it are refused (401). Share the address with `?code=...` on the end; the page remembers the code. EXPO.md has the step-by-step instructions.
 
@@ -223,20 +225,22 @@ The other presets use the weighted score instead. `fastest` ignores safety and f
 
 ## Road events: closures, lane closures and jams
 
-Four sources, in the order of preference set by `ROUTES_ROAD_EVENT_SOURCES` (default `wzdx+wi511,google`). A trip uses the first entry that is set up and answers, so the later ones are backups. `a+b` uses both together, when either answers. With the default, a trip gets WZDx work zones plus 511 incidents (once you have the 511 key), and falls back to Google's traffic speeds only if neither answers. The web map's **Closures and slowdowns** picker, or the API's `road_events` field, can also pick one source for a trip, or none. The response says which sources were used (`road_events_source`, joined with `+`) and which were tried but unavailable (`road_events_skipped`).
+Five sources, in the order of preference set by `ROUTES_ROAD_EVENT_SOURCES` (default `wzdx+wi511+tomtom,google`). A trip uses the first entry that is set up and answers, so the later ones are backups. `a+b` uses both together, when either answers. With the default, a trip gets WZDx work zones plus 511 incidents (once you have the 511 key) plus TomTom's traffic on the OpenStreetMap map (once you have the TomTom key), and falls back to Google's traffic speeds on Google's map only if none answers. Each map takes traffic from its own provider: `google` and `apify` are skipped on the OpenStreetMap map, and `tomtom` on Google's. The web map's **Closures and slowdowns** picker, or the API's `road_events` field, can also pick one source for a trip, or none. The response says which sources were used (`road_events_source`, joined with `+`) and which were tried but unavailable (`road_events_skipped`).
 
 | Source | What it gives | Needs | Cost and caveats |
 |---|---|---|---|
 | `wzdx` Work Zone Data Exchange | Every work zone in Wisconsin (WZDx 4.2): its stretch of road, direction, dates, and which lanes are closed | Nothing: `https://511wi.gov/api/wzdx` is public | Free, public domain (CC0). About 6 MB, fetched at most every 5 minutes; if a refresh fails, the last copy is used for up to an hour. Work zones only: no crashes or incidents. `ROUTES_WZDX_FILE` reads a saved copy instead, for an offline demo. |
 | `wi511` Wisconsin 511 | Official closures, lane closures, construction and incidents, statewide | `WI511_API_KEY` (free; see below) | Free. The feed allows 10 calls a minute, so it's fetched at most every 5 minutes for all trips. Used with `wzdx`, its own roadwork entries are dropped: they're the same work zones in less detail. |
+| `tomtom` TomTom traffic | Jams with their delay, closures, lane closures and crashes on every road, side streets included | `TOMTOM_API_KEY` (free plan; see below); the OpenStreetMap map | Free up to 2,500 incident requests and 200,000 traffic tiles a month. One request covers the whole metro, made at most every 10 minutes and only while trips are planned, capped at `ROUTES_TOMTOM_DAILY_REQUESTS` (80) a day. If a refresh fails, the last copy is used for up to 30 minutes. |
 | `google` traffic speeds | Slow and jammed stretches along Google's own suggested routes (`TRAFFIC_ON_POLYLINE`) | Live traffic on, our router, the Google key | No new account. Added only to the one suggestions request per trip, but Google bills a traffic-on-polyline request at a higher rate: possibly the Enterprise tier (1,000 free a month) rather than Pro (5,000). Reports no closures. |
 | `apify` traffic tiles | Slowdowns and fully closed roads from Google Maps' traffic tiles, around the trip | Listed in `ROUTES_ROAD_EVENT_SOURCES` and `APIFY_TOKEN` set | Paid per tile ($0.001–$0.01; the actor's page lists both), plus Apify platform fees. Up to 81 tiles a trip, at most `ROUTES_APIFY_DAILY_TILES` (300) a day, cached 10 minutes. **Scraping Google Maps is against Google's terms**, which puts this app's Google keys at risk. A first fetch takes tens of seconds while the actor starts. Off unless both set. |
 
 What each kind of event does:
 - **Closed road:** our router won't use it (except the segment the car is already on). A route through one, by the scorer's reading, can't win, unless every route goes through one, in which case the data is doubted instead.
 - **Lane closure:** the segments cost 1.5× their time, and driving into one costs `lane_closure_weight` once, like a risky turn. It counts toward safety, so in the default ranking a route through a lane closure loses to an equally fuel-efficient one without.
-- **Jam / slow:** the segments cost 3× / 1.5× their time when our router designs routes, so the designs go around them. They aren't scored separately: live travel times already include them.
-- **Matching to the map:** sources often give only the two ends of a stretch. Each end is snapped to the road segment there, running the event's direction, and the event becomes the shortest drive between them along the roads, if that's at most 1.5× the straight distance plus 500 m. Otherwise it stays as given. A stretch affecting both directions becomes one event per direction. A single point matches the nearest road within 30 m. The map draws closed roads in black and lane closures in dashed orange. Each event is matched once and remembered, so only the first trip through an area waits for it (a few seconds for 60 work zones).
+- **Jam / slow:** the segments cost more when our router designs routes, so the designs go around them: by the measured slowdown (511 travel times), by the delay over the stretch's usual time (TomTom's jams), or else 3× / 1.5×. They aren't scored separately: travel times already include them.
+- **Matching to the map:** sources often give only the two ends of a stretch. Each end is snapped to the road segment there, running the event's direction, and the event becomes the shortest drive between them along the roads, if that's at most 1.5× the straight distance plus 500 m. Otherwise it stays as given. A stretch affecting both directions becomes one event per direction. A single point matches the nearest road within 30 m. Each event is matched once and remembered. At startup the server fetches the events across the whole road map and matches them in the background (about 40 s for the metro), so trips don't wait for it; `/health` shows `"matched_ahead": true` once that's done.
+- **What the map shows:** closed roads in black and lane closures in dashed orange, for the closures within about 300 m of a route shown. The rest of the trip's area (5 km around it) would bury the routes. A closure of both directions of a two-way street is drawn once.
 - **Which work zones count:** WZDx entries closing all lanes are closures. "Some lanes closed" (only when a travel lane is closed, not just the shoulder), flagging, alternating one-way traffic and temporary signals are lane closures. Planned work that hasn't started, and suggested detours, are left out. A reduced speed limit makes the work zone's segments slower to match, and workers on site make it count 1.5× as risky.
 - **Ramps and mainlines:** descriptions say which road an event is on ("Ramp Full Closure on I-94 EB at OFF RAMP TO HAWLEY RD", "Mainline Left Lane Closed on ..."). A mainline event never matches a ramp. Ramp closures are placed on the freeway beside the ramp, so they're matched to the ramp itself:
   - **Exits and entrances:** the junction where an exit leaves the freeway (or an entrance joins it) heading the event's way, whose ramp reaches the named street, within 1.5 km. The whole ramp is closed, up to the street or a split, and a route only counts as using it if it passes both ends: the first stretch of a ramp runs right beside the freeway.
@@ -247,8 +251,28 @@ What each kind of event does:
 **511 travel times: live traffic without Google.** With the 511 key, the `wi511` source also reads 511WI's travel times, at most every 5 minutes. These are the current and normal travel time of about 220 Milwaukee-area segments, mostly freeways and main highways.
 - **Which segments count:** one taking 1.25× its normal time or more is slow, and 2× or more is jammed. Slowdowns are capped at 6×, since higher readings tend to be a detour sign's time rather than traffic.
 - **Router:** it slows each segment by its measured factor, so designs go around jams.
-- **Trip times:** routes not priced with Google's live traffic (the OpenStreetMap map, or Live traffic off) get the measured delay for the share of each slow segment they drive, and the fuel it burns.
-- **Map:** each segment is matched to the road through its waypoints, one to the next. Segments no road matches are left out (about 1 in 5), and the rest draw orange (slow) or red (jammed) under **Show traffic** on the OpenStreetMap map.
+- **Trip times:** routes not priced with Google's live traffic (the OpenStreetMap map, or Live traffic off) get the measured delay for the share of each slow segment they drive, and the fuel it burns. TomTom's jams add their delay the same way.
+- **Map:** each segment is matched to the road through its waypoints, one to the next. Segments no road matches are left out (about 1 in 5), and the rest draw orange (slow) or red (jammed) under **Show traffic** on the OpenStreetMap map, when there's no TomTom key.
+- **With TomTom:** TomTom's jams cover the same freeways and every street besides, so the travel times are left out and 511 gives its closures and incidents only.
+
+**TomTom: traffic on every street.** 511's travel times cover freeways and main highways only. TomTom's traffic incidents cover city streets too. On a weekday afternoon in October 2026 they listed 368 incidents in the metro, 312 of them on streets without a highway number.
+- **What counts:** TomTom's road closures are closures. Lane closures count when a travel lane is closed, not just the shoulder. Crashes count as lane closures: the scene takes lanes for a while and invites another crash. Jams carry their delay: "stopped" and "backed up" traffic are jams, "slow traffic" is slow. Roadwork beside the road, a car on the shoulder, and weather are left out.
+- **Thinned out:**
+  - **Once per closure:** TomTom lists a closure once per direction. Two lines, each the other reversed (ends within 60 m), become one closure of both directions.
+  - **Off our map:** closures on roads our map doesn't have (alleys, parking lots, ramps rebuilt since the map was downloaded) are left out, as they can't affect a route. That's about 1 in 10.
+  - **Reported twice:** a TomTom closure or lane closure with 3/4 of its stretch on an official one (WZDx, 511) is the same closure. The official one is kept, since it says more (workers on site, the speed limit, which ramp).
+  - **One source of traffic:** with TomTom, 511's travel times are left out, so a jam isn't counted twice.
+
+  On that afternoon: 368 incidents, 293 events after the first two rules, 265 on our map, and 29 more already reported by the work zone feed.
+- **Traffic map:** with `ROUTES_MAP=osm`, **Show traffic** shows TomTom's traffic tiles. The page asks this server for them (`/traffic-tiles/{z}/{x}/{y}.png`), which fetches each from TomTom with the key and keeps it for 3 minutes for everyone looking at that spot. At most `ROUTES_TOMTOM_DAILY_TILES` (6,000) are fetched a day; a map view takes about 20. With an access code set, the tiles need it too.
+- **Usage:** `/health` shows `tomtom_requests_today` and `tomtom_tiles_today`. The daily caps keep a month inside the free plan: 80 × 31 = 2,480 requests, 6,000 × 31 = 186,000 tiles.
+
+**Getting the TomTom key:**
+1. Create a free account at <https://developer.tomtom.com> (no credit card).
+2. In the dashboard, copy the API key it made, or create one under **Keys**.
+3. Put it in `backend/.env` as `TOMTOM_API_KEY=...`, set `ROUTES_MAP=osm`, and restart the server. `/health` shows `"tomtom_key_set": true`.
+
+Read TomTom's terms before showing its data publicly.
 
 **Getting the Wisconsin 511 key** (from 511wi.gov's developer pages):
 1. Create a My 511WI account at <https://511wi.gov/my511/register> and confirm it from the email.

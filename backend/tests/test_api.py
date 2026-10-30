@@ -10,6 +10,7 @@ from fastapi.testclient import TestClient
 from app.cache import CacheMode
 from app.config import Settings
 from app.main import create_app
+from app.overpass import BBox
 from app.roadgraph import build_graph
 from tests.factories import highway_route, winding_route
 from tests.osm_factory import grid_city, point
@@ -228,17 +229,21 @@ def test_wisconsin_511_closures_reach_the_plan(tmp_path, google):
     with TestClient(app) as client:
         trip = client.post("/route", json={"origin": ORIGIN, "destination": DESTINATION, "live_traffic": False}).json()
     assert trip["road_events_source"] == "wi511"
-    eastbound, westbound = trip["road_events"]  # snapped to Main St, one per direction
-    assert eastbound["kind"] == westbound["kind"] == "closed" and eastbound["description"].startswith("Main St:")
+    (closed,) = trip["road_events"]  # snapped to Main St both ways, and drawn once
+    assert closed["kind"] == "closed" and closed["description"].startswith("Main St:")
     assert all(not route["features"]["closures"] for route in trip["plan"]["candidates"] if route["source"] == "own")
 
 
 def test_health_lists_the_road_event_sources(api):
     road_events = api.get("/health").json()["road_events"]
+    assert road_events.pop("matched_ahead") is False  # the test map covers no named area: nothing to match ahead
     assert road_events == {
-        "order": ["wzdx+wi511", "google"],
+        "order": ["wzdx+wi511+tomtom", "google"],
         "wzdx": "https://511wi.gov/api/wzdx",
         "wi511_key_set": False,
+        "tomtom_key_set": False,
+        "tomtom_requests_today": 0,
+        "tomtom_tiles_today": 0,
         "apify_enabled": False,
         "apify_tiles_today": 0,
     }
@@ -264,7 +269,7 @@ def test_routes_come_with_turn_by_turn_directions(api):
 def test_the_openstreetmap_map_never_asks_google(tmp_path, google):
     app = create_app(make_settings(tmp_path, map="osm"), http=httpx.Client(transport=httpx.MockTransport(google)))
     with TestClient(app) as client:
-        assert client.get("/app-config").json() == {"map": "osm"}
+        assert client.get("/app-config").json() == {"map": "osm", "traffic_tiles": False}  # no TomTom key
         trip = client.post("/route", json={"origin": ORIGIN, "destination": DESTINATION, "live_traffic": True}).json()
     assert google.requests == []  # no Google: not even with live traffic asked for
     standard = [route for route in trip["plan"]["candidates"] if route["is_standard"]]
@@ -276,4 +281,79 @@ def test_the_openstreetmap_map_never_asks_google(tmp_path, google):
 def test_googles_default_is_the_standard_route_on_the_google_map(api):
     trip = api.post("/route", json={"origin": ORIGIN, "destination": DESTINATION}).json()
     assert [r["id"] for r in trip["plan"]["candidates"] if r["is_standard"]] == ["google-1"]
-    assert api.get("/app-config").json() == {"map": "google"}
+    assert api.get("/app-config").json() == {"map": "google", "traffic_tiles": False}
+
+
+class FakeTomTom:
+    """MockTransport handler for api.tomtom.com (its incidents and a traffic tile); anything else goes to fallback."""
+
+    def __init__(self, incidents, fallback) -> None:
+        self.incidents, self.fallback, self.requests = incidents, fallback, []
+
+    def __call__(self, request: httpx.Request) -> httpx.Response:
+        if request.url.host != "api.tomtom.com":
+            return self.fallback(request)
+        self.requests.append(request)
+        if request.url.path.endswith("incidentDetails"):
+            return httpx.Response(200, json={"incidents": self.incidents})
+        return httpx.Response(200, content=b"\x89PNG traffic", headers={"Content-Type": "image/png"})
+
+
+def main_st_closed_both_ways() -> list[dict]:
+    from tests.test_road_events import tomtom_incident
+
+    east = [point(1, 1), point(1, 2)]
+    return [tomtom_incident(8, east, **{"from": "1 Ave", "to": "2 Ave"}), tomtom_incident(8, east[::-1])]
+
+
+def test_tomtom_traffic_on_the_openstreetmap_map(tmp_path, google):
+    tomtom = FakeTomTom(main_st_closed_both_ways(), google)
+    settings = make_settings(tmp_path, map="osm", tomtom_api_key="tt-key")
+    with TestClient(create_app(settings, http=httpx.Client(transport=httpx.MockTransport(tomtom)))) as client:
+        assert client.get("/app-config").json() == {"map": "osm", "traffic_tiles": True}
+        trip = client.post("/route", json={"origin": ORIGIN, "destination": DESTINATION}).json()
+        first = client.get("/traffic-tiles/12/1047/1504.png")
+        again = client.get("/traffic-tiles/12/1047/1504.png")
+        assert client.get("/traffic-tiles/3/9/0.png").status_code == 404  # no such tile at zoom 3
+        health = client.get("/health").json()["road_events"]
+
+    assert trip["road_events_source"] == "tomtom"  # the WZDx feed is unreachable here, and there's no 511 key
+    (closed,) = trip["road_events"]  # Main St, both ways: one closure, drawn once
+    assert closed["source"] == "tomtom" and "both directions" in closed["description"]
+    assert all(not route["features"]["closures"] for route in trip["plan"]["candidates"])
+    assert (first.status_code, first.headers["content-type"], first.content) == (200, "image/png", b"\x89PNG traffic")
+    assert again.content == first.content and "tt-key" not in first.text
+    incidents, tile = tomtom.requests  # one each: the second tile came from what the server kept
+    assert incidents.url.params["key"] == tile.url.params["key"] == "tt-key"
+    assert tile.url.path == "/traffic/map/4/tile/flow/relative0/12/1047/1504.png"
+    assert (health["tomtom_requests_today"], health["tomtom_tiles_today"]) == (1, 1)
+
+
+def test_road_events_are_matched_to_the_map_before_the_first_trip(tmp_path, google):
+    tomtom = FakeTomTom(main_st_closed_both_ways(), google)
+    settings = make_settings(tmp_path, map="osm", tomtom_api_key="tt-key")
+    with TestClient(create_app(settings, http=httpx.Client(transport=httpx.MockTransport(tomtom)))) as client:
+        engine = client.app.state.engine
+        assert engine._snapped == {}  # the test map covers no named area, so startup had nothing to do
+        graph = engine.graph
+        graph.bbox = BBox(min(graph.lat), min(graph.lng), max(graph.lat), max(graph.lng))
+        engine.warm_up()
+    assert len(engine._snapped) == 1  # Main St's closure, both ways, matched once for every trip to come
+
+
+def test_tomtom_stays_off_the_google_map(tmp_path, google):
+    tomtom = FakeTomTom(main_st_closed_both_ways(), google)
+    settings = make_settings(tmp_path, tomtom_api_key="tt-key")
+    with TestClient(create_app(settings, http=httpx.Client(transport=httpx.MockTransport(tomtom)))) as client:
+        trip = client.post("/route", json={"origin": ORIGIN, "destination": DESTINATION, "road_events": "tomtom"}).json()
+        assert client.get("/traffic-tiles/12/1047/1504.png").status_code == 404
+    assert (trip["road_events_source"], trip["road_events"], tomtom.requests) == (None, [], [])
+
+
+def test_an_access_code_guards_the_traffic_map_too(tmp_path, google):
+    tomtom = FakeTomTom([], google)
+    settings = make_settings(tmp_path, map="osm", tomtom_api_key="tt-key", access_code="expo-2026")
+    with TestClient(create_app(settings, http=httpx.Client(transport=httpx.MockTransport(tomtom)))) as client:
+        assert client.get("/traffic-tiles/12/1047/1504.png").status_code == 401
+        assert client.get("/traffic-tiles/12/1047/1504.png?code=expo-2026").status_code == 200
+    assert len(tomtom.requests) == 1

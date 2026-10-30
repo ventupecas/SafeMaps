@@ -8,20 +8,23 @@
 //   view.line(points, style)              { color, weight, opacity, dashed } -> { front(on), remove() }
 //   view.marker(point, element, options)  { title, zIndex } -> { move(point), remove() }
 //   view.fit(points), view.panTo(point), view.setZoom(zoom)
-//   view.traffic(on), view.hasTraffic     Google's traffic layer only
+//   view.traffic(on), view.hasTraffic     a traffic layer, when the map has one
 //   await view.search(container, placeholder, onPick(place))   place search in a box
 //
 // Points are { lat, lng }. Google's terms don't allow its results on another
-// map, so the OpenStreetMap page never loads Google at all.
+// map, so the OpenStreetMap page never loads Google at all. Its traffic layer
+// is TomTom's, served through our server (trafficTiles), which holds the key.
 
 const LEAFLET = "https://unpkg.com/leaflet@1.9.4/dist/";
 const OSM_TILES = "https://tile.openstreetmap.org/{z}/{x}/{y}.png";
 const OSM_CREDIT = '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors';
+const TOMTOM_CREDIT = 'Traffic &copy; <a href="https://www.tomtom.com">TomTom</a>';
 const PHOTON = "https://photon.komoot.io/api/";
 const SEARCH_BIAS = { lat: 43.0389, lng: -87.9065 }; // prefer places around Milwaukee
 
-export function createMapView(kind, { mapsApiKey, mapId, onAuthFailure } = {}) {
-  return kind === "osm" ? new OsmView() : new GoogleView(mapsApiKey, mapId, onAuthFailure);
+// trafficTiles: the OpenStreetMap map's traffic layer, a tile URL template ({z}/{x}/{y}); none means no layer.
+export function createMapView(kind, { mapsApiKey, mapId, onAuthFailure, trafficTiles = null } = {}) {
+  return kind === "osm" ? new OsmView(trafficTiles) : new GoogleView(mapsApiKey, mapId, onAuthFailure);
 }
 
 // ---- Google
@@ -152,7 +155,11 @@ class GoogleView {
 // ---- OpenStreetMap (Leaflet)
 
 class OsmView {
-  hasTraffic = false;
+  constructor(trafficTiles) {
+    this.trafficTiles = trafficTiles;
+    this.hasTraffic = Boolean(trafficTiles);
+    this.trafficLayer = null;
+  }
 
   async load() {
     const css = document.createElement("link");
@@ -211,7 +218,13 @@ class OsmView {
     this.map.setZoom(zoom);
   }
 
-  traffic() {}
+  // TomTom's traffic map over the streets: green, orange and red by speed. Routes stay on top.
+  traffic(on) {
+    if (!this.trafficTiles) return;
+    this.trafficLayer ||= L.tileLayer(this.trafficTiles, { maxZoom: 19, opacity: 0.85, attribution: TOMTOM_CREDIT });
+    if (on) this.trafficLayer.addTo(this.map);
+    else this.trafficLayer.remove();
+  }
 
   // Place search through Photon, built on OpenStreetMap data (free, fair use).
   async search(container, placeholder, onPick) {

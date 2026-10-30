@@ -1,3 +1,5 @@
+from dataclasses import replace
+
 import pytest
 
 from app.driving_side import DrivingSide
@@ -5,9 +7,9 @@ from app.features import TurnContext, extract_features
 from app.geo import midpoint
 from app.hotspots import CrashHotspots
 from app.models import ScoringProfile
-from app.road_events import RoadEvent
+from app.road_events import MAX_SLOWDOWN, RoadEvent
 from app.roadgraph import RoadGraph, build_graph
-from app.router import MAX_OVERLAP, OutsideGraphError, Router
+from app.router import JAM_FACTOR, MAX_OVERLAP, OutsideGraphError, Router
 from tests.osm_factory import MEDIAN_HALF_LNG, divided_road, grid_city, junction, point
 
 FASTEST = ScoringProfile(busy_crossing_weight=0, hotspot_crossing_weight=0, fuel_weight=0)
@@ -219,6 +221,20 @@ def test_workers_on_site_make_a_lane_closure_cost_more():
     with_empty = router._path_cost(list(path.edges), router._costs(FASTEST, [empty], keep=()))
     with_crew = router._path_cost(list(path.edges), router._costs(FASTEST, [crew], keep=()))
     assert plain < with_empty < with_crew
+
+
+def test_a_jam_given_as_minutes_of_delay_slows_its_stretch_by_that_much():
+    graph = build_graph(grid_city().osm.elements)
+    router = Router(graph)
+    stretch = (point(1, 2), point(2, 2))  # 2 Ave northbound
+    edges = router.event_edges(RoadEvent("tomtom", "jam", stretch, along=True))
+    usual_s = sum(graph.time_s[edge] for edge in edges)
+    jam = RoadEvent("tomtom", "jam", stretch, along=True, delay_min=usual_s / 60)  # twice its usual time
+    plain = router._costs(FASTEST, [], keep=()).edges
+    jammed = router._costs(FASTEST, [jam], keep=()).edges
+    assert edges and all(jammed[edge] == pytest.approx(2 * plain[edge]) for edge in edges)
+    assert router._slowdown(replace(jam, delay_min=600), edges) == MAX_SLOWDOWN
+    assert router._slowdown(replace(jam, delay_min=0), edges) == JAM_FACTOR  # no measure: the typical jam
 
 
 def test_a_railroad_crossing_is_driven_around_when_there_is_a_fair_alternative():

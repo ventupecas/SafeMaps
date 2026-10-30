@@ -12,7 +12,8 @@ from dotenv import load_dotenv
 from app.cache import CacheMode
 
 BACKEND_DIR = Path(__file__).resolve().parent.parent
-ROAD_EVENT_SOURCES = ("wzdx", "wi511", "google", "apify")
+ROAD_EVENT_SOURCES = ("wzdx", "wi511", "tomtom", "google", "apify")
+DEFAULT_ROAD_EVENT_SOURCES = "wzdx+wi511+tomtom,google"
 WZDX_FEED_URL = "https://511wi.gov/api/wzdx"
 
 
@@ -32,10 +33,15 @@ class Settings:
     cors_origins: tuple[str, ...] = ()  # browser origins allowed to call the API besides localhost
     # Road events (closures, lane closures, jams): sources in order of preference,
     # the later ones backups; "a+b" uses a and b together. See app.road_events.
-    road_event_sources: tuple[str, ...] = ("wzdx+wi511", "google")
+    road_event_sources: tuple[str, ...] = tuple(DEFAULT_ROAD_EVENT_SOURCES.split(","))
     wzdx_url: str = WZDX_FEED_URL
     wzdx_file: Path | None = None  # a saved copy of the feed to read instead, e.g. for an offline demo
     wi511_api_key: str | None = None
+    # TomTom's traffic, for the OpenStreetMap map: incidents for routing (requests per day) and the
+    # traffic map's tiles (per day). The free plan has 2,500 and 200,000 a month.
+    tomtom_api_key: str | None = None
+    tomtom_daily_requests: int = 80
+    tomtom_daily_tiles: int = 6_000
     apify_token: str | None = None
     apify_daily_tiles: int = 300  # traffic tiles per day the paid Apify source may fetch
     # When set, route requests must send it (X-Access-Code): for a demo shared over a public link.
@@ -67,7 +73,7 @@ class Settings:
             raise ValueError("ROUTES_DAILY_LIMIT must be 0 (no cap) or more")
         sources = tuple(
             "+".join(part.strip() for part in group.split("+") if part.strip())
-            for group in (os.getenv("ROUTES_ROAD_EVENT_SOURCES") or "wzdx+wi511,google").lower().split(",")
+            for group in (os.getenv("ROUTES_ROAD_EVENT_SOURCES") or DEFAULT_ROAD_EVENT_SOURCES).lower().split(",")
             if group.strip()
         )
         unknown = [part for group in sources for part in group.split("+") if part not in ROAD_EVENT_SOURCES]
@@ -81,6 +87,10 @@ class Settings:
         apify_daily_tiles = int(os.getenv("ROUTES_APIFY_DAILY_TILES") or 300)
         if apify_daily_tiles < 0:
             raise ValueError("ROUTES_APIFY_DAILY_TILES must be 0 or more")
+        tomtom_daily_requests = int(os.getenv("ROUTES_TOMTOM_DAILY_REQUESTS") or 80)
+        tomtom_daily_tiles = int(os.getenv("ROUTES_TOMTOM_DAILY_TILES") or 6_000)
+        if tomtom_daily_requests < 0 or tomtom_daily_tiles < 0:
+            raise ValueError("ROUTES_TOMTOM_DAILY_REQUESTS and ROUTES_TOMTOM_DAILY_TILES must be 0 or more")
 
         return cls(
             google_maps_api_key=os.getenv("GOOGLE_MAPS_API_KEY") or None,
@@ -99,6 +109,9 @@ class Settings:
             wzdx_url=os.getenv("ROUTES_WZDX_URL") or WZDX_FEED_URL,
             wzdx_file=_backend_path(wzdx_file) if wzdx_file else None,
             wi511_api_key=os.getenv("WI511_API_KEY") or None,
+            tomtom_api_key=os.getenv("TOMTOM_API_KEY") or None,
+            tomtom_daily_requests=tomtom_daily_requests,
+            tomtom_daily_tiles=tomtom_daily_tiles,
             apify_token=os.getenv("APIFY_TOKEN") or None,
             apify_daily_tiles=apify_daily_tiles,
             access_code=os.getenv("ROUTES_ACCESS_CODE") or None,

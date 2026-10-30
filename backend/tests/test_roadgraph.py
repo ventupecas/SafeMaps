@@ -2,7 +2,7 @@ from dataclasses import replace
 
 import pytest
 
-from app.geo import haversine_m, midpoint
+from app.geo import destination_point, haversine_m, initial_bearing_deg, midpoint
 from app.road_events import RoadEvent
 from app.roadgraph import (
     DEFAULT_SPEED_FACTOR,
@@ -339,3 +339,11 @@ def test_a_traffic_segment_is_matched_waypoint_by_waypoint():
     jam = RoadEvent("wi511", "jam", waypoints, along=True, category="traffic")
     followed = [((1, 0), (1, 1)), ((1, 1), (1, 2)), ((1, 2), (2, 2))]
     assert graph.event_edges(jam) == {edge_between(graph, a, b) for a, b in followed}
+
+
+def test_a_short_line_drawn_with_many_points_is_matched_from_its_ends():
+    graph = build_graph(grid_city().osm.elements)
+    # 48 m of Main St in nine points, as TomTom draws a short closure: no two of them a waypoint apart.
+    east = initial_bearing_deg(point(1, 1), point(1, 2))
+    line = tuple(destination_point(midpoint(point(1, 1), point(1, 2)), east, 6 * k) for k in range(9))
+    assert graph.event_edges(RoadEvent("tomtom", "closed", line, along=True)) == {edge_between(graph, (1, 1), (1, 2))}
