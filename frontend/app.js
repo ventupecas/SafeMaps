@@ -31,7 +31,15 @@ const NAV = {
   announceFarM: 400, // spoken directions: "In a quarter mile, ..." this far before a turn
   announceNearM: 60, // and the turn itself this close
 };
-const COLORS = { winner: "#0b7a53", standard: "#4a5a6a", alternative: "#a9b2bc", closed: "#202124", lanes: "#e37400" };
+const COLORS = {
+  winner: "#0b7a53",
+  standard: "#4a5a6a",
+  alternative: "#a9b2bc",
+  closed: "#202124",
+  lanes: "#e37400",
+  slow: "#f2a600",
+  jam: "#d93025",
+};
 // Where closures and slowdowns came from, by the server's source names.
 const EVENT_SOURCES = {
   wzdx: "Wisconsin work zones (WZDx)",
@@ -57,6 +65,8 @@ const state = {
   routeLines: [], // { id, lines: [line handle] }
   turnMarkers: [],
   eventShapes: [], // closures and lane closures drawn on the map
+  trafficEvents: [], // slow and jammed stretches (511 travel times) from the last trip
+  trafficShapes: [], // ...drawn, when "Show traffic" is on and the map has no traffic layer of its own
   plan: null, // the last plan from the server
   paths: {}, // route id -> { points: [{ lat, lng }], cumulative: [m], lengthM, minutes, label }
   activeRouteId: null, // the route being followed: the winner, or one the driver picked
@@ -114,10 +124,10 @@ async function boot() {
 // The OpenStreetMap map has no Google behind it: no live traffic, no traffic layer,
 // and no closure sources that come from Google.
 function useOsmControls() {
-  for (const id of ["live-traffic", "traffic-layer"]) {
-    $(id).checked = false;
-    $(id).closest("label").hidden = true;
-  }
+  $("live-traffic").checked = false;
+  $("live-traffic").closest("label").hidden = true;
+  // "Show traffic" draws the 511 travel times instead of Google's traffic layer.
+  $("traffic-layer").checked = false;
   for (const source of ["google", "apify"]) $("road-events").querySelector(`option[value="${source}"]`).remove();
 }
 
@@ -168,7 +178,8 @@ function wireControls() {
   $("drive").addEventListener("click", () => (state.nav.active ? stopDriving() : startDriving()));
   $("recenter").addEventListener("click", recenter);
   $("traffic-layer").addEventListener("change", (event) => {
-    if (state.view) state.view.traffic(event.target.checked);
+    if (state.view && state.view.hasTraffic) state.view.traffic(event.target.checked);
+    else drawTraffic(); // the OpenStreetMap map: measured 511 travel times
   });
   // A screen wake lock is dropped whenever the page is hidden; take it again on return.
   document.addEventListener("visibilitychange", () => {
@@ -204,6 +215,8 @@ function clearAll() {
     $(`${kind}-picked`).textContent = "";
   }
   clearRoutes();
+  state.trafficEvents = [];
+  drawTraffic();
   state.plan = null;
   $("results").replaceChildren();
   $("drive").hidden = true;
@@ -310,7 +323,9 @@ function showTrip(trip, { fit = true } = {}) {
   clearRoutes();
   drawRoutes(plan, fit);
   drawRiskyTurns(plan.winner);
-  drawRoadEvents(trip.road_events);
+  drawRoadEvents(trip.road_events.filter((event) => !isTraffic(event)));
+  state.trafficEvents = trip.road_events.filter(isTraffic);
+  drawTraffic();
 
   const credit = $("osm-credit");
   credit.textContent = trip.attribution.join(" · ");
@@ -370,12 +385,28 @@ function roadEventsLine(trip) {
   // Sources used together arrive joined with "+".
   const used = trip.road_events_source.split("+").map((name) => EVENT_SOURCES[name] || name).join(" and ");
   // A closure affecting both directions arrives as one event per direction.
-  const shown = new Set(trip.road_events.map((event) => `${event.kind}|${event.description}`)).size;
+  const closures = trip.road_events.filter((event) => !isTraffic(event));
+  const shown = new Set(closures.map((event) => `${event.kind}|${event.description}`)).size;
   const counted = shown ? `; ${shown} closure${shown === 1 ? "" : "s"} nearby` : "";
   return `Closures and slowdowns from ${used}${unavailable}${counted}.`;
 }
 
 // Closed roads in black, lane closures in orange, with a dot to hover for the details.
+function isTraffic(event) {
+  return event.kind === "slow" || event.kind === "jam";
+}
+
+// Measured traffic (511 travel times): orange where slow, red where jammed, under "Show traffic".
+function drawTraffic() {
+  for (const shape of state.trafficShapes) shape.remove();
+  state.trafficShapes = [];
+  if (!state.view || state.view.hasTraffic || !$("traffic-layer").checked) return;
+  for (const event of state.trafficEvents) {
+    const color = event.kind === "jam" ? COLORS.jam : COLORS.slow;
+    state.trafficShapes.push(state.view.line(decodePolyline(event.path), { color, weight: 4, opacity: 0.85, zIndex: 3 }));
+  }
+}
+
 function drawRoadEvents(events) {
   for (const event of events) {
     const path = decodePolyline(event.path);

@@ -96,7 +96,12 @@ _WZDX_KINDS: dict[str, EventKind] = {
 }
 
 WI511_EVENTS_URL = "https://511wi.gov/api/v2/get/event"
+WI511_TRAVEL_TIMES_URL = "https://511wi.gov/api/v2/get/traveltimes"
 WI511_REFRESH = timedelta(minutes=5)
+# 511 travel times: a segment this much slower than normal is slow, or jammed.
+SLOW_RATIO = 1.25
+JAM_RATIO = 2.0
+MAX_SLOWDOWN = 6.0  # above this the reading is more likely a detour sign's time than traffic
 _WI511_CATEGORIES = {"roadwork": "roadwork", "accidentsAndIncidents": "incident", "closures": "closure"}
 _COMPASS = {
     "north": 0.0, "northbound": 0.0, "east": 90.0, "eastbound": 90.0,
@@ -130,6 +135,13 @@ class RoadEvent:
     ramp_toward: float | None = None  # for a freeway-to-freeway ramp: the compass direction of the freeway it joins
     workers: bool = False  # workers on site now (WZDx worker_presence)
     speed_limit_kmh: float | None = None  # a reduced speed limit through it
+    # Measured traffic (511 travel times): how many times slower than normal, and the minutes lost over the stretch.
+    slowdown: float | None = None
+    delay_min: float = 0.0
+
+    def geometry_key(self) -> tuple[Any, ...]:
+        """What decides where an event lies on the map: the same for every refresh of the same stretch."""
+        return (self.path, self.direction, self.along, self.road, self.ramp_road, self.ramp_toward)
 
 
 class EventSourceError(RuntimeError):
@@ -338,7 +350,12 @@ def _iso_time(value: Any) -> datetime | None:
 
 
 class Wi511Feed:
-    """Wisconsin DOT's 511 events: closures and lane closures, statewide, refreshed at most every WI511_REFRESH."""
+    """Wisconsin DOT's 511: closures and lane closures, plus measured travel times, refreshed at most every WI511_REFRESH.
+
+    Travel times cover the freeways and main highways: each slow or jammed
+    segment becomes a "slow" or "jam" event with its measured slowdown, so the
+    router has live traffic without Google.
+    """
 
     name = "wi511"
 
@@ -364,8 +381,22 @@ class Wi511Feed:
         return in_area(self._events, area)
 
     def _fetch(self) -> list[RoadEvent]:
+        items = self._get(WI511_EVENTS_URL)
+        now = self._now()
+        events = [event for item in items if (event := _wi511_event(item, now)) is not None]
+        logger.info("511WI: %d of %d events affect lanes", len(events), len(items))
         try:
-            response = self._http.get(WI511_EVENTS_URL, params={"key": self._key, "format": "json"}, timeout=20.0)
+            segments = self._get(WI511_TRAVEL_TIMES_URL)
+        except EventSourceError as exc:
+            logger.warning("511WI travel times unavailable: %s", exc)  # closures still count
+            return events
+        traffic = [event for item in segments if (event := _wi511_traffic(item)) is not None]
+        logger.info("511WI: %d of %d travel time segments are slow", len(traffic), len(segments))
+        return events + traffic
+
+    def _get(self, url: str) -> list[Any]:
+        try:
+            response = self._http.get(url, params={"key": self._key, "format": "json"}, timeout=20.0)
         except httpx.HTTPError as exc:
             raise EventSourceError(f"couldn't reach 511WI: {type(exc).__name__}") from None  # the URL holds the key
         if response.status_code in (401, 403):
@@ -378,11 +409,36 @@ class Wi511Feed:
             data = response.json()
         except ValueError:
             raise EventSourceError("511WI sent something that isn't JSON") from None
-        items = data if isinstance(data, list) else data.get("events") or data.get("Events") or []
-        now = self._now()
-        events = [event for item in items if (event := _wi511_event(item, now)) is not None]
-        logger.info("511WI: %d of %d events affect lanes", len(events), len(items))
-        return events
+        return data if isinstance(data, list) else data.get("events") or data.get("Events") or []
+
+
+def _wi511_traffic(item: Mapping[str, Any]) -> RoadEvent | None:
+    """A slow or jammed travel time segment as an event along its waypoints; None in free flow."""
+    try:
+        normal, current = float(item["NormalTime"]), float(item["CurrentTime"])
+    except (KeyError, TypeError, ValueError):
+        return None
+    if normal <= 0 or current < normal * SLOW_RATIO or current - normal < 1:
+        return None
+    try:
+        path = tuple((float(w["Latitude"]), float(w["Longitude"])) for w in item.get("Waypoints") or [])
+        if len(path) < 2:
+            path = ((float(item["StartLatitude"]), float(item["StartLongitude"])),
+                    (float(item["EndLatitude"]), float(item["EndLongitude"])))  # fmt: skip
+    except (KeyError, TypeError, ValueError):
+        return None
+    slowdown = min(current / normal, MAX_SLOWDOWN)
+    description = str(item.get("Description") or item.get("RoadwayName") or "").strip()
+    return RoadEvent(
+        source="wi511",
+        kind="jam" if slowdown >= JAM_RATIO else "slow",
+        path=path,
+        along=True,  # waypoints run from the segment's start to its end
+        description=f"{description}: {current:g} min now, usually {normal:g}"[:300],
+        category="traffic",
+        slowdown=slowdown,
+        delay_min=min(current - normal, normal * (MAX_SLOWDOWN - 1)),
+    )
 
 
 def _wi511_event(item: Mapping[str, Any], now: float) -> RoadEvent | None:
@@ -645,19 +701,7 @@ def count_on_route(points: Sequence[Point], events: Iterable[RoadEvent]) -> tupl
     """(closures, lane closures, lane closures with workers present) a route drives through, the way their traffic goes."""
     if len(points) < 2:
         return 0, 0, 0
-    # A quick box test first: a trip can have a hundred work zones around it.
-    margin = EVENT_MATCH_M / 111_320.0 * 2
-    south, north = min(p[0] for p in points) - margin, max(p[0] for p in points) + margin
-    west, east = min(p[1] for p in points) - margin * 1.5, max(p[1] for p in points) + margin * 1.5
-    relevant = [
-        event
-        for event in events
-        if event.kind in ("closed", "lanes")
-        and min(p[0] for p in event.path) <= north
-        and max(p[0] for p in event.path) >= south
-        and min(p[1] for p in event.path) <= east
-        and max(p[1] for p in event.path) >= west
-    ]
+    relevant = _near(points, [event for event in events if event.kind in ("closed", "lanes")])
     if not relevant:
         return 0, 0, 0
     route = _RouteIndex(points)
@@ -670,6 +714,32 @@ def count_on_route(points: Sequence[Point], events: Iterable[RoadEvent]) -> tupl
                 lane_closures += 1
                 with_workers += event.workers
     return closures, lane_closures, with_workers
+
+
+def delay_on_route(points: Sequence[Point], events: Iterable[RoadEvent]) -> float:
+    """Minutes of measured traffic delay a route picks up: each slow segment's delay, for the share of it driven."""
+    if len(points) < 2:
+        return 0.0
+    traffic = _near(points, [event for event in events if event.delay_min > 0 and len(event.path) > 1])
+    if not traffic:
+        return 0.0
+    route = _RouteIndex(points)
+    return sum(event.delay_min * route.share_along(event) for event in traffic)
+
+
+def _near(points: Sequence[Point], events: Iterable[RoadEvent]) -> list[RoadEvent]:
+    """The events whose box overlaps the route's: a quick test first, as a trip can have a hundred around it."""
+    margin = EVENT_MATCH_M / 111_320.0 * 2
+    south, north = min(p[0] for p in points) - margin, max(p[0] for p in points) + margin
+    west, east = min(p[1] for p in points) - margin * 1.5, max(p[1] for p in points) + margin * 1.5
+    return [
+        event
+        for event in events
+        if min(p[0] for p in event.path) <= north
+        and max(p[0] for p in event.path) >= south
+        and min(p[1] for p in event.path) <= east
+        and max(p[1] for p in event.path) >= west
+    ]
 
 
 class _RouteIndex:
@@ -720,6 +790,17 @@ class _RouteIndex:
                 run = misses = 0
             longest = max(longest, run)
         return longest * spacing >= min(EVENT_ON_ROUTE_M, path_length_m(event.path) / 2)
+
+    def share_along(self, event: RoadEvent) -> float:
+        """The share of an event's stretch the route drives, the way its traffic goes."""
+        samples = densify(event.path, EVENT_MATCH_M / 2)
+        matched = 0
+        for i, point in enumerate(samples):
+            a, b = (point, samples[i + 1]) if i + 1 < len(samples) else (samples[i - 1], point)
+            line = initial_bearing_deg(a, b)
+            if any(carries(bearing, line, event.direction, event.along) for bearing in self.bearings_near(point, ON_ROUTE_M)):
+                matched += 1
+        return matched / len(samples)
 
     def _cell(self, point: Point) -> tuple[int, int]:
         return math.floor(point[0] / self.cell_deg), math.floor(point[1] / self.cell_deg)

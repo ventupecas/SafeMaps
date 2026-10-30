@@ -330,3 +330,12 @@ def test_a_map_built_before_hazards_still_loads(tmp_path):
         json.dump(data, handle)
     graph = RoadGraph.load(tmp_path / "old.json.gz")
     assert graph.rail_crossings == [0] * graph.edge_count and not any(graph.school_zone)
+
+
+def test_a_traffic_segment_is_matched_waypoint_by_waypoint():
+    graph = build_graph(grid_city().osm.elements)
+    # Along Main St, then up 2 Ave: a few waypoints, as 511 travel times give them.
+    waypoints = (point(1, 0), point(1, 1), point(1, 2), midpoint(point(1, 2), point(2, 2)), point(2, 2))
+    jam = RoadEvent("wi511", "jam", waypoints, along=True, category="traffic")
+    followed = [((1, 0), (1, 1)), ((1, 1), (1, 2)), ((1, 2), (2, 2))]
+    assert graph.event_edges(jam) == {edge_between(graph, a, b) for a, b in followed}

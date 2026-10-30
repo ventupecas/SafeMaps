@@ -27,7 +27,8 @@ from app.geo import Point, decode_polyline
 from app.hotspots import CrashHotspots
 from app.models import CandidateRoute, LatLng, RoutePlan, ScoredRoute, ScoringProfile
 from app.pricing import design_match, price_route
-from app.road_events import RoadEvent, jams_on_routes
+from app.fuel import CONGESTION_L_PER_HOUR
+from app.road_events import RoadEvent, delay_on_route, jams_on_routes
 from app.roadgraph import RoadGraph
 from app.router import OutsideGraphError, RoutedPath, Router
 from app.routes_client import RoutesApiError
@@ -365,6 +366,19 @@ def _candidate(
 ) -> CandidateRoute:
     # Only the plain request's default counts. Other requests label their own default.
     google_default = source == "google" and "DEFAULT_ROUTE" in route.get("routeLabels", [])
+    features = extract_features(route, context)
+    if not live_traffic and context.events:
+        # No live traffic in these times: add the delays measured on the slow
+        # stretches the route drives (511 travel times), and the fuel they burn.
+        delay = delay_on_route(decode_polyline(route["polyline"]["encodedPolyline"]), context.events)
+        if delay > 0:
+            features = features.model_copy(
+                update={
+                    "duration_min": features.duration_min + delay,
+                    "traffic_delay_min": features.traffic_delay_min + delay,
+                    "fuel_l": features.fuel_l + delay / 60 * CONGESTION_L_PER_HOUR,
+                }
+            )
     return CandidateRoute(
         id=candidate_id,
         source=source,
@@ -374,6 +388,6 @@ def _candidate(
         is_standard=standard or google_default,
         live_traffic=live_traffic,
         design_match=design_match,
-        features=extract_features(route, context),
+        features=features,
         maneuvers=directions(route, context),
     )

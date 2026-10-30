@@ -17,6 +17,8 @@ from app.road_events import (
     WzdxFeed,
     collect,
     count_on_route,
+    delay_on_route,
+    MAX_SLOWDOWN,
     _ramp_road,
     _road_kind,
     jams_on_routes,
@@ -83,8 +85,9 @@ def test_wi511_turns_closures_and_lane_closures_into_events():
     assert (closed.kind, closed.direction, len(closed.path)) == ("closed", 90.0, 2)
     assert (lanes.kind, lanes.direction, len(lanes.path)) == ("lanes", None, 1)
     assert lanes.description.startswith("I-94: Right lane closed")
-    (sent,) = requests
-    assert sent.url.params["key"] == "secret-key" and sent.url.params["format"] == "json"
+    events_request, travel_times_request = requests
+    assert events_request.url.path == "/api/v2/get/event" and travel_times_request.url.path == "/api/v2/get/traveltimes"
+    assert events_request.url.params["key"] == "secret-key" and events_request.url.params["format"] == "json"
 
 
 def test_wi511_prefers_the_encoded_stretch():
@@ -99,10 +102,10 @@ def test_wi511_is_fetched_at_most_every_five_minutes():
     feed.events(METRO)
     clock.now = 200
     feed.events(METRO)
-    assert len(requests) == 1
+    assert len(requests) == 2  # events and travel times, once
     clock.now = 400
     feed.events(METRO)
-    assert len(requests) == 2
+    assert len(requests) == 4
 
 
 def test_wi511_errors_never_show_the_key():
@@ -385,3 +388,45 @@ def test_511_roadwork_closures_are_known_as_roadwork_and_by_their_road():
     roadwork, crash = feed.events(METRO)
     assert (roadwork.category, roadwork.road, roadwork.ramp_toward) == ("roadwork", "off-ramp", 270.0)
     assert crash.category == "incident"
+
+
+def travel_time(normal: float, current: float, **fields) -> dict:
+    """A 511WI travel time segment heading east along a 2 km stretch of road downtown."""
+    waypoints = [destination_point(DOWNTOWN, 90, metres) for metres in (0, 700, 1400, 2000)]
+    item = {
+        "Id": "STOC-Milwaukee::1",
+        "RoadwayName": "I-94 ",
+        "Description": "I-94 EB Hawley Rd to 35th St",
+        "Distance": 1.2,
+        "NormalTime": normal,
+        "CurrentTime": current,
+        "Delay": current - normal,
+        "Waypoints": [{"RoadwayName": "I-94 East", "Direction": "E", "Latitude": lat, "Longitude": lng} for lat, lng in waypoints],
+    }
+    return {**item, **fields}
+
+
+def test_wi511_travel_times_become_slowdowns_without_google():
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        if request.url.path.endswith("traveltimes"):
+            return httpx.Response(200, json=[travel_time(4, 4), travel_time(4, 6), travel_time(4, 12), travel_time(2, 30)])
+        return httpx.Response(200, json=[])
+
+    feed = Wi511Feed("secret-key", httpx.Client(transport=httpx.MockTransport(handler)), clock=Clock(), now=lambda: NOW)
+    slow, jam, extreme = feed.events(METRO)  # free flow (4 -> 4 min) is left out
+    assert (slow.kind, slow.slowdown, slow.delay_min, slow.along, len(slow.path)) == ("slow", 1.5, 2, True, 4)
+    assert (jam.kind, jam.slowdown, jam.category) == ("jam", 3.0, "traffic")
+    assert extreme.slowdown == MAX_SLOWDOWN and extreme.delay_min == 2 * (MAX_SLOWDOWN - 1)  # capped
+    assert jam.description == "I-94 EB Hawley Rd to 35th St: 12 min now, usually 4"
+
+
+def test_a_route_picks_up_the_delay_of_the_slow_stretch_it_drives():
+    route = straight_east(2_000)
+    jam = RoadEvent("wi511", "jam", tuple(route), along=True, slowdown=3.0, delay_min=8.0)
+    assert delay_on_route(route, [jam]) == pytest.approx(8.0, abs=0.5)
+    half = route[: len(route) // 2 + 1]
+    assert delay_on_route(half, [jam]) == pytest.approx(4.0, abs=0.8)
+    assert delay_on_route(list(reversed(route)), [jam]) == 0.0  # the other direction flows freely

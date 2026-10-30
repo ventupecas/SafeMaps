@@ -32,7 +32,7 @@ backend/
     crash_data.py     Downloads fatal crashes (NHTSA FARS) for the crash-prone junction rule
     evaluate.py       Runs 20 Milwaukee trips and writes RESULTS.md: what the engine changes
   data/               Downloaded OSM tiles and built graphs (gitignored)
-  tests/              281 tests, no network needed
+  tests/              284 tests, no network needed
 frontend/
   index.html, app.js, styles.css   The web map: place search, routes drawn and explained, driving mode
   maps.js                          The map underneath: Google's or OpenStreetMap's (ROUTES_MAP)
@@ -108,7 +108,7 @@ Until then, the page shows these steps in place of the map. On the page:
 - **`osm`:** an OpenStreetMap map through [Leaflet](https://leafletjs.com), with no Google logo and no Google at all. Google's terms don't allow its results (routes, places, traffic) on another map, so in this mode:
   - **Place search** uses [Photon](https://photon.komoot.io), which is built on OpenStreetMap data.
   - **Our router designs every route.** The "standard route" to compare with is its fastest one.
-  - **There's no live traffic.** Times are the road map's estimates, and Live traffic and Show traffic are hidden.
+  - **Live traffic comes from Wisconsin 511 instead** (with `WI511_API_KEY`): see "511 travel times" below. Google's Live traffic toggle is hidden, and **Show traffic** draws the 511 slowdowns instead of Google's traffic layer.
   - **Still on:** work zones, 511, crash data, school zones and rail crossings.
   - **Keys:** neither Google key is needed, any port works, and the page credits "© OpenStreetMap contributors".
 
@@ -243,6 +243,12 @@ What each kind of event does:
   - **Freeway-to-freeway ramps** ("System Interchange Full Closure on WIS 175 SB at WIS 175 SB TO I-94 WB"): the ramp that leads onto that freeway in that direction, from where it splits from ramps going elsewhere.
   - **No street named:** the nearest such ramp within 300 m.
   - **No ramp found:** the event is left out rather than closing the freeway. This happens where the ramp isn't on the map, for example ramps rebuilt in the I-94 East-West project after the map was downloaded.
+
+**511 travel times: live traffic without Google.** With the 511 key, the `wi511` source also reads 511WI's travel times, at most every 5 minutes. These are the current and normal travel time of about 220 Milwaukee-area segments, mostly freeways and main highways.
+- **Which segments count:** one taking 1.25× its normal time or more is slow, and 2× or more is jammed. Slowdowns are capped at 6×, since higher readings tend to be a detour sign's time rather than traffic.
+- **Router:** it slows each segment by its measured factor, so designs go around jams.
+- **Trip times:** routes not priced with Google's live traffic (the OpenStreetMap map, or Live traffic off) get the measured delay for the share of each slow segment they drive, and the fuel it burns.
+- **Map:** each segment is matched to the road through its waypoints, one to the next. Segments no road matches are left out (about 1 in 5), and the rest draw orange (slow) or red (jammed) under **Show traffic** on the OpenStreetMap map.
 
 **Getting the Wisconsin 511 key** (from 511wi.gov's developer pages):
 1. Create a My 511WI account at <https://511wi.gov/my511/register> and confirm it from the email.

@@ -106,7 +106,7 @@ class GoogleUsage(BaseModel):
 
 
 class RoadEventOut(BaseModel):
-    kind: Literal["closed", "lanes"]
+    kind: Literal["closed", "lanes", "slow", "jam"] = Field(description="slow and jam: measured 511 travel times.")
     source: str
     description: str
     path: str = Field(description="Encoded polyline; a single point when the source gave no stretch.")
@@ -138,7 +138,7 @@ class Engine:
     wi511: Wi511Feed | None = None
     apify: ApifyTraffic | None = None
     _routers: dict[DrivingSide, Router] = field(default_factory=dict)
-    _snapped: dict[RoadEvent, list[RoadEvent]] = field(default_factory=dict)
+    _snapped: dict[tuple[Any, ...], list[RoadEvent]] = field(default_factory=dict)
     _lock: Lock = field(default_factory=Lock)
 
     def snap(self, events: Sequence[RoadEvent]) -> list[RoadEvent]:
@@ -151,14 +151,18 @@ class Engine:
             return list(events)
         snapped: list[RoadEvent] = []
         for event in events:
-            known = self._snapped.get(event)
+            # Remembered by place: a refreshed reading of the same stretch (new travel time) reuses the match.
+            key = event.geometry_key()
+            known = self._snapped.get(key)
             if known is None:
                 known = self.graph.snap_events([event])
+                if event.category == "traffic" and all(s.path == event.path for s in known):
+                    known = []  # no road matched: as a straight line it would only add false delays
                 with self._lock:
                     if len(self._snapped) > 20_000:
                         self._snapped.clear()
-                    self._snapped[event] = known
-            snapped += known
+                    self._snapped[key] = known
+            snapped += [replace(event, path=s.path, direction=s.direction, along=s.along) for s in known]
         return snapped
 
     def routes_client(self) -> RoutesClient:
@@ -361,7 +365,7 @@ def create_app(settings: Settings | None = None, *, http: httpx.Client | None = 
                     kind=event.kind, source=event.source, description=event.description, path=encode_polyline(event.path)
                 )
                 for event in events
-                if event.kind in ("closed", "lanes")
+                if event.kind in ("closed", "lanes") or event.category == "traffic"
             ][:MAX_EVENTS_SHOWN],
         )
 

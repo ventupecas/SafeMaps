@@ -100,6 +100,7 @@ _VEHICLE_SURE_M = 15.0
 # road). A single point matches the nearest road within EVENT_MATCH_M.
 STRETCH_DETOUR = 1.5
 STRETCH_SLACK_M = 500.0
+MAX_WAYPOINTS = 12  # lines with this few points are waypoints, matched one to the next
 SAME_ROAD_M = 5.0  # roads this much farther from a point than the nearest one are other roads
 # Hazards from OSM: a street within SCHOOL_ZONE_M of a school (its center) is in
 # its school zone; freeways never are. A route passes a railroad crossing when
@@ -527,7 +528,26 @@ class RoadGraph:
             ways = [path[::-1]]
         else:
             ways = [path, path[::-1]]
-        return [stretch for way in ways if (stretch := self._stretch(way, event.road))]
+        return [stretch for way in ways if (stretch := self._stretch_through(way, event.road))]
+
+    def _stretch_through(self, path: Sequence[Point], road: str) -> list[int] | None:
+        """A stretch through the path's points in order: piece by piece when they're a few waypoints.
+
+        A long segment given by a handful of waypoints (a 511 travel time
+        "via" another highway) can't be matched from its two ends alone. A
+        detailed line can: matching it point by point would only be slower.
+        """
+        if len(path) <= 2 or len(path) > MAX_WAYPOINTS:
+            return self._stretch(path, road)
+        edges: list[int] = []
+        for a, b in zip(path, path[1:]):
+            if haversine_m(a, b) < SAME_ROAD_M * 6:
+                continue  # two waypoints at one spot
+            piece = self._stretch([a, b], road)
+            if piece is None:
+                return None
+            edges += [edge for edge in piece if not edges or edge != edges[-1]]
+        return edges or None
 
     def _stretch(self, path: Sequence[Point], road: str = "any") -> list[int] | None:
         """The shortest drive from a segment at the path's first point to one at its last, along their direction."""
