@@ -174,7 +174,7 @@ class Router:
         self._moves: dict[int, list[Move]] = {}
         self._steps: dict[int, list[Step]] = {}
         self._crashes: dict[int, float] = {}
-        self._event_edges: dict[RoadEvent, frozenset[int]] = {}
+        self._event_edges: dict[tuple[Any, ...], frozenset[int]] = {}
 
     def routes(
         self,
@@ -394,13 +394,14 @@ class Router:
         return ahead or edges
 
     def event_edges(self, event: RoadEvent) -> frozenset[int]:
-        """The segments a road event lies on, remembered: the same events come back trip after trip."""
-        edges = self._event_edges.get(event)
+        """The segments a road event lies on, remembered by place: the same stretches come back trip after trip."""
+        key = event.geometry_key()
+        edges = self._event_edges.get(key)
         if edges is None:
             if len(self._event_edges) > 10_000:
                 self._event_edges.clear()
             edges = frozenset(self.graph.event_edges(event))
-            self._event_edges[event] = edges
+            self._event_edges[key] = edges
         return edges
 
     def _costs(
@@ -437,8 +438,8 @@ class Router:
                     zone_costs[number] = profile.lane_closure_weight * (
                         WORKERS_PRESENT_FACTOR if event.workers else 1.0
                     )
-                else:
-                    edge_costs[edge] *= JAM_FACTOR if event.kind == "jam" else SLOW_FACTOR
+                else:  # measured slowdowns (511 travel times) where known, else typical ones
+                    edge_costs[edge] *= event.slowdown or (JAM_FACTOR if event.kind == "jam" else SLOW_FACTOR)
         return _Costs(
             profile=profile,
             edges=edge_costs,

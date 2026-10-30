@@ -529,3 +529,52 @@ select:focus-visible,
     grid-template-columns: repeat(2, 1fr);
   }
 }
+
+/* OpenStreetMap map (Leaflet): markers anchored at the bottom middle like Google's, and place search. */
+
+.lf-icon {
+  background: none;
+  border: none;
+}
+
+.lf-anchor {
+  position: absolute;
+  transform: translate(-50%, -100%);
+}
+
+.osm-search {
+  width: 100%;
+  font: inherit;
+  padding: 12px 14px;
+  border: 1px solid var(--text);
+  border-radius: 4px;
+  background: #fff;
+}
+
+.search {
+  position: relative;
+}
+
+.osm-suggestions {
+  position: absolute;
+  z-index: 1000;
+  left: 0;
+  right: 0;
+  margin: 2px 0 0;
+  padding: 4px 0;
+  list-style: none;
+  background: #fff;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
+}
+
+.osm-suggestions li {
+  padding: 8px 12px;
+  cursor: pointer;
+  font-size: 0.9rem;
+}
+
+.osm-suggestions li:hover {
+  background: var(--accent-soft);
+}

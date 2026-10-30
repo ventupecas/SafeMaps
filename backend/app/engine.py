@@ -27,7 +27,8 @@ from app.geo import Point, decode_polyline
 from app.hotspots import CrashHotspots
 from app.models import CandidateRoute, LatLng, RoutePlan, ScoredRoute, ScoringProfile
 from app.pricing import design_match, price_route
-from app.road_events import RoadEvent, jams_on_routes
+from app.fuel import CONGESTION_L_PER_HOUR
+from app.road_events import RoadEvent, delay_on_route, jams_on_routes
 from app.roadgraph import RoadGraph
 from app.router import OutsideGraphError, RoutedPath, Router
 from app.routes_client import RoutesApiError
@@ -35,7 +36,7 @@ from app.scoring import rank_candidates
 
 # A route is left out of the plan when more than this share of it runs along a
 # better-ranked one: on the map it would look like the same route. The winner
-# and Google's default (the baseline the winner is compared with) always stay.
+# and the standard route (the baseline the winner is compared with) always stay.
 MAX_SHARED_WITH_BETTER = 0.7
 
 
@@ -132,6 +133,7 @@ def build_router_candidates(
     heading: int | None = None,
     context: TurnContext | None = None,
     traffic_on_polyline: bool = False,
+    baseline: ScoringProfile | None = None,
 ) -> CandidatePool:
     """Google's suggestions plus our router's designs, all with live traffic when price is True.
 
@@ -150,10 +152,18 @@ def build_router_candidates(
     events are steered around and counted on every route. With
     traffic_on_polyline (and price), Google's suggestions also report their
     slow and jammed stretches: our designs avoid them, and pool.events lists them.
+
+    With a baseline profile, Google isn't asked at all (fetcher may be None,
+    price must be False): the standard route to compare with is our router's
+    best route for the baseline, e.g. the fastest. That's how the
+    OpenStreetMap map runs, since Google's terms don't allow its results there.
     """
     context = context or router.context
     pool = CandidatePool([])
-    _add_google_suggestions(pool, fetcher, context, origin, destination, price, heading, traffic_on_polyline and price)
+    if baseline is None:
+        _add_google_suggestions(pool, fetcher, context, origin, destination, price, heading, traffic_on_polyline and price)
+    else:
+        _add_baseline(pool, router, context, origin, destination, baseline, heading)
     on_offer = [decode_polyline(candidate.encoded_polyline) for candidate in pool.candidates]
     per_profile = alternatives if len(profiles) == 1 else 1
     try:
@@ -176,6 +186,34 @@ def build_router_candidates(
     if not pool.candidates:
         raise NoRouteFoundError(" ".join(pool.notes) or "No route found.")
     return pool
+
+
+def _add_baseline(
+    pool: CandidatePool,
+    router: Router,
+    context: TurnContext,
+    origin: LatLng,
+    destination: LatLng,
+    profile: ScoringProfile,
+    heading: int | None,
+) -> None:
+    """Our router's best route for profile, as the standard route: the baseline without Google."""
+    try:
+        found = router.routes(
+            origin.as_tuple(),
+            destination.as_tuple(),
+            profile,
+            count=1,
+            heading=heading,
+            events=context.events,
+            school_hours=context.school_hours,
+        )
+    except OutsideGraphError as exc:
+        pool.notes.append(f"Standard route skipped: {exc}.")
+        return
+    if found:
+        route = router.to_route_json(found[0])
+        pool.candidates.append(_candidate("standard", "baseline", route, context, live_traffic=False, standard=True))
 
 
 def _add_google_suggestions(
@@ -257,7 +295,7 @@ def plan_from_candidates(candidates: Sequence[CandidateRoute], profile: ScoringP
     kept: list[ScoredRoute] = []
     hidden: dict[str, str] = {}
     for route in ranked:
-        followed = None if not kept or route.is_google_default else _mostly_follows(route, kept, points)
+        followed = None if not kept or route.is_standard else _mostly_follows(route, kept, points)
         if followed is None:
             kept.append(route)
         else:
@@ -324,16 +362,32 @@ def _candidate(
     *,
     live_traffic: bool,
     design_match: float | None = None,
+    standard: bool = False,
 ) -> CandidateRoute:
+    # Only the plain request's default counts. Other requests label their own default.
+    google_default = source == "google" and "DEFAULT_ROUTE" in route.get("routeLabels", [])
+    features = extract_features(route, context)
+    if not live_traffic and context.events:
+        # No live traffic in these times: add the delays measured on the slow
+        # stretches the route drives (511 travel times), and the fuel they burn.
+        delay = delay_on_route(decode_polyline(route["polyline"]["encodedPolyline"]), context.events)
+        if delay > 0:
+            features = features.model_copy(
+                update={
+                    "duration_min": features.duration_min + delay,
+                    "traffic_delay_min": features.traffic_delay_min + delay,
+                    "fuel_l": features.fuel_l + delay / 60 * CONGESTION_L_PER_HOUR,
+                }
+            )
     return CandidateRoute(
         id=candidate_id,
         source=source,
         description=route.get("description", ""),
         encoded_polyline=route["polyline"]["encodedPolyline"],
-        # Only the plain request's default counts. Other requests label their own default.
-        is_google_default=source == "google" and "DEFAULT_ROUTE" in route.get("routeLabels", []),
+        is_google_default=google_default,
+        is_standard=standard or google_default,
         live_traffic=live_traffic,
         design_match=design_match,
-        features=extract_features(route, context),
+        features=features,
         maneuvers=directions(route, context),
     )

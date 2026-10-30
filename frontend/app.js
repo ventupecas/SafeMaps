@@ -2,15 +2,18 @@
 //
 // All routing, scoring and traffic lookups happen in the backend (POST /route).
 // This page only collects the trip, draws what comes back and explains the
-// ranking. The map script is used only for the map and place search.
+// ranking. The map itself is Google's or OpenStreetMap's, as the server says
+// (ROUTES_MAP); maps.js hides which.
 //
 // While driving, the page follows the device's location: it tracks progress
 // along the chosen route, switches to another drawn route if the driver takes
 // it, and asks the server for a new route (starting the way the car is going)
 // after leaving them all.
 //
-// Nothing on the page names the map provider; its own logo and terms on the
-// map, and the credit in the place search list, are required and stay.
+// Nothing on the page names the map provider; Google's logo and terms on its
+// map, and the credits on either map, are required and stay.
+
+import { bearing, createMapView, decodePolyline, distanceM } from "./maps.js";
 
 const MILWAUKEE = { lat: 43.0389, lng: -87.9065 };
 const KM_TO_MI = 0.621371;
@@ -28,7 +31,15 @@ const NAV = {
   announceFarM: 400, // spoken directions: "In a quarter mile, ..." this far before a turn
   announceNearM: 60, // and the turn itself this close
 };
-const COLORS = { winner: "#0b7a53", standard: "#4a5a6a", alternative: "#a9b2bc", closed: "#202124", lanes: "#e37400" };
+const COLORS = {
+  winner: "#0b7a53",
+  standard: "#4a5a6a",
+  alternative: "#a9b2bc",
+  closed: "#202124",
+  lanes: "#e37400",
+  slow: "#f2a600",
+  jam: "#d93025",
+};
 // Where closures and slowdowns came from, by the server's source names.
 const EVENT_SOURCES = {
   wzdx: "Wisconsin work zones (WZDx)",
@@ -46,14 +57,16 @@ const PROFILE_LABELS = {
 };
 
 const state = {
-  map: null,
+  view: null, // the map (see maps.js)
+  mapKind: "google", // or "osm": no Google at all, so no live traffic
   origin: null, // { lat, lng, label, countryCode }
   destination: null,
   pins: { origin: null, destination: null },
-  routeLines: [], // { id, lines: [{ line: google.maps.Polyline, zIndex }] }
+  routeLines: [], // { id, lines: [line handle] }
   turnMarkers: [],
   eventShapes: [], // closures and lane closures drawn on the map
-  trafficLayer: null,
+  trafficEvents: [], // slow and jammed stretches (511 travel times) from the last trip
+  trafficShapes: [], // ...drawn, when "Show traffic" is on and the map has no traffic layer of its own
   plan: null, // the last plan from the server
   paths: {}, // route id -> { points: [{ lat, lng }], cumulative: [m], lengthM, minutes, label }
   activeRouteId: null, // the route being followed: the winner, or one the driver picked
@@ -61,6 +74,7 @@ const state = {
     active: false,
     watchId: null,
     car: null, // the location marker
+    carArrow: null, // its direction-of-travel arrow
     following: true, // the map moves with the car until the driver drags it
     fix: null, // last position
     anchor: null, // where the current heading was measured from
@@ -77,113 +91,84 @@ const $ = (id) => document.getElementById(id);
 
 boot();
 
-function boot() {
+async function boot() {
   loadProfiles();
   wireControls();
 
-  const config = window.ROUTES_CONFIG;
-  if (window.ROUTES_CONFIG_MISSING || !config || !config.mapsApiKey) {
+  try {
+    state.mapKind = (await (await fetch("/app-config")).json()).map;
+  } catch {
+    state.mapKind = "google"; // an older server: it only knew Google's map
+  }
+  const config = window.ROUTES_CONFIG || {};
+  if (state.mapKind === "google" && (window.ROUTES_CONFIG_MISSING || !config.mapsApiKey)) {
     showSetup();
     return;
   }
-  window.initMap = initMap;
-  // The map script calls this when it rejects the key (wrong website, service not enabled, ...).
-  window.gm_authFailure = () =>
-    showSetup("The map key was rejected. Check which websites it allows and that the map service is enabled for it.");
-
-  const params = new URLSearchParams({
-    key: config.mapsApiKey,
-    v: "weekly",
-    loading: "async",
-    libraries: "places,geometry,marker",
-    callback: "initMap",
+  if (state.mapKind === "osm") useOsmControls();
+  state.view = createMapView(state.mapKind, {
+    mapsApiKey: config.mapsApiKey,
+    mapId: config.mapId,
+    onAuthFailure: () =>
+      showSetup("The map key was rejected. Check which websites it allows and that the map service is enabled for it."),
   });
-  const script = document.createElement("script");
-  script.src = `https://maps.googleapis.com/maps/api/js?${params}`;
-  script.async = true;
-  script.onerror = () => showSetup("The map couldn't load. Check the key and your network.");
-  document.head.append(script);
+  try {
+    await state.view.load();
+  } catch (error) {
+    showSetup(error.message);
+    return;
+  }
+  await initMap();
+}
+
+// The OpenStreetMap map has no Google behind it: no live traffic, no traffic layer,
+// and no closure sources that come from Google.
+function useOsmControls() {
+  $("live-traffic").checked = false;
+  $("live-traffic").closest("label").hidden = true;
+  // "Show traffic" draws the 511 travel times instead of Google's traffic layer.
+  $("traffic-layer").checked = false;
+  for (const source of ["google", "apify"]) $("road-events").querySelector(`option[value="${source}"]`).remove();
 }
 
 async function initMap() {
-  state.map = new google.maps.Map($("map"), {
+  await state.view.create($("map"), {
     center: MILWAUKEE,
     zoom: 11,
-    mapId: window.ROUTES_CONFIG.mapId || "DEMO_MAP_ID",
-    mapTypeControl: false,
-    streetViewControl: false,
-    fullscreenControl: false,
+    onClick: (point) => {
+      if (state.nav.active) return; // no accidental trip changes while driving
+      // First click sets the start; after that, clicks move the destination.
+      const kind = state.origin ? "destination" : "origin";
+      setPoint(kind, { ...point, label: null, countryCode: null });
+    },
+    onDragStart: () => {
+      if (!state.nav.active) return;
+      state.nav.following = false; // the driver is looking around; "Re-center" resumes
+      $("recenter").hidden = false;
+    },
   });
-  state.trafficLayer = new google.maps.TrafficLayer();
-  state.map.addListener("click", (event) => {
-    if (state.nav.active) return; // no accidental trip changes while driving
-    // First click sets the start; after that, clicks move the destination.
-    const kind = state.origin ? "destination" : "origin";
-    setPoint(kind, { lat: event.latLng.lat(), lng: event.latLng.lng(), label: null, countryCode: null });
-  });
-  state.map.addListener("dragstart", () => {
-    if (!state.nav.active) return;
-    state.nav.following = false; // the driver is looking around; "Re-center" resumes
-    $("recenter").hidden = false;
-  });
-  await Promise.all([setUpSearch("origin"), setUpSearch("destination")]);
+  await Promise.all(
+    ["origin", "destination"].map((kind) =>
+      state.view.search($(`${kind}-search`), kind === "origin" ? "Where from?" : "Where to?", (place) =>
+        setPoint(kind, place),
+      ),
+    ),
+  );
 }
 
 // ---- Trip input
 
-async function setUpSearch(kind) {
-  const container = $(`${kind}-search`);
-  try {
-    const { PlaceAutocompleteElement } = await google.maps.importLibrary("places");
-    let search;
-    try {
-      search = new PlaceAutocompleteElement({
-        includedRegionCodes: ["us"],
-        locationBias: { center: MILWAUKEE, radius: 50000 }, // prefer places around Milwaukee
-      });
-    } catch (error) {
-      console.warn("Place search options not accepted; using defaults:", error);
-      search = new PlaceAutocompleteElement({});
-    }
-    search.setAttribute("placeholder", kind === "origin" ? "Where from?" : "Where to?");
-    // Current versions fire "gmp-select"; older ones fired "gmp-placeselect".
-    search.addEventListener("gmp-select", (event) => usePlace(kind, event.placePrediction.toPlace()));
-    search.addEventListener("gmp-placeselect", (event) => usePlace(kind, event.place));
-    container.replaceChildren(search);
-  } catch (error) {
-    console.warn("Place search unavailable:", error);
-    container.textContent = "Place search is unavailable. Click the map instead.";
-  }
-}
-
-async function usePlace(kind, place) {
-  await place.fetchFields({ fields: ["location", "displayName", "formattedAddress", "addressComponents"] });
-  const country = (place.addressComponents || []).find((part) => part.types.includes("country"));
-  setPoint(kind, {
-    lat: place.location.lat(),
-    lng: place.location.lng(),
-    label: place.displayName || place.formattedAddress,
-    countryCode: country ? country.shortText : null,
-  });
-}
-
 async function setPoint(kind, point) {
   state[kind] = point;
   $(`${kind}-picked`).textContent = point.label || `${point.lat.toFixed(5)}, ${point.lng.toFixed(5)}`;
-  await placePin(kind, point);
+  placePin(kind, point);
   updateFindButton();
 }
 
-async function placePin(kind, point) {
-  const { AdvancedMarkerElement } = await google.maps.importLibrary("marker");
-  if (state.pins[kind]) state.pins[kind].map = null;
+function placePin(kind, point) {
+  if (state.pins[kind]) state.pins[kind].remove();
   const pin = element("div", { className: `map-pin map-pin--${kind}` }, element("span", {}, kind === "origin" ? "A" : "B"));
-  state.pins[kind] = new AdvancedMarkerElement({
-    map: state.map,
-    position: { lat: point.lat, lng: point.lng },
-    content: pin,
-    title: kind === "origin" ? "Start" : "Destination",
-  });
+  state.pins[kind] = state.view.marker(point, pin, { title: kind === "origin" ? "Start" : "Destination" });
 }
 
 function wireControls() {
@@ -193,7 +178,8 @@ function wireControls() {
   $("drive").addEventListener("click", () => (state.nav.active ? stopDriving() : startDriving()));
   $("recenter").addEventListener("click", recenter);
   $("traffic-layer").addEventListener("change", (event) => {
-    if (state.trafficLayer) state.trafficLayer.setMap(event.target.checked ? state.map : null);
+    if (state.view && state.view.hasTraffic) state.view.traffic(event.target.checked);
+    else drawTraffic(); // the OpenStreetMap map: measured 511 travel times
   });
   // A screen wake lock is dropped whenever the page is hidden; take it again on return.
   document.addEventListener("visibilitychange", () => {
@@ -224,11 +210,13 @@ function clearAll() {
   if (state.nav.active) stopDriving();
   for (const kind of ["origin", "destination"]) {
     state[kind] = null;
-    if (state.pins[kind]) state.pins[kind].map = null;
+    if (state.pins[kind]) state.pins[kind].remove();
     state.pins[kind] = null;
     $(`${kind}-picked`).textContent = "";
   }
   clearRoutes();
+  state.trafficEvents = [];
+  drawTraffic();
   state.plan = null;
   $("results").replaceChildren();
   $("drive").hidden = true;
@@ -335,7 +323,9 @@ function showTrip(trip, { fit = true } = {}) {
   clearRoutes();
   drawRoutes(plan, fit);
   drawRiskyTurns(plan.winner);
-  drawRoadEvents(trip.road_events);
+  drawRoadEvents(trip.road_events.filter((event) => !isTraffic(event)));
+  state.trafficEvents = trip.road_events.filter(isTraffic);
+  drawTraffic();
 
   const credit = $("osm-credit");
   credit.textContent = trip.attribution.join(" · ");
@@ -363,28 +353,28 @@ function showTrip(trip, { fit = true } = {}) {
 }
 
 function drawRoutes(plan, fit) {
-  const { decodePath } = google.maps.geometry.encoding;
-  const bounds = new google.maps.LatLngBounds();
+  const view = state.view;
+  const everywhere = [];
   state.paths = {};
   // Losers first, so the winner is drawn on top.
   const ordered = [...plan.candidates].reverse();
   for (const route of ordered) {
-    const path = decodePath(route.encoded_polyline);
-    path.forEach((point) => bounds.extend(point));
+    const path = decodePolyline(route.encoded_polyline);
+    everywhere.push(...path);
     state.paths[route.id] = followablePath(path, route, plan);
     const isWinner = route.id === plan.winner.id;
     const lines = [];
     if (isWinner) {
-      lines.push(polyline(path, { strokeColor: "#ffffff", strokeWeight: 10, zIndex: 20 }));
-      lines.push(polyline(path, { strokeColor: COLORS.winner, strokeWeight: 6, zIndex: 21 }));
+      lines.push(view.line(path, { color: "#ffffff", weight: 10, zIndex: 20 }));
+      lines.push(view.line(path, { color: COLORS.winner, weight: 6, zIndex: 21 }));
     } else if (isStandard(route)) {
-      lines.push(dashedPolyline(path, COLORS.standard, 10));
+      lines.push(view.line(path, { color: COLORS.standard, dashed: true, zIndex: 10 }));
     } else {
-      lines.push(polyline(path, { strokeColor: COLORS.alternative, strokeWeight: 5, strokeOpacity: 0.8, zIndex: 5 }));
+      lines.push(view.line(path, { color: COLORS.alternative, weight: 5, opacity: 0.8, zIndex: 5 }));
     }
-    state.routeLines.push({ id: route.id, lines: lines.map((line) => ({ line, zIndex: line.get("zIndex") })) });
+    state.routeLines.push({ id: route.id, lines });
   }
-  if (fit && !bounds.isEmpty()) state.map.fitBounds(bounds, 48);
+  if (fit) view.fit(everywhere);
 }
 
 // Which source the closures and slowdowns came from, and which were tried first but unavailable.
@@ -395,43 +385,50 @@ function roadEventsLine(trip) {
   // Sources used together arrive joined with "+".
   const used = trip.road_events_source.split("+").map((name) => EVENT_SOURCES[name] || name).join(" and ");
   // A closure affecting both directions arrives as one event per direction.
-  const shown = new Set(trip.road_events.map((event) => `${event.kind}|${event.description}`)).size;
+  const closures = trip.road_events.filter((event) => !isTraffic(event));
+  const shown = new Set(closures.map((event) => `${event.kind}|${event.description}`)).size;
   const counted = shown ? `; ${shown} closure${shown === 1 ? "" : "s"} nearby` : "";
   return `Closures and slowdowns from ${used}${unavailable}${counted}.`;
 }
 
 // Closed roads in black, lane closures in orange, with a dot to hover for the details.
-async function drawRoadEvents(events) {
-  const { decodePath } = google.maps.geometry.encoding;
-  const { AdvancedMarkerElement } = await google.maps.importLibrary("marker");
+function isTraffic(event) {
+  return event.kind === "slow" || event.kind === "jam";
+}
+
+// Measured traffic (511 travel times): orange where slow, red where jammed, under "Show traffic".
+function drawTraffic() {
+  for (const shape of state.trafficShapes) shape.remove();
+  state.trafficShapes = [];
+  if (!state.view || state.view.hasTraffic || !$("traffic-layer").checked) return;
+  for (const event of state.trafficEvents) {
+    const color = event.kind === "jam" ? COLORS.jam : COLORS.slow;
+    state.trafficShapes.push(state.view.line(decodePolyline(event.path), { color, weight: 4, opacity: 0.85, zIndex: 3 }));
+  }
+}
+
+function drawRoadEvents(events) {
   for (const event of events) {
-    const path = decodePath(event.path);
+    const path = decodePolyline(event.path);
     if (path.length > 1) {
       const color = event.kind === "closed" ? COLORS.closed : COLORS.lanes;
       state.eventShapes.push(
         event.kind === "closed"
-          ? polyline(path, { strokeColor: color, strokeWeight: 7, zIndex: 25 })
-          : dashedPolyline(path, color, 25),
+          ? state.view.line(path, { color, weight: 7, zIndex: 25 })
+          : state.view.line(path, { color, dashed: true, zIndex: 25 }),
       );
     }
     const what = event.kind === "closed" ? "Road closed" : "Lane closure";
-    const marker = new AdvancedMarkerElement({
-      map: state.map,
-      position: path[0],
-      content: element("div", { className: `event-dot event-dot--${event.kind}` }),
-      title: event.description ? `${what}: ${event.description}` : what,
-      zIndex: 26,
-    });
-    state.eventShapes.push({ setMap: (map) => (marker.map = map) });
+    const dot = element("div", { className: `event-dot event-dot--${event.kind}` });
+    const title = event.description ? `${what}: ${event.description}` : what;
+    state.eventShapes.push(state.view.marker(path[0], dot, { title, zIndex: 26 }));
   }
 }
 
 // What following a route needs: its points, the distance to each along it, and its expected time.
-function followablePath(path, route, plan) {
-  const { computeDistanceBetween } = google.maps.geometry.spherical;
-  const points = path.map((point) => ({ lat: point.lat(), lng: point.lng() }));
+function followablePath(points, route, plan) {
   const cumulative = [0];
-  for (let i = 1; i < points.length; i++) cumulative.push(cumulative[i - 1] + computeDistanceBetween(points[i - 1], points[i]));
+  for (let i = 1; i < points.length; i++) cumulative.push(cumulative[i - 1] + distanceM(points[i - 1], points[i]));
   const followable = {
     points,
     cumulative,
@@ -447,32 +444,12 @@ function followablePath(path, route, plan) {
   return followable;
 }
 
-function polyline(path, options) {
-  return new google.maps.Polyline({ map: state.map, path, clickable: false, strokeOpacity: 1, ...options });
-}
-
-function dashedPolyline(path, color, zIndex) {
-  return polyline(path, {
-    strokeOpacity: 0,
-    zIndex,
-    icons: [{ icon: { path: "M 0,-1 0,1", strokeOpacity: 1, strokeColor: color, scale: 3 }, offset: "0", repeat: "14px" }],
-  });
-}
-
-async function drawRiskyTurns(route) {
-  const { AdvancedMarkerElement } = await google.maps.importLibrary("marker");
+function drawRiskyTurns(route) {
   for (const turn of route.features.crossing_turns) {
     if (!(turn.busy || turn.hotspot) || !turn.location) continue;
     const why = turn.hotspot ? "a crash-prone junction" : "a busy junction";
-    state.turnMarkers.push(
-      new AdvancedMarkerElement({
-        map: state.map,
-        position: turn.location,
-        content: element("div", { className: "turn-dot" }),
-        title: `Turn across traffic at ${why}`,
-        zIndex: 30,
-      }),
-    );
+    const dot = element("div", { className: "turn-dot" });
+    state.turnMarkers.push(state.view.marker(turn.location, dot, { title: `Turn across traffic at ${why}`, zIndex: 30 }));
   }
 }
 
@@ -480,7 +457,7 @@ async function drawRiskyTurns(route) {
 function selectRoute(id) {
   state.activeRouteId = id;
   for (const entry of state.routeLines) {
-    for (const { line, zIndex } of entry.lines) line.setOptions({ zIndex: entry.id === id ? zIndex + 100 : zIndex });
+    for (const line of entry.lines) line.front(entry.id === id);
   }
   for (const item of document.querySelectorAll(".route")) {
     item.classList.toggle("route--active", item.dataset.id === id);
@@ -488,9 +465,9 @@ function selectRoute(id) {
 }
 
 function clearRoutes() {
-  for (const entry of state.routeLines) entry.lines.forEach(({ line }) => line.setMap(null));
-  for (const marker of state.turnMarkers) marker.map = null;
-  for (const shape of state.eventShapes) shape.setMap(null);
+  for (const entry of state.routeLines) entry.lines.forEach((line) => line.remove());
+  for (const marker of state.turnMarkers) marker.remove();
+  for (const shape of state.eventShapes) shape.remove();
   state.routeLines = [];
   state.turnMarkers = [];
   state.eventShapes = [];
@@ -592,9 +569,10 @@ function comparedWithStandard(winner, standard) {
   return `Instead of the standard route: ${parts.join(", ") || "a different path"}`;
 }
 
-// The standard route is the one a typical navigation app would suggest (the API calls it the default).
+// The standard route is the one a typical navigation app would suggest: the
+// map provider's own choice, or with the OpenStreetMap map, our fastest route.
 function isStandard(route) {
-  return route.is_google_default;
+  return route.is_standard;
 }
 
 function routeLabel(route, plan) {
@@ -642,7 +620,7 @@ function useMyLocation() {
       done();
       const here = { lat: position.coords.latitude, lng: position.coords.longitude };
       setPoint("origin", { ...here, label: "My location", countryCode: null });
-      if (state.map) state.map.panTo(here);
+      if (state.view) state.view.panTo(here);
     },
     (error) => {
       done();
@@ -659,18 +637,13 @@ async function startDriving() {
   const nav = state.nav;
   Object.assign(nav, { active: true, following: true, fix: null, anchor: null, heading: null, offRoute: 0, lastRerouteAt: 0 });
   nav.spoken.clear();
-  if (!nav.car) {
-    const { AdvancedMarkerElement } = await google.maps.importLibrary("marker");
-    const content = element("div", { className: "car" }, element("div", { className: "car__arrow" }));
-    nav.car = new AdvancedMarkerElement({ content, title: "You", zIndex: 50 });
-  }
   nav.watchId = navigator.geolocation.watchPosition(onFix, onFixError, {
     enableHighAccuracy: true,
     maximumAge: 2000,
     timeout: 20000,
   });
   keepScreenOn();
-  if (state.pins.origin) state.pins.origin.map = null; // the car marks the start while driving
+  if (state.pins.origin) state.pins.origin.remove(); // the car marks the start while driving
   $("drive").textContent = "Stop driving";
   document.body.classList.add("driving");
   setNavStatus("Waiting for your location…");
@@ -681,7 +654,8 @@ function stopDriving(message = null) {
   if (nav.watchId !== null) navigator.geolocation.clearWatch(nav.watchId);
   nav.watchId = null;
   nav.active = false;
-  if (nav.car) nav.car.map = null;
+  if (nav.car) nav.car.remove();
+  nav.car = null;
   if (state.origin) placePin("origin", state.origin);
   if (nav.wakeLock) nav.wakeLock.release().catch(() => {});
   nav.wakeLock = null;
@@ -706,8 +680,8 @@ function onFix(position) {
 
   moveCar(here, nav.heading);
   if (nav.following) {
-    state.map.panTo(here);
-    if (first) state.map.setZoom(NAV.followZoom);
+    state.view.panTo(here);
+    if (first) state.view.setZoom(NAV.followZoom);
   }
   if (distanceM(here, state.destination) <= NAV.arrivedM) {
     speak("You have arrived.");
@@ -806,12 +780,15 @@ function speak(text) {
 }
 
 function moveCar(here, heading) {
-  const car = state.nav.car;
-  car.position = here;
-  car.map = state.map;
-  const arrow = car.content.firstChild;
-  arrow.hidden = heading === null; // just a dot until the direction is known
-  if (heading !== null) arrow.style.transform = `rotate(${heading}deg)`;
+  const nav = state.nav;
+  if (!nav.car) {
+    nav.carArrow = element("div", { className: "car__arrow" });
+    nav.car = state.view.marker(here, element("div", { className: "car" }, nav.carArrow), { title: "You", zIndex: 50 });
+  } else {
+    nav.car.move(here);
+  }
+  nav.carArrow.hidden = heading === null; // just a dot until the direction is known
+  if (heading !== null) nav.carArrow.style.transform = `rotate(${heading}deg)`;
 }
 
 function recenter() {
@@ -819,8 +796,8 @@ function recenter() {
   nav.following = true;
   $("recenter").hidden = true;
   if (nav.fix) {
-    state.map.panTo(nav.fix);
-    state.map.setZoom(NAV.followZoom);
+    state.view.panTo(nav.fix);
+    state.view.setZoom(NAV.followZoom);
   }
 }
 
@@ -859,13 +836,6 @@ function nearestOnPath(point, path) {
   return best;
 }
 
-function distanceM(a, b) {
-  return google.maps.geometry.spherical.computeDistanceBetween(a, b);
-}
-
-function bearing(from, to) {
-  return (google.maps.geometry.spherical.computeHeading(from, to) + 360) % 360;
-}
 
 // ---- Small helpers
 

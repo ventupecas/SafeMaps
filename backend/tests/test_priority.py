@@ -119,3 +119,11 @@ def test_when_every_route_is_closed_the_closure_data_is_doubted():
     a = with_events(route("a", minutes=20, fuel=1.5), closures=1)
     b = with_events(route("b", minutes=25, fuel=2.0), closures=1)
     assert all(r.eligible for r in rank_candidates([a, b], PRIORITY))
+
+
+def test_a_winner_that_wins_only_because_safer_routes_are_too_slow_says_so():
+    quick = route("quick", minutes=17, fuel=1.5, busy_lefts=3)
+    careful = route("careful", minutes=28, fuel=1.9)  # safer, but over 1.6x the time
+    ranked = rank_candidates([quick, careful], PRIORITY)
+    assert ranked[0].id == "quick"
+    assert ranked[0].reason == "safest within 1.6x the fastest time; safer routes take longer"

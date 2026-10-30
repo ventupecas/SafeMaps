@@ -106,7 +106,7 @@ class GoogleUsage(BaseModel):
 
 
 class RoadEventOut(BaseModel):
-    kind: Literal["closed", "lanes"]
+    kind: Literal["closed", "lanes", "slow", "jam"] = Field(description="slow and jam: measured 511 travel times.")
     source: str
     description: str
     path: str = Field(description="Encoded polyline; a single point when the source gave no stretch.")
@@ -138,7 +138,7 @@ class Engine:
     wi511: Wi511Feed | None = None
     apify: ApifyTraffic | None = None
     _routers: dict[DrivingSide, Router] = field(default_factory=dict)
-    _snapped: dict[RoadEvent, list[RoadEvent]] = field(default_factory=dict)
+    _snapped: dict[tuple[Any, ...], list[RoadEvent]] = field(default_factory=dict)
     _lock: Lock = field(default_factory=Lock)
 
     def snap(self, events: Sequence[RoadEvent]) -> list[RoadEvent]:
@@ -151,14 +151,18 @@ class Engine:
             return list(events)
         snapped: list[RoadEvent] = []
         for event in events:
-            known = self._snapped.get(event)
+            # Remembered by place: a refreshed reading of the same stretch (new travel time) reuses the match.
+            key = event.geometry_key()
+            known = self._snapped.get(key)
             if known is None:
                 known = self.graph.snap_events([event])
+                if event.category == "traffic" and all(s.path == event.path for s in known):
+                    known = []  # no road matched: as a straight line it would only add false delays
                 with self._lock:
                     if len(self._snapped) > 20_000:
                         self._snapped.clear()
-                    self._snapped[event] = known
-            snapped += known
+                    self._snapped[key] = known
+            snapped += [replace(event, path=s.path, direction=s.direction, along=s.along) for s in known]
         return snapped
 
     def routes_client(self) -> RoutesClient:
@@ -259,6 +263,11 @@ def create_app(settings: Settings | None = None, *, http: httpx.Client | None = 
     def profiles() -> dict[str, Any]:
         return {"default": DEFAULT_PROFILE, "profiles": [profile.model_dump() for profile in PRESETS.values()]}
 
+    @app.get("/app-config")
+    def app_config() -> dict[str, Any]:
+        """What the web map needs before it loads: which map to show (ROUTES_MAP)."""
+        return {"map": settings.map}
+
     @app.post("/route", response_model=TripResponse)
     def route(
         trip: TripRequest, request: Request, x_access_code: str | None = Header(None, include_in_schema=False)
@@ -273,6 +282,15 @@ def create_app(settings: Settings | None = None, *, http: httpx.Client | None = 
         except ValueError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from None
 
+        # The OpenStreetMap map never asks Google: Google's terms don't allow its
+        # results on another map. Our router designs every route, the fastest
+        # one standing in for Google's, and there's no live traffic.
+        google = settings.map == "google"
+        if not google:
+            if engine.graph is None:
+                raise HTTPException(status_code=503, detail="The OpenStreetMap map needs the road map: build it first.")
+            trip = trip.model_copy(update={"use_router": True, "live_traffic": False})
+
         use_router = trip.use_router and engine.graph is not None
         heading = None if trip.heading is None else round(trip.heading) % 360
         notes: list[str] = []
@@ -280,6 +298,8 @@ def create_app(settings: Settings | None = None, *, http: httpx.Client | None = 
             notes.append("Own router unavailable: no road graph is loaded.")
 
         order = {"auto": settings.road_event_sources, "off": ()}.get(trip.road_events, (trip.road_events,))
+        if not google:  # both of these are Google data
+            order = tuple(g for g in ("+".join(s for s in group.split("+") if s not in ("google", "apify")) for group in order) if g)
         area = trip_area(trip.origin, trip.destination)
         report = collect_road_events(
             order,
@@ -307,6 +327,7 @@ def create_app(settings: Settings | None = None, *, http: httpx.Client | None = 
                         heading=heading,
                         context=context,
                         traffic_on_polyline=report.google,
+                        baseline=None if google else PRESETS["fastest"],
                     )
                     candidates = pool.candidates
                     notes += pool.notes
@@ -344,7 +365,7 @@ def create_app(settings: Settings | None = None, *, http: httpx.Client | None = 
                     kind=event.kind, source=event.source, description=event.description, path=encode_polyline(event.path)
                 )
                 for event in events
-                if event.kind in ("closed", "lanes")
+                if event.kind in ("closed", "lanes") or event.category == "traffic"
             ][:MAX_EVENTS_SHOWN],
         )
 
