@@ -25,11 +25,24 @@ Then put the keys in place:
 
 Both files are gitignored. The README's "Google Cloud setup for $0" and "Web map and API" sections have the full key setup.
 
+Download crash data for the crash-prone junction rule (about 170 MB of public NHTSA files, once):
+
+```powershell
+.\.venv\Scripts\python.exe -m app.crash_data milwaukee-metro
+```
+
+Then add the two lines it prints (`ROUTES_CRASH_DATA=...` and `ROUTES_CRASH_MIN_COUNT=1`) to `backend\.env`. On this computer this is done.
+
 ## 2. In the week before the expo
 
-### Rebuild the road map (recommended)
+### Rebuild the road map (needed for school zones and railroad crossings)
 
-Downloads fresh OpenStreetMap data and rebuilds the router's map, picking up new ramps (for example from the I-94 East-West rebuild). Ramp closures on ramps that are missing from the map get skipped. It takes a while.
+Downloads fresh OpenStreetMap data and rebuilds the router's map:
+
+- **School zones and railroad crossings:** they only come with this rebuild; until then the app runs without them.
+- **New ramps:** for example from the I-94 East-West rebuild. Ramp closures on ramps missing from the map get skipped.
+
+It takes a while.
 
 ```powershell
 .\.venv\Scripts\python.exe -m app.build_graph milwaukee-metro --refresh
@@ -37,7 +50,15 @@ Downloads fresh OpenStreetMap data and rebuilds the router's map, picking up new
 
 - **Network:** some workplace networks block the download (Overpass). Use another network if it times out.
 - **If the server is busy:** add `--endpoint https://overpass.kumi.systems/api/interpreter`.
-- **Afterwards:** restart the server so it loads the new map.
+- **Afterwards:** restart the server so it loads the new map. `curl.exe http://127.0.0.1:3143/health` should then show `rail_crossings` and `schools` above 0 under `hazards`.
+
+### Make the results summary
+
+Runs 20 Milwaukee trips and writes `RESULTS.md` at the repo root: risky turns avoided, closures, fuel and minutes, compared with the standard route. It's a good thing to print for the table. Each new trip costs one cheap Google request, and reruns use saved answers. Rerun it after the road map rebuild so school zones and rail crossings show up.
+
+```powershell
+.\.venv\Scripts\python.exe -m app.evaluate
+```
 
 ### Run the tests
 
@@ -128,9 +149,33 @@ Remove-Item Env:ROUTES_CACHE_MODE
 ### Limits to know
 
 - **Internet is needed no matter what.** The map, place search and work-zone feed all come from the internet. Saved-answers mode only removes the cost of Google's routing.
-- **Laptop only.** Driving mode (following your location) works in the laptop's browser, not on visitors' phones, which would need an https address.
+- **Phones need the tunnel.** Driving mode (following your location) works in the laptop's browser. Visitors' phones need the https link from "Let visitors use their phones" below.
+- **Sound on.** Spoken directions come through the laptop's speakers; untick **Spoken directions while driving** for quiet.
+- **School zones** only count at drop-off and pickup times (weekdays 7–9 and 2–4:30), so they may not show during the expo.
 
 ## 5. Optional extras
+
+### Let visitors use their phones
+
+A free Cloudflare tunnel gives the laptop a public https address, so phones can open the app and use driving mode. The access code stops strangers from spending your Google requests.
+
+1. Install the tunnel tool (once):
+   ```powershell
+   winget install --id Cloudflare.cloudflared
+   ```
+2. Add an access code to `backend\.env`, for example `ROUTES_ACCESS_CODE=expo2026`, and restart the server.
+3. Start the tunnel in a new PowerShell window. Leave it open; it prints an address like `https://something.trycloudflare.com`.
+   ```powershell
+   cloudflared tunnel --url http://localhost:3143
+   ```
+4. Add `https://*.trycloudflare.com/*` to the browser key's allowed websites in the Cloud Console, under **APIs & Services → Credentials**. It can take a few minutes to apply.
+5. Make a QR code of `https://something.trycloudflare.com/?code=expo2026` (your address and code). The page remembers the code, so visitors scan once.
+
+Things to know:
+
+- **New address each time:** the address changes every time the tunnel starts, so remake the QR code.
+- **Shared limit:** every visitor's trips count toward your daily Google limit.
+- **When done:** press Ctrl+C in the tunnel window, then remove the `trycloudflare.com` entry from the key.
 
 ### Save a copy of the work zones
 

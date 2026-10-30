@@ -126,3 +126,22 @@ def test_plan_route_applies_the_trips_driving_side():
 def test_plan_route_raises_when_no_route_exists():
     with pytest.raises(NoRouteFoundError):
         plan_route(FakeFetcher(base=[]), ORIGIN, DESTINATION, PRESETS["fastest"])
+
+
+@pytest.mark.parametrize(
+    ("moment", "in_session"),
+    [
+        ("2026-10-28T08:15", True),  # a Wednesday morning
+        ("2026-10-28T15:00", True),
+        ("2026-10-28T12:00", False),  # midday
+        ("2026-10-31T08:15", False),  # a Saturday
+        ("2026-07-15T08:15", False),  # summer break
+    ],
+)
+def test_school_zones_count_on_school_day_mornings_and_afternoons(moment, in_session):
+    from datetime import datetime, time
+
+    from app.engine import school_in_session
+
+    windows = ((time(7, 0), time(9, 0)), (time(14, 0), time(16, 30)))
+    assert school_in_session(datetime.fromisoformat(moment), windows) is in_session

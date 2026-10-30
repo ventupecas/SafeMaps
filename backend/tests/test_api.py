@@ -242,3 +242,20 @@ def test_health_lists_the_road_event_sources(api):
         "apify_enabled": False,
         "apify_tiles_today": 0,
     }
+
+
+def test_an_access_code_guards_route_requests_when_set(tmp_path, google):
+    app = create_app(make_settings(tmp_path, access_code="expo-2026"), http=httpx.Client(transport=httpx.MockTransport(google)))
+    trip = {"origin": ORIGIN, "destination": DESTINATION, "live_traffic": False}
+    with TestClient(app) as client:
+        assert client.post("/route", json=trip).status_code == 401
+        assert client.post("/route", json=trip, headers={"X-Access-Code": "wrong"}).status_code == 401
+        assert client.post("/route", json=trip, headers={"X-Access-Code": "expo-2026"}).status_code == 200
+        assert client.get("/").status_code == 200  # the page itself loads; the code comes in its link
+    assert len(google.requests) == 1  # nothing reached Google before the right code
+
+
+def test_routes_come_with_turn_by_turn_directions(api):
+    trip = api.post("/route", json={"origin": ORIGIN, "destination": DESTINATION, "live_traffic": False}).json()
+    own = next(route for route in trip["plan"]["candidates"] if route["source"] == "own")
+    assert own["maneuvers"] and all(step["instruction"] and step["location"] for step in own["maneuvers"])

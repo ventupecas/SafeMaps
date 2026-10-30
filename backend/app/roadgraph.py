@@ -101,6 +101,12 @@ _VEHICLE_SURE_M = 15.0
 STRETCH_DETOUR = 1.5
 STRETCH_SLACK_M = 500.0
 SAME_ROAD_M = 5.0  # roads this much farther from a point than the nearest one are other roads
+# Hazards from OSM: a street within SCHOOL_ZONE_M of a school (its center) is in
+# its school zone; freeways never are. A route passes a railroad crossing when
+# it goes within RAIL_MATCH_M of one.
+SCHOOL_ZONE_M = 200.0
+NO_SCHOOL_ZONE_CLASSES = frozenset({"motorway", "motorway_link", "trunk", "trunk_link"})
+RAIL_MATCH_M = 20.0
 # A ramp closure's ramp leaves or joins the freeway within RAMP_NAMED_SEARCH_M of
 # its position when the ramp's street is named and matched, else RAMP_SEARCH_M.
 RAMP_SEARCH_M = 300.0
@@ -142,6 +148,11 @@ class RoadGraph:
     names: list[str]
     banned: dict[int, frozenset[int]]  # edge -> edges it may not turn onto
     stats: dict[str, int] = field(default_factory=dict)
+    # Hazards, when the map was built with them (empty in older map files):
+    rail_crossings: list[int] = field(default_factory=list)  # per edge: railroad crossings at grade
+    school_zone: list[bool] = field(default_factory=list)  # per edge: within SCHOOL_ZONE_M of a school
+    rail_crossing_points: list[Point] = field(default_factory=list)
+    school_points: list[Point] = field(default_factory=list)
 
     time_s: list[float] = field(init=False, repr=False)
     out_edges: list[list[int]] = field(init=False, repr=False)
@@ -153,8 +164,11 @@ class RoadGraph:
     _node_kinds: dict[int, str] = field(init=False, default_factory=dict, repr=False)
     _signal_cells: dict[tuple[int, int], list[int]] | None = field(init=False, default=None, repr=False)
     _edge_cells: dict[tuple[int, int], list[int]] | None = field(init=False, default=None, repr=False)
+    _point_cells: dict[str, dict[tuple[int, int], list[Point]]] = field(init=False, default_factory=dict, repr=False)
 
     def __post_init__(self) -> None:
+        self.rail_crossings = self.rail_crossings or [0] * len(self.edge_from)
+        self.school_zone = self.school_zone or [False] * len(self.edge_from)
         self.time_s = [
             length / (speed / 3.6) + SIGNAL_DELAY_S * signals
             for length, speed, signals in zip(self.length_m, self.speed_kmh, self.signals, strict=True)
@@ -254,6 +268,44 @@ class RoadGraph:
                                 found.add(node)
         return len(found)
 
+    def road_name_at(self, point: Point, heading: float) -> str:
+        """The name of the road at point running along heading ("" if unnamed or none is near), for directions."""
+        roads = self._roads_at(point, heading)
+        named = [self.names[self.name[edge]] for edge in roads if self.name[edge]]
+        return named[0] if named else ""
+
+    def rail_crossings_along(self, stretches: Iterable[Sequence[Point]]) -> int:
+        """Railroad crossings at grade the given stretches of road pass (within RAIL_MATCH_M)."""
+        return self._points_along("rail", self.rail_crossing_points, stretches, RAIL_MATCH_M)
+
+    def schools_along(self, stretches: Iterable[Sequence[Point]]) -> int:
+        """Schools within SCHOOL_ZONE_M of the given stretches of road: the school zones they pass."""
+        return self._points_along("school", self.school_points, stretches, SCHOOL_ZONE_M)
+
+    def _points_along(self, kind: str, points: Sequence[Point], stretches: Iterable[Sequence[Point]], within_m: float) -> int:
+        if not points:
+            return 0
+        cell_deg = within_m / _M_PER_DEG_LAT
+        cells = self._point_cells.get(kind)
+        if cells is None:
+            grouped: dict[tuple[int, int], list[Point]] = defaultdict(list)
+            for point in points:
+                grouped[_cell(point, cell_deg)].append(point)
+            cells = self._point_cells[kind] = dict(grouped)
+        found: set[Point] = set()
+        for stretch in stretches:
+            if not stretch:
+                continue
+            reach_lng = math.ceil(1 / max(math.cos(math.radians(stretch[0][0])), 0.01))
+            for sample in densify(stretch, within_m / 2):
+                ci, cj = _cell(sample, cell_deg)
+                for i in range(ci - 1, ci + 2):
+                    for j in range(cj - reach_lng, cj + reach_lng + 1):
+                        for point in cells.get((i, j), ()):
+                            if point not in found and haversine_m(sample, point) <= within_m:
+                                found.add(point)
+        return len(found)
+
     def _signal_index(self) -> dict[tuple[int, int], list[int]]:
         if self._signal_cells is None:
             cells: dict[tuple[int, int], list[int]] = defaultdict(list)
@@ -307,21 +359,26 @@ class RoadGraph:
             return True
         return self.class_name(edge).endswith("_link") == (road in RAMP_KINDS)
 
-    def _ramp_near(self, event: RoadEvent) -> int | None:
-        """The ramp a ramp event names: where one leaves (off-ramp) or joins (on-ramp) the freeway.
+    def _ramp_near(self, event: RoadEvent) -> list[int] | None:
+        """The ramp a ramp event names, as its segments in travel order; None if no ramp fits.
 
         Sources place ramp closures on the freeway near the ramp, so this looks
-        for the junction rather than the nearest line: the one whose ramp
-        reaches the street the event names, within RAMP_NAMED_SEARCH_M; else
-        the nearest within RAMP_SEARCH_M. Returns the ramp's segment at that
-        junction: closing it closes the ramp.
+        for the junction where a ramp leaves (off-ramp) or joins (on-ramp) the
+        freeway, rather than the nearest line:
+        - a freeway-to-freeway ramp ("... TO I-94 WB"): the nearest within
+          RAMP_NAMED_SEARCH_M that leads onto that freeway that way, from where
+          it splits from ramps going elsewhere;
+        - one reaching the street the event names, within RAMP_NAMED_SEARCH_M;
+        - else the nearest within RAMP_SEARCH_M.
         """
         point = event.path[len(event.path) // 2]
         wanted = frozenset(event.ramp_road.split())
         heading_ok = lambda bearing: event.direction is None or angle_between_deg(bearing, event.direction) <= EVENT_MATCH_DEG  # noqa: E731
         named: list[tuple[float, int]] = []
         nearest: list[tuple[float, int]] = []
-        for node in self._nodes_near(point, RAMP_NAMED_SEARCH_M if wanted else RAMP_SEARCH_M, snappable_only=False):
+        toward: list[tuple[float, list[int]]] = []
+        wide = wanted or event.ramp_toward is not None
+        for node in self._nodes_near(point, RAMP_NAMED_SEARCH_M if wide else RAMP_SEARCH_M, snappable_only=False):
             distance = haversine_m(point, self.point(node))
             ramps: list[tuple[int, bool]] = []  # (ramp segment, leaves the freeway)
             if event.road in ("off-ramp", "ramp") and any(
@@ -333,12 +390,42 @@ class RoadGraph:
             ):
                 ramps += [(e, False) for e in self.in_edges[node] if self._is_link(e)]
             for ramp, leaving in ramps:
-                if wanted and wanted <= self._ramp_street_words(ramp, leaving):
+                if event.ramp_toward is not None:
+                    branch = self._ramp_branch(ramp, event.ramp_toward) if leaving else None
+                    if branch:
+                        toward.append((distance, branch))
+                elif wanted and wanted <= self._ramp_street_words(ramp, leaving):
                     named.append((distance, ramp))
                 elif distance <= RAMP_SEARCH_M:
                     nearest.append((distance, ramp))
+        if event.ramp_toward is not None:
+            return min(toward, default=(0.0, None))[1]
         best = min(named or nearest, default=None)
-        return best[1] if best else None
+        return self._ramp_chain(best[1], leaving=self._leaves_freeway(best[1])) if best else None
+
+    def _ramp_branch(self, ramp: int, toward: float) -> list[int] | None:
+        """The ramp segments from ramp onto a freeway heading toward, after the last split; None if it leads elsewhere."""
+        came_from: dict[int, int | None] = {ramp: None}
+        queue = [ramp]
+        while queue:
+            edge = queue.pop(0)
+            for nxt in self.out_edges[self.edge_to[edge]]:
+                if self.class_name(nxt) in FREEWAY_CLASSES:
+                    if angle_between_deg(self.bearing_start[nxt], toward) > EVENT_MATCH_DEG:
+                        continue
+                    path = [edge]
+                    while came_from[path[-1]] is not None:
+                        path.append(came_from[path[-1]])  # type: ignore[arg-type]
+                    path.reverse()
+                    # Segments before a split also carry traffic bound elsewhere: leave them open.
+                    for i in range(len(path) - 1, 0, -1):
+                        if sum(1 for e in self.out_edges[self.edge_to[path[i - 1]]] if self._is_link(e)) > 1:
+                            return path[i:]
+                    return path
+                if self._is_link(nxt) and nxt not in came_from and len(came_from) < 40:
+                    came_from[nxt] = edge
+                    queue.append(nxt)
+        return None
 
     def _ramp_street_words(self, ramp: int, leaving: bool) -> frozenset[str]:
         """Words naming the streets at the far end of a ramp: followed forward from an exit, back from an entrance."""
@@ -362,6 +449,24 @@ class RoadGraph:
     def _is_link(self, edge: int) -> bool:
         return self.class_name(edge).endswith("_link")
 
+    def _leaves_freeway(self, ramp: int) -> bool:
+        """Whether a ramp segment starts at the freeway (an exit) rather than ending at it (an entrance)."""
+        return any(self.class_name(edge) in FREEWAY_CLASSES for edge in self.in_edges[self.edge_from[ramp]])
+
+    def _ramp_chain(self, ramp: int, *, leaving: bool) -> list[int]:
+        """The ramp's segments in travel order, followed from the freeway until it reaches a street or splits."""
+        chain = [ramp]
+        for _ in range(8):
+            end = self.edge_to[chain[-1]] if leaving else self.edge_from[chain[0]]
+            onward = [e for e in (self.out_edges[end] if leaving else self.in_edges[end]) if self._is_link(e)]
+            if len(onward) != 1 or onward[0] in chain:
+                break
+            if leaving:
+                chain.append(onward[0])
+            else:
+                chain.insert(0, onward[0])
+        return chain
+
     def edges_along(self, points: Sequence[Point], within_m: float = ALONG_MATCH_M) -> set[int]:
         """Segments a route given as points follows: both of their junctions lie on it."""
         on_route: set[int] = set()
@@ -374,8 +479,7 @@ class RoadGraph:
     def event_edges(self, event: RoadEvent) -> set[int]:
         """The segments a road event (a closure, a jam) lies on, in the directions of traffic it affects."""
         if event.road in RAMP_KINDS and not event.along:
-            ramp = self._ramp_near(event)
-            return {ramp} if ramp is not None else set()
+            return set(self._ramp_near(event) or ())
         if len(event.path) == 1:
             return self._roads_at(event.path[0], event.direction, event.road)
         return {edge for stretch in self._stretches(event) for edge in stretch}
@@ -392,10 +496,15 @@ class RoadGraph:
         for event in events:
             if event.road in RAMP_KINDS and not event.along:
                 ramp = self._ramp_near(event)
-                if ramp is None:
+                if not ramp:
                     logger.info("No ramp found for road event %r; left out", event.description[:80])
                 else:
-                    snapped.append(replace(event, path=tuple(self.edge_points(ramp)), direction=None, along=True))
+                    # The whole ramp, in travel order: its first segment alone runs right beside the freeway.
+                    points: list[Point] = []
+                    for edge in ramp:
+                        segment = self.edge_points(edge)
+                        points.extend(segment if not points else segment[1:])
+                    snapped.append(replace(event, path=tuple(points), direction=None, along=True))
                 continue
             stretches = self._stretches(event) if len(event.path) > 1 else []
             if not stretches:
@@ -556,8 +665,12 @@ class RoadGraph:
                 "bearing_start": [round(x, 1) for x in self.bearing_start],
                 "bearing_end": [round(x, 1) for x in self.bearing_end],
                 "geometry": self.geometry,
+                "rail_crossings": self.rail_crossings,
+                "school": [int(x) for x in self.school_zone],
             },
             "banned": [[edge, other] for edge, others in sorted(self.banned.items()) for other in sorted(others)],
+            "rail_crossing_points": [[round(lat, 7), round(lng, 7)] for lat, lng in self.rail_crossing_points],
+            "school_points": [[round(lat, 7), round(lng, 7)] for lat, lng in self.school_points],
         }
         path.parent.mkdir(parents=True, exist_ok=True)
         fd, tmp_name = tempfile.mkstemp(dir=path.parent, suffix=".tmp")
@@ -602,6 +715,11 @@ class RoadGraph:
             names=data["names"],
             banned={edge: frozenset(others) for edge, others in banned.items()},
             stats=data.get("stats", {}),
+            # Maps built before hazards were added have none: rebuild to get them.
+            rail_crossings=edges.get("rail_crossings", []),
+            school_zone=[bool(x) for x in edges.get("school", [])],
+            rail_crossing_points=[(lat, lng) for lat, lng in data.get("rail_crossing_points", [])],
+            school_points=[(lat, lng) for lat, lng in data.get("school_points", [])],
         )
 
 
@@ -618,15 +736,25 @@ def build_graph(elements: Iterable[Mapping[str, Any]], *, area: str = "", bbox: 
     """Build a RoadGraph from Overpass JSON elements (nodes, ways and restriction relations)."""
     coords: dict[int, Point] = {}
     signal_nodes: set[int] = set()
+    crossing_nodes: set[int] = set()
+    schools: list[Point] = []
     ways: dict[int, Mapping[str, Any]] = {}
     relations: dict[int, Mapping[str, Any]] = {}
     for element in elements:
         kind = element.get("type")
+        tags = element.get("tags", {})
+        if tags.get("amenity") == "school":
+            center = element.get("center") or element
+            if "lat" in center:
+                schools.append((center["lat"], center["lon"]))
+            continue
         if kind == "node":
             if "lat" in element:
                 coords[element["id"]] = (element["lat"], element["lon"])
-            if element.get("tags", {}).get("highway") == "traffic_signals":
+            if tags.get("highway") == "traffic_signals":
                 signal_nodes.add(element["id"])
+            if tags.get("railway") == "level_crossing":
+                crossing_nodes.add(element["id"])
         elif kind == "way":
             ways[element["id"]] = element
         elif kind == "relation":
@@ -649,7 +777,7 @@ def build_graph(elements: Iterable[Mapping[str, Any]], *, area: str = "", bbox: 
         uses[road.refs[0]] += 1
         uses[road.refs[-1]] += 1
 
-    builder = _EdgeBuilder(coords, signal_nodes)
+    builder = _EdgeBuilder(coords, signal_nodes, crossing_nodes)
     for road in roads:
         start = 0
         for i in range(1, len(road.refs)):
@@ -659,6 +787,13 @@ def build_graph(elements: Iterable[Mapping[str, Any]], *, area: str = "", bbox: 
 
     banned = _apply_restrictions(builder, relations.values(), stats)
     graph = builder.finish(area, bbox, banned, stats)
+    _mark_school_zones(graph, schools)
+    graph.rail_crossing_points = sorted(coords[node] for node in crossing_nodes if node in coords)
+    graph.stats.update(
+        rail_crossings=len(graph.rail_crossing_points),
+        schools=len(schools),
+        school_zone_segments=sum(graph.school_zone),
+    )
     logger.info("Built %s: %d junctions, %d road segments", area or "graph", graph.node_count, graph.edge_count)
     return graph
 
@@ -699,10 +834,36 @@ class _Road:
         )
 
 
+def _mark_school_zones(graph: RoadGraph, schools: Sequence[Point]) -> None:
+    """Flag the street segments within SCHOOL_ZONE_M of a school."""
+    graph.school_points = sorted(set(schools))
+    if not schools:
+        return
+    cell_deg = SCHOOL_ZONE_M / _M_PER_DEG_LAT
+    cells: dict[tuple[int, int], list[Point]] = defaultdict(list)
+    for school in graph.school_points:
+        cells[_cell(school, cell_deg)].append(school)
+    reach_lng = math.ceil(1 / max(math.cos(math.radians(graph.school_points[0][0])), 0.01))
+    for edge in range(graph.edge_count):
+        if graph.class_name(edge) in NO_SCHOOL_ZONE_CLASSES:
+            continue
+        for sample in densify(graph.edge_points(edge), SCHOOL_ZONE_M / 2):
+            ci, cj = _cell(sample, cell_deg)
+            if any(
+                haversine_m(sample, school) <= SCHOOL_ZONE_M
+                for i in range(ci - 1, ci + 2)
+                for j in range(cj - reach_lng, cj + reach_lng + 1)
+                for school in cells.get((i, j), ())
+            ):
+                graph.school_zone[edge] = True
+                break
+
+
 class _EdgeBuilder:
-    def __init__(self, coords: Mapping[int, Point], signal_nodes: set[int]) -> None:
+    def __init__(self, coords: Mapping[int, Point], signal_nodes: set[int], crossing_nodes: set[int] = frozenset()) -> None:
         self.coords = coords
         self.signal_nodes = signal_nodes
+        self.crossing_nodes = crossing_nodes
         self.node_ids: dict[int, int] = {}  # OSM node id -> junction index
         self.lat: list[float] = []
         self.lng: list[float] = []
@@ -736,6 +897,7 @@ class _EdgeBuilder:
         e["speed_kmh"].append(road.speed_kmh)
         # Signals count on arrival: the start junction's belongs to the road before.
         e["signals"].append(sum(1 for ref in refs[1:] if ref in self.signal_nodes))
+        e["rail_crossings"].append(sum(1 for ref in refs[1:] if ref in self.crossing_nodes))
         e["class"].append(self.classes.index(road.highway))
         e["name"].append(self.names.setdefault(road.name, len(self.names)))
         e["way"].append(road.way_id)
@@ -784,6 +946,7 @@ class _EdgeBuilder:
             classes=self.classes,
             names=sorted(self.names, key=self.names.__getitem__),
             banned=remapped_banned,
+            rail_crossings=column("rail_crossings"),
         )
         stats["junctions"] = graph.node_count
         stats["road_segments"] = graph.edge_count

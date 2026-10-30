@@ -9,7 +9,8 @@ Two ways to rank (ScoringProfile.ranking):
 * weighted: every factor is converted to perceived minutes and summed; the
   lowest total wins.
 * priority: safety first, then fuel, then time. The route with the fewest
-  risky turns and lane closures wins; among equally safe routes, the one
+  risk points (risky turns, lane closures, school zones during school hours,
+  railroad crossings) wins; among equally safe routes, the one
   using the least fuel (within fuel_tolerance, since the fuel model is
   rough); among those, the fastest. Each route gets a short reason for its
   place.
@@ -25,6 +26,7 @@ from __future__ import annotations
 from collections.abc import Callable, Sequence
 
 from app.models import CandidateRoute, RouteFeatures, ScoreBreakdown, ScoredRoute, ScoringProfile
+from app.road_events import WORKERS_PRESENT_FACTOR
 
 _EPSILON = 1e-9
 
@@ -40,15 +42,32 @@ def score_route(features: RouteFeatures, profile: ScoringProfile) -> ScoreBreakd
         "maneuvers": profile.maneuver_weight * features.maneuver_count,
         "busy_crossings": profile.busy_crossing_weight * features.busy_crossing_turns,
         "hotspot_crossings": profile.hotspot_crossing_weight * features.hotspot_crossing_turns,
-        "lane_closures": profile.lane_closure_weight * features.lane_closures,
+        "lane_closures": profile.lane_closure_weight
+        * (features.lane_closures + (WORKERS_PRESENT_FACTOR - 1) * features.lane_closures_with_workers),
+        "school_zones": profile.school_zone_weight * features.school_zones,
+        "rail_crossings": profile.rail_crossing_weight * features.rail_crossings,
         "scenic": -profile.scenic_weight * features.winding_min,
     }
     return ScoreBreakdown(**terms, total=sum(terms.values()))
 
 
 def risk(route: ScoredRoute) -> float:
-    """Safety cost: the profile's penalties for risky turns (busy and crash-prone junctions) and lane closures."""
-    return route.breakdown.busy_crossings + route.breakdown.hotspot_crossings + route.breakdown.lane_closures
+    """Safety cost: risky turns (busy and crash-prone junctions), lane closures, school zones and railroad crossings."""
+    b = route.breakdown
+    return b.busy_crossings + b.hotspot_crossings + b.lane_closures + b.school_zones + b.rail_crossings
+
+
+# How reasons name the risks, for the kinds any candidate has.
+_RISK_NAMES = (
+    ("lane_closures", "lane closures"),
+    ("school_zones", "school zones"),
+    ("rail_crossings", "railroad crossings"),
+)
+
+
+def _risk_words(scored: Sequence[ScoredRoute]) -> str:
+    names = ["risky turns"] + [name for field, name in _RISK_NAMES if any(getattr(r.features, field) for r in scored)]
+    return names[0] if len(names) == 1 else ", ".join(names[:-1]) + " and " + names[-1]
 
 
 def rank_candidates(candidates: Sequence[CandidateRoute], profile: ScoringProfile) -> list[ScoredRoute]:
@@ -91,7 +110,7 @@ def _rank_by_priority(scored: list[ScoredRoute], profile: ScoringProfile) -> lis
     ranked += sorted((route for route in scored if not route.eligible), key=lambda route: route.features.duration_min)
 
     winner = ranked[0]
-    risky = "risky turns and lane closures" if any(route.features.lane_closures for route in scored) else "risky turns"
+    risky = _risk_words(scored)
     return [
         route.model_copy(update={"reason": _priority_reason(route, winner, eligible, profile, risky)})
         for route in ranked

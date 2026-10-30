@@ -77,6 +77,16 @@ class ScoringProfile(BaseModel):
         ge=0,
         description="Perceived minutes per lane closure (a work zone or crash with a forced merge) driven through.",
     )
+    school_zone_weight: float = Field(
+        3.0,
+        ge=0,
+        description="Perceived minutes per school zone driven through during school hours.",
+    )
+    rail_crossing_weight: float = Field(
+        1.0,
+        ge=0,
+        description="Perceived minutes per railroad crossing at grade: rare but severe crashes, and trains block them.",
+    )
     max_detour_ratio: float = Field(
         1.6,
         ge=1.0,
@@ -136,6 +146,9 @@ class RouteFeatures(BaseModel):
     crossing_turns: tuple[CrossingTurn, ...] = ()
     closures: int = Field(0, description="Closed roads the route drives through, per the trip's road event source.")
     lane_closures: int = Field(0, description="Lane closures the route drives through, per the road event source.")
+    lane_closures_with_workers: int = Field(0, description="Of those, how many have workers on site now.")
+    school_zones: int = Field(0, description="Schools the route passes within their school zone, during school hours.")
+    rail_crossings: int = Field(0, description="Railroad crossings at grade the route drives over.")
 
     @computed_field
     @property
@@ -162,8 +175,20 @@ class ScoreBreakdown(BaseModel):
     busy_crossings: float
     hotspot_crossings: float
     lane_closures: float = 0.0
+    school_zones: float = 0.0
+    rail_crossings: float = 0.0
     scenic: float = Field(description="Zero or negative: a refund for winding roads.")
     total: float
+
+
+class Maneuver(BaseModel):
+    """One turn-by-turn instruction: what to do, and where."""
+
+    model_config = ConfigDict(frozen=True)
+
+    maneuver: str = Field(description="The Routes API maneuver name, e.g. TURN_RIGHT.")
+    instruction: str = Field(description='What to say, e.g. "Turn right onto West Wisconsin Avenue".')
+    location: LatLng
 
 
 class CandidateRoute(BaseModel):
@@ -182,6 +207,7 @@ class CandidateRoute(BaseModel):
         description="For our router's routes priced by Google: share of Google's route that follows our design.",
     )
     features: RouteFeatures
+    maneuvers: tuple[Maneuver, ...] = Field((), description="Turn-by-turn instructions, in order.")
 
 
 class ScoredRoute(CandidateRoute):

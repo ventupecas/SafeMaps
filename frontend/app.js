@@ -25,6 +25,8 @@ const NAV = {
   worstAccuracyM: 60, // fixes less precise than this don't judge the route
   headingFromM: 10, // without a GPS heading, the bearing over this distance is the direction of travel
   followZoom: 16,
+  announceFarM: 400, // spoken directions: "In a quarter mile, ..." this far before a turn
+  announceNearM: 60, // and the turn itself this close
 };
 const COLORS = { winner: "#0b7a53", standard: "#4a5a6a", alternative: "#a9b2bc", closed: "#202124", lanes: "#e37400" };
 // Where closures and slowdowns came from, by the server's source names.
@@ -67,6 +69,7 @@ const state = {
     rerouting: false,
     lastRerouteAt: 0,
     wakeLock: null,
+    spoken: new Set(), // directions already announced, so each is said once (far and near)
   },
 };
 
@@ -263,13 +266,12 @@ async function requestTrip(origin, destination, heading = null) {
     road_events: $("road-events").value,
   };
   if (heading !== null) payload.heading = Math.round(heading * 10) / 10;
+  const headers = { "Content-Type": "application/json" };
+  const code = accessCode();
+  if (code) headers["X-Access-Code"] = code;
   let response;
   try {
-    response = await fetch("/route", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(payload),
-    });
+    response = await fetch("/route", { method: "POST", headers, body: JSON.stringify(payload) });
   } catch {
     throw new Error("Can't reach the routing server. Open this page from it, e.g. http://127.0.0.1:3143");
   }
@@ -278,8 +280,21 @@ async function requestTrip(origin, destination, heading = null) {
   return body;
 }
 
+// A shared demo (see EXPO.md) may need an access code. It comes in the link (?code=...)
+// and is remembered in this browser, so the QR code only has to be scanned once.
+function accessCode() {
+  const fromLink = new URLSearchParams(window.location.search).get("code");
+  try {
+    if (fromLink) localStorage.setItem("routes-access-code", fromLink);
+    return fromLink || localStorage.getItem("routes-access-code");
+  } catch {
+    return fromLink; // storage blocked: the link's code still works for this visit
+  }
+}
+
 // The server's own error details name its data sources, so only bad-input (422) details are shown as-is.
 const ERROR_MESSAGES = {
+  401: "This demo needs its access code: open it from the link or QR code you were given.",
   404: "No drivable route was found between these points.",
   429: "Today's live traffic limit is used up. Turn off Live traffic to keep planning, or try again tomorrow.",
   502: "The live traffic service didn't answer. Try again, or turn off Live traffic.",
@@ -335,6 +350,7 @@ function showTrip(trip, { fit = true } = {}) {
     routeList(plan),
     ...(notes.length ? [element("ul", { className: "notes" }, ...notes.map((note) => element("li", {}, note)))] : []),
     element("p", { className: "usage" }, roadEventsLine(trip)),
+    ...(trip.school_hours ? [element("p", { className: "usage" }, "School zones count now: it's a school drop-off or pickup time.")] : []),
     element(
       "p",
       { className: "usage" },
@@ -416,13 +432,19 @@ function followablePath(path, route, plan) {
   const points = path.map((point) => ({ lat: point.lat(), lng: point.lng() }));
   const cumulative = [0];
   for (let i = 1; i < points.length; i++) cumulative.push(cumulative[i - 1] + computeDistanceBetween(points[i - 1], points[i]));
-  return {
+  const followable = {
     points,
     cumulative,
     lengthM: cumulative[cumulative.length - 1],
     minutes: route.features.duration_min,
     label: routeLabel(route, plan),
   };
+  // Where each turn-by-turn instruction falls along the route, to know which comes next.
+  followable.maneuvers = route.maneuvers.map((maneuver) => ({
+    ...maneuver,
+    along: nearestOnPath(maneuver.location, followable).along,
+  }));
+  return followable;
 }
 
 function polyline(path, options) {
@@ -499,9 +521,18 @@ function stats(route) {
     ["Fuel", `${(f.fuel_l / LITERS_PER_GALLON).toFixed(2)} gal`],
     ["Risky turns", String(riskyTurns(route))],
   ];
-  if (f.lane_closures) items.push(["Lane closures", String(f.lane_closures)]);
-  if (f.closures) items.push(["Closed roads", String(f.closures)]);
+  for (const [label, value] of hazards(f)) items.push([label, String(value)]);
   return element("dl", { className: "stats" }, ...items.map(([label, value]) => element("div", {}, element("dt", {}, label), element("dd", {}, value))));
+}
+
+// The hazards a route has besides risky turns, as [label, count], for the ones it has.
+function hazards(f) {
+  return [
+    ["Lane closures", f.lane_closures],
+    ["Closed roads", f.closures],
+    ["School zones", f.school_zones],
+    ["Rail crossings", f.rail_crossings],
+  ].filter(([, count]) => count > 0);
 }
 
 function routeList(plan) {
@@ -532,9 +563,7 @@ function routeList(plan) {
             `${(f.fuel_l / LITERS_PER_GALLON).toFixed(2)} gal · `,
             element("span", { className: risky ? "risky" : "" }, `${risky} risky`),
           ),
-          ...(f.lane_closures
-            ? [element("div", { className: "risky" }, `${f.lane_closures} lane closure${f.lane_closures === 1 ? "" : "s"}`)]
-            : []),
+          ...hazards(f).map(([label, count]) => element("div", { className: "risky" }, `${count} ${label.toLowerCase()}`)),
         ),
       );
       item.addEventListener("click", () => selectRoute(route.id));
@@ -550,8 +579,10 @@ function comparedWithStandard(winner, standard) {
   const parts = [];
   const fewer = riskyTurns(standard) - riskyTurns(winner);
   if (fewer > 0) parts.push(`${fewer} fewer risky turn${fewer === 1 ? "" : "s"}`);
-  const lanes = standard.features.lane_closures - winner.features.lane_closures;
-  if (lanes > 0) parts.push(`${lanes} fewer lane closure${lanes === 1 ? "" : "s"}`);
+  for (const [field, name] of [["lane_closures", "lane closure"], ["school_zones", "school zone"], ["rail_crossings", "rail crossing"]]) {
+    const fewerOf = standard.features[field] - winner.features[field];
+    if (fewerOf > 0) parts.push(`${fewerOf} fewer ${name}${fewerOf === 1 ? "" : "s"}`);
+  }
   if (standard.features.closures && !winner.features.closures) parts.push("avoids a closed road");
   const gallons = (standard.features.fuel_l - winner.features.fuel_l) / LITERS_PER_GALLON;
   if (gallons >= 0.01) parts.push(`${gallons.toFixed(2)} gal less fuel`);
@@ -627,6 +658,7 @@ async function startDriving() {
   if (!state.plan || !state.destination) return;
   const nav = state.nav;
   Object.assign(nav, { active: true, following: true, fix: null, anchor: null, heading: null, offRoute: 0, lastRerouteAt: 0 });
+  nav.spoken.clear();
   if (!nav.car) {
     const { AdvancedMarkerElement } = await google.maps.importLibrary("marker");
     const content = element("div", { className: "car" }, element("div", { className: "car__arrow" }));
@@ -677,7 +709,10 @@ function onFix(position) {
     state.map.panTo(here);
     if (first) state.map.setZoom(NAV.followZoom);
   }
-  if (distanceM(here, state.destination) <= NAV.arrivedM) return stopDriving("You've arrived.");
+  if (distanceM(here, state.destination) <= NAV.arrivedM) {
+    speak("You have arrived.");
+    return stopDriving("You've arrived.");
+  }
   if (accuracy > NAV.worstAccuracyM) return setNavStatus("Weak GPS signal…");
   checkRoute(here);
 }
@@ -716,6 +751,7 @@ async function reroute(here) {
   nav.rerouting = true;
   nav.lastRerouteAt = Date.now();
   setNavStatus("Off route. Finding a new one…");
+  speak("Finding a new route.");
   const countryCode = (state.origin && state.origin.countryCode) || null;
   const origin = { ...here, label: "Current location", countryCode };
   try {
@@ -734,10 +770,39 @@ async function reroute(here) {
   }
 }
 
+// The next turn and what's left, on the banner; the turn spoken once ahead of it and once at it.
 function showProgress(path, along) {
   const leftM = Math.max(0, path.lengthM - along);
   const minutes = path.lengthM ? path.minutes * (leftM / path.lengthM) : 0;
-  setNavStatus(`${(leftM / M_PER_MI).toFixed(1)} mi left · about ${Math.max(1, Math.round(minutes))} min`);
+  const left = `${(leftM / M_PER_MI).toFixed(1)} mi left · about ${Math.max(1, Math.round(minutes))} min`;
+  const next = path.maneuvers.find((maneuver) => maneuver.along > along + 5);
+  if (!next) return setNavStatus(left);
+  const toGo = next.along - along;
+  setNavStatus(`In ${spokenDistance(toGo)}: ${next.instruction}\n${left}`);
+
+  const key = `${next.location.lat.toFixed(5)},${next.location.lng.toFixed(5)}|${next.instruction}`;
+  if (toGo <= NAV.announceNearM) {
+    if (!state.nav.spoken.has(`${key}|near`)) speak(next.instruction);
+    state.nav.spoken.add(`${key}|near`).add(`${key}|far`);
+  } else if (toGo <= NAV.announceFarM && !state.nav.spoken.has(`${key}|far`)) {
+    speak(`In ${spokenDistance(toGo)}, ${next.instruction}`);
+    state.nav.spoken.add(`${key}|far`);
+  }
+}
+
+// "500 feet" under a tenth of a mile, else "0.3 miles".
+function spokenDistance(meters) {
+  const miles = meters / M_PER_MI;
+  if (miles < 0.1) return `${Math.max(50, Math.round((meters * 3.28084) / 50) * 50)} feet`;
+  return `${miles.toFixed(1)} miles`;
+}
+
+// Read directions aloud, if the driver wants them and the browser can.
+function speak(text) {
+  if (!$("voice").checked || !("speechSynthesis" in window)) return;
+  const utterance = new SpeechSynthesisUtterance(text);
+  utterance.lang = "en-US";
+  window.speechSynthesis.speak(utterance);
 }
 
 function moveCar(here, heading) {

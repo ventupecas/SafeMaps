@@ -221,7 +221,7 @@ def straight_east(length_m: float = 1_000) -> list:
 def test_a_route_drives_through_a_closure_on_its_road():
     route = straight_east()
     closure = RoadEvent("wi511", "closed", (route[6], route[12]))
-    assert count_on_route(route, [closure]) == (1, 0)
+    assert count_on_route(route, [closure]) == (1, 0, 0)
 
 
 def test_a_closure_the_other_way_or_across_the_road_does_not_count():
@@ -229,12 +229,12 @@ def test_a_closure_the_other_way_or_across_the_road_does_not_count():
     westbound = RoadEvent("wi511", "lanes", (route[12], route[6]), direction=270.0)
     middle = route[10]
     cross_street = RoadEvent("wi511", "closed", (destination_point(middle, 0, 150), destination_point(middle, 180, 150)))
-    assert count_on_route(route, [westbound, cross_street]) == (0, 0)
+    assert count_on_route(route, [westbound, cross_street]) == (0, 0, 0)
 
 
 def test_a_lane_closure_at_a_spot_on_the_route_counts():
     route = straight_east()
-    assert count_on_route(route, [RoadEvent("wi511", "lanes", (route[5],))]) == (0, 1)
+    assert count_on_route(route, [RoadEvent("wi511", "lanes", (route[5],))]) == (0, 1, 0)
 
 
 # ---- WZDx
@@ -348,3 +348,40 @@ def test_work_zones_and_511_together_without_counting_a_work_zone_twice():
 )
 def test_descriptions_say_which_roads_an_event_is_on(description, road, ramp_road):
     assert (_road_kind(description), _ramp_road(description)) == (road, ramp_road)
+
+
+def test_wzdx_reads_workers_on_site_and_reduced_speed_limits():
+    zone = work_zone("some-lanes-closed", lanes=[("general", "closed"), ("general", "open")])
+    zone["properties"]["worker_presence"] = {"are_workers_present": True, "method": "arrow-board-present"}
+    zone["properties"]["reduced_speed_limit_kph"] = 88.495
+    feed, _, _ = wzdx_feed([zone])
+    (event,) = feed.events(METRO)
+    assert event.workers and event.speed_limit_kmh == pytest.approx(88.495)
+    assert event.description.endswith("(speed limit 55 mph, workers present)")
+
+
+def test_a_lane_closure_with_workers_counts_once_and_is_flagged():
+    route = straight_east()
+    crew = RoadEvent("wzdx", "lanes", (route[5],), workers=True)
+    assert count_on_route(route, [crew]) == (0, 1, 1)
+
+
+def test_driving_past_a_closed_ramp_is_not_driving_through_it():
+    freeway = straight_east()
+    exit_ramp = tuple(destination_point(freeway[6], 110, metres) for metres in range(0, 301, 50))
+    closed = RoadEvent("wzdx", "closed", exit_ramp, along=True, road="off-ramp")
+    assert count_on_route(freeway, [closed]) == (0, 0, 0)  # stays on the freeway beside it
+    taking_the_exit = freeway[:7] + list(exit_ramp[1:])
+    assert count_on_route(taking_the_exit, [closed]) == (1, 0, 0)
+
+
+def test_511_roadwork_closures_are_known_as_roadwork_and_by_their_road():
+    item = wi511_item(
+        EventType="closures",
+        IsFullClosure=True,
+        Description="Roadwork - System Interchange Full Closure on WIS 175 SB at WIS 175 SB TO I-94 WB (N-W STADIUM)",
+    )
+    feed, _, _ = wi511_feed([item, wi511_item(ID=2, EventType="accidentsAndIncidents", Description="Crash blocking right lane")])
+    roadwork, crash = feed.events(METRO)
+    assert (roadwork.category, roadwork.road, roadwork.ramp_toward) == ("roadwork", "off-ramp", 270.0)
+    assert crash.category == "incident"

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass
-from datetime import timedelta
+from datetime import time, timedelta
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -38,6 +38,10 @@ class Settings:
     wi511_api_key: str | None = None
     apify_token: str | None = None
     apify_daily_tiles: int = 300  # traffic tiles per day the paid Apify source may fetch
+    # When set, route requests must send it (X-Access-Code): for a demo shared over a public link.
+    access_code: str | None = None
+    # When school zones count: these local times on weekdays, outside July and August.
+    school_hours: tuple[tuple[time, time], ...] = ((time(7, 0), time(9, 0)), (time(14, 0), time(16, 30)))
 
     @classmethod
     def from_env(cls) -> Settings:
@@ -67,6 +71,7 @@ class Settings:
         if unknown:
             raise ValueError(f"ROUTES_ROAD_EVENT_SOURCES may only list {', '.join(ROAD_EVENT_SOURCES)}; got {unknown}")
         wzdx_file = os.getenv("ROUTES_WZDX_FILE")
+        school_hours = _time_windows(os.getenv("ROUTES_SCHOOL_HOURS") or "07:00-09:00,14:00-16:30")
         apify_daily_tiles = int(os.getenv("ROUTES_APIFY_DAILY_TILES") or 300)
         if apify_daily_tiles < 0:
             raise ValueError("ROUTES_APIFY_DAILY_TILES must be 0 or more")
@@ -90,7 +95,23 @@ class Settings:
             wi511_api_key=os.getenv("WI511_API_KEY") or None,
             apify_token=os.getenv("APIFY_TOKEN") or None,
             apify_daily_tiles=apify_daily_tiles,
+            access_code=os.getenv("ROUTES_ACCESS_CODE") or None,
+            school_hours=school_hours,
         )
+
+
+def _time_windows(text: str) -> tuple[tuple[time, time], ...]:
+    """'07:00-09:00,14:00-16:30' -> ((07:00, 09:00), (14:00, 16:30)); an empty string means never."""
+    windows = []
+    for part in text.split(","):
+        if not part.strip():
+            continue
+        try:
+            start, end = (time.fromisoformat(value.strip()) for value in part.split("-"))
+        except ValueError:
+            raise ValueError(f"ROUTES_SCHOOL_HOURS expects windows like 07:00-09:00; got {part.strip()!r}") from None
+        windows.append((start, end))
+    return tuple(windows)
 
 
 def _backend_path(value: str) -> Path:

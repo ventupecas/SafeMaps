@@ -29,8 +29,10 @@ backend/
     engine.py         The pipeline the API and CLI call
     main.py           HTTP API (FastAPI); also serves the web map
     cli.py            Run and tune from the terminal
+    crash_data.py     Downloads fatal crashes (NHTSA FARS) for the crash-prone junction rule
+    evaluate.py       Runs 20 Milwaukee trips and writes RESULTS.md: what the engine changes
   data/               Downloaded OSM tiles and built graphs (gitignored)
-  tests/              262 tests, no network needed
+  tests/              277 tests, no network needed
 frontend/
   index.html, app.js, styles.css   The web map: place search, routes drawn and explained
   config.example.js                Copy to config.js (gitignored) with the browser key
@@ -97,7 +99,10 @@ Until then, the page shows these steps in place of the map. On the page:
 - Leave every route for two GPS fixes in a row (more than 40 m off, with a fix accurate to 60 m or better), and the page asks for a new route from where the car is. It sends the car's heading, so the new routes start the way the car is going instead of with a U-turn. New routes are asked for at most every 20 s.
 - Within 40 m of the destination, it stops and says so.
 - **Cost:** each new route is a full trip request: with Live traffic on, up to 4 Google requests at the Pro tier (a heading also makes Google suggestions Pro). Turn Live traffic off to reroute on our own estimates.
-- **Phones:** browsers only share location with secure pages: `https://`, or `localhost` on the same computer. Opening `http://<this computer's IP>:3143` on a phone won't get a location, and the map key only allows the localhost addresses. A phone needs an https address (a tunnel, for example) added to the key's websites.
+- **Spoken directions:** the banner shows the next turn ("In 0.3 miles: Turn right onto West Wisconsin Avenue") above the miles and minutes left, and the browser reads it aloud about 400 m before the turn and again at it. It also says when it's finding a new route and when you've arrived. Untick **Spoken directions while driving** to keep it quiet. Each route's `maneuvers` in the API carry the instructions, named from the road map.
+- **Phones:** browsers only share location with secure pages: `https://`, or `localhost` on the same computer. Opening `http://<this computer's IP>:3143` on a phone won't get a location. See "Sharing the demo over a link" below.
+
+**Sharing the demo over a link.** A free tunnel gives the laptop a public https address, so visitors can open the app on their phones, driving mode included. Anyone with the address could use your Google requests, so set an access code: with `ROUTES_ACCESS_CODE=...` in `backend/.env`, route requests without it are refused (401). Share the address with `?code=...` on the end; the page remembers the code. EXPO.md has the step-by-step instructions.
 
 ## Running the engine
 
@@ -177,7 +182,9 @@ Turns across oncoming traffic cost extra where they're risky. These are lefts wh
   - **One-way streets:** where every road at a junction is one-way, no turn crosses oncoming traffic. Except on a divided road: when the same road runs the other way within 50 m (`DIVIDED_ROAD_M`), its oncoming traffic is just across the median, so turns there count as usual.
   - **U-turns through a median opening:** OSM draws a median opening as a short link between the two carriageways. The router treats a turn through any segment shorter than 30 m (`CONNECTOR_MAX_M`) as one maneuver, judged from the road before it to the road after it, so coming out pointing back the way the car came is one U-turn across traffic, not a left ramp and a slight left. It's costed like any U-turn (25 s, plus the busy and crash-prone penalties), and the scorer sees the same U-turn on the route.
   - **Without the graph:** a junction is busy when either road's no-traffic speed is 50 km/h or more.
-- **Crash-prone junction.** At least `ROUTES_CRASH_MIN_COUNT` recorded crashes within 35 m. Point `ROUTES_CRASH_DATA` at a CSV with `lat,lng[,crashes]` columns. Many cities publish this data, for example NYC's "Motor Vehicle Collisions", Chicago's "Traffic Crashes" and the UK's STATS19. Filter it to your demo area first. Without crash data, only the busy rule applies.
+- **Crash-prone junction.** At least `ROUTES_CRASH_MIN_COUNT` recorded crashes within 35 m. Point `ROUTES_CRASH_DATA` at a CSV with `lat,lng[,crashes]` columns. Without crash data, only the busy rule applies.
+  - **For Milwaukee:** `python -m app.crash_data milwaukee-metro` downloads NHTSA's Fatality Analysis Reporting System (FARS, public, no key) for 2020–2024 (`--years` to change). It keeps the area's fatal crashes (612 for 2020–2024) and writes `data/crashes/milwaukee-metro.csv`. These are fatal crashes only, so a single one marks a junction: set `ROUTES_CRASH_MIN_COUNT=1`. About 1,000 busy junctions in the road map are within 35 m of one.
+  - **Elsewhere:** many cities publish all crashes, for example NYC's "Motor Vehicle Collisions", Chicago's "Traffic Crashes" and the UK's STATS19. Filter to your area first.
 - **Weights.** By default each busy crossing turn costs 3 perceived minutes, and a crash-prone one costs 6 more. The `calm` preset raises these to 4 and 8. `fastest` sets both to 0 so it stays a pure-time baseline.
 
 `--turns` lists every crossing turn with its location, road speed and nearby crash count, which is the quickest way to calibrate:
@@ -218,9 +225,10 @@ What each kind of event does:
 - **Lane closure:** the segments cost 1.5× their time, and driving into one costs `lane_closure_weight` once, like a risky turn. It counts toward safety, so in the default ranking a route through a lane closure loses to an equally fuel-efficient one without.
 - **Jam / slow:** the segments cost 3× / 1.5× their time when our router designs routes, so the designs go around them. They aren't scored separately: live travel times already include them.
 - **Matching to the map:** sources often give only the two ends of a stretch. Each end is snapped to the road segment there, running the event's direction, and the event becomes the shortest drive between them along the roads, if that's at most 1.5× the straight distance plus 500 m. Otherwise it stays as given. A stretch affecting both directions becomes one event per direction. A single point matches the nearest road within 30 m. The map draws closed roads in black and lane closures in dashed orange. Each event is matched once and remembered, so only the first trip through an area waits for it (a few seconds for 60 work zones).
-- **Which work zones count:** WZDx entries closing all lanes are closures. "Some lanes closed" (only when a travel lane is closed, not just the shoulder), flagging, alternating one-way traffic and temporary signals are lane closures. Planned work that hasn't started, and suggested detours, are left out.
+- **Which work zones count:** WZDx entries closing all lanes are closures. "Some lanes closed" (only when a travel lane is closed, not just the shoulder), flagging, alternating one-way traffic and temporary signals are lane closures. Planned work that hasn't started, and suggested detours, are left out. A reduced speed limit makes the work zone's segments slower to match, and workers on site make it count 1.5× as risky.
 - **Ramps and mainlines:** descriptions say which road an event is on ("Ramp Full Closure on I-94 EB at OFF RAMP TO HAWLEY RD", "Mainline Left Lane Closed on ..."). A mainline event never matches a ramp. Ramp closures are placed on the freeway beside the ramp, so they're matched to the ramp itself:
-  - **Exits and entrances:** the junction where an exit leaves the freeway (or an entrance joins it) heading the event's way, whose ramp reaches the named street, within 1.5 km.
+  - **Exits and entrances:** the junction where an exit leaves the freeway (or an entrance joins it) heading the event's way, whose ramp reaches the named street, within 1.5 km. The whole ramp is closed, up to the street or a split, and a route only counts as using it if it passes both ends: the first stretch of a ramp runs right beside the freeway.
+  - **Freeway-to-freeway ramps** ("System Interchange Full Closure on WIS 175 SB at WIS 175 SB TO I-94 WB"): the ramp that leads onto that freeway in that direction, from where it splits from ramps going elsewhere.
   - **No street named:** the nearest such ramp within 300 m.
   - **No ramp found:** the event is left out rather than closing the freeway. This happens where the ramp isn't on the map, for example ramps rebuilt in the I-94 East-West project after the map was downloaded.
 
@@ -231,6 +239,24 @@ What each kind of event does:
 4. Put it in `backend/.env` as `WI511_API_KEY=...` and restart the server. `/health` shows `"wi511_key_set": true`.
 
 The access agreement (linked on the doc page) wasn't reviewed here: read it before showing the data publicly.
+
+## School zones and railroad crossings
+
+Both come from OpenStreetMap with the road map, so they need a rebuild (`python -m app.build_graph milwaukee-metro --refresh`). A road map built before they were added still works, without them; `/health` shows how many it has.
+
+- **Railroad crossings at grade** (`railway=level_crossing` on a road): each one costs 20 s (slowing down, and now and then a train) plus `rail_crossing_weight` (1 by default) in safety.
+- **School zones:** streets within 200 m of a school (`amenity=school`), freeways excepted.
+  - **When they count:** only during school hours, by default 7:00–9:00 and 14:00–16:30 on weekdays outside July and August, in the server's local time (`ROUTES_SCHOOL_HOURS`). Holidays and each district's calendar aren't known.
+  - **Their cost:** the router drives them at 20 mph, entering one costs `school_zone_weight` (3, like a risky turn), and the scorer counts the schools a route passes.
+- **Safety ranking:** both count toward safety, the first priority, alongside risky turns and lane closures. The web map lists them with each route and says when school zones are active.
+
+## Results summary
+
+```powershell
+.\.venv\Scripts\python.exe -m app.evaluate
+```
+
+Runs 20 trips across Milwaukee through the same API the web map uses. It compares our recommended route with the standard route (Google's choice) and writes [RESULTS.md](RESULTS.md) at the repo root, plus `data/results.csv`. Each new trip costs one cheap Google request, and reruns use saved answers. `--live-traffic` uses live times, at up to about 7 requests a trip.
 
 ## Own router (Milwaukee metro)
 

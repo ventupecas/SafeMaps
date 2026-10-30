@@ -93,7 +93,7 @@ class OverpassError(RuntimeError):
 
 
 def build_query(bbox: BBox, timeout_s: int = 600) -> str:
-    """Drivable ways, their nodes, traffic signals and turn restrictions inside bbox."""
+    """Drivable ways, their nodes, traffic signals, railroad crossings, turn restrictions and schools inside bbox."""
     box = f"{bbox.south},{bbox.west},{bbox.north},{bbox.east}"
     highways = "|".join(DRIVABLE_HIGHWAYS)
     return (
@@ -104,8 +104,13 @@ def build_query(bbox: BBox, timeout_s: int = 600) -> str:
         ".road_nodes out skel qt;\n"
         'node.road_nodes["highway"="traffic_signals"];\n'
         "out body qt;\n"
+        'node.road_nodes["railway"="level_crossing"];\n'
+        "out body qt;\n"
         'rel(bw.roads)["type"="restriction"];\n'
         "out body qt;\n"
+        # Schools as points: a building or campus outline comes back as its center.
+        f'nwr["amenity"="school"]({box});\n'
+        "out tags center qt;\n"
     )
 
 
