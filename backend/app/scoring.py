@@ -15,8 +15,9 @@ Two ways to rank (ScoringProfile.ranking):
   rough); among those, the fastest. Each route gets a short reason for its
   place.
 
-Either way, routes slower than max_detour_ratio times the fastest, and routes
-through a closed road, are shown but can't win. (If every route goes through
+Either way, routes slower than max_detour_ratio times the fastest (or more
+than max_extra_min slower, when the driver sets that), and routes through a
+closed road, are shown but can't win. (If every route goes through
 a closure, the closure data is more likely wrong than the road: none is
 ruled out for it.)
 """
@@ -83,7 +84,7 @@ def rank_candidates(candidates: Sequence[CandidateRoute], profile: ScoringProfil
 
     honor_closures = not all(c.features.closures for c in candidates)
     open_routes = [c for c in candidates if not (honor_closures and c.features.closures)]
-    ceiling = min(c.features.duration_min for c in open_routes) * profile.max_detour_ratio
+    ceiling = _time_limit(min(c.features.duration_min for c in open_routes), profile)
     scored = [
         ScoredRoute(
             **candidate.model_dump(),
@@ -99,6 +100,21 @@ def rank_candidates(candidates: Sequence[CandidateRoute], profile: ScoringProfil
     return scored
 
 
+def _time_limit(fastest_min: float, profile: ScoringProfile) -> float:
+    """The longest trip time that can still win: max_detour_ratio times the fastest, or max_extra_min more if less."""
+    limit = fastest_min * profile.max_detour_ratio
+    return limit if profile.max_extra_min is None else min(limit, fastest_min + profile.max_extra_min)
+
+
+def _limit_words(fastest_min: float, profile: ScoringProfile) -> tuple[str, str]:
+    """How reasons name the time limit that applies: (over it, within it)."""
+    if profile.max_extra_min is not None and fastest_min + profile.max_extra_min < fastest_min * profile.max_detour_ratio:
+        extra = f"{profile.max_extra_min:g} min"
+        return f"over {extra} longer than the fastest route", f"within {extra} of the fastest time"
+    ratio = f"{profile.max_detour_ratio:g}x"
+    return f"over {ratio} the fastest route's time", f"within {ratio} the fastest time"
+
+
 def _rank_by_priority(scored: list[ScoredRoute], profile: ScoringProfile) -> list[ScoredRoute]:
     eligible = [route for route in scored if route.eligible]
     ranked: list[ScoredRoute] = []
@@ -111,8 +127,9 @@ def _rank_by_priority(scored: list[ScoredRoute], profile: ScoringProfile) -> lis
 
     winner = ranked[0]
     risky = _risk_words(scored)
+    limit = _limit_words(min(route.features.duration_min for route in eligible), profile)
     return [
-        route.model_copy(update={"reason": _priority_reason(route, winner, eligible, profile, risky, scored)})
+        route.model_copy(update={"reason": _priority_reason(route, winner, eligible, profile, risky, scored, limit)})
         for route in ranked
     ]
 
@@ -130,11 +147,13 @@ def _priority_reason(
     profile: ScoringProfile,
     risky: str,
     all_routes: Sequence[ScoredRoute] = (),
+    limit: tuple[str, str] = ("", ""),
 ) -> str:
+    over, within = limit
     if not route.eligible:
         if route.features.closures:
             return "goes through a closed road"
-        return f"too slow: over {profile.max_detour_ratio:g}x the fastest route's time"
+        return f"too slow: {over}"
     if route.id == winner.id:
         safest = _within(eligible, risk, 0.0)
         slower_but_safer = any(
@@ -142,7 +161,7 @@ def _priority_reason(
             for other in all_routes
         )
         if slower_but_safer:
-            return f"safest within {profile.max_detour_ratio:g}x the fastest time; safer routes take longer"
+            return f"safest {within}; safer routes take longer"
         if len(safest) == 1:
             return f"safest: fewest {risky}"
         if len(_within(safest, _fuel, profile.fuel_tolerance)) == 1:

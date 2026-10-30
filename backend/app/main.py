@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import hmac
 import logging
+import time
 from collections.abc import AsyncIterator, Sequence
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field, replace
@@ -47,6 +48,7 @@ from app.engine import (
     load_graph,
     load_hotspots,
     make_turn_context,
+    name_routes,
     plan_from_candidates,
 )
 from app.features import TurnContext
@@ -95,6 +97,13 @@ class TripRequest(BaseModel):
     country_code: str | None = Field(
         None,
         description="Two-letter country of the trip (from the Places selection). Decides which turns cross traffic.",
+    )
+    max_extra_min: float | None = Field(
+        None,
+        ge=0,
+        le=120,
+        description="The most extra minutes over the fastest route the driver accepts for a safer one. "
+        "None: the profile's own limit (max_detour_ratio times the fastest).",
     )
     use_router: bool = Field(True, description="Let our own router design routes too, when a road graph is loaded.")
     live_traffic: bool = Field(
@@ -197,6 +206,7 @@ class Engine:
         """
         if self.graph is None or self.graph.bbox is None:
             return
+        started = time.perf_counter()
         try:
             report = collect_road_events(
                 sources_for_map(self.settings.road_event_sources, self.settings.map),
@@ -211,7 +221,12 @@ class Engine:
             router = self.router(make_turn_context(self.settings, self.hotspots, None, self.graph))
             for event in snapped:
                 router.event_edges(event)  # the router's own lookup, remembered too
-            logger.info("Road events matched to the map ahead of trips: %d from %s", len(report.events), report.source)
+            logger.info(
+                "Ready for trips: %d closures, lane closures and jams from %s matched to the map in %.0f s",
+                len(report.events),
+                report.source or "no source",
+                time.perf_counter() - started,
+            )
             self.warmed_up = True
         except Exception:  # a background nicety: trips still match what they need
             logger.exception("Matching road events ahead of trips failed")
@@ -262,8 +277,24 @@ def shown_events(events: Sequence[RoadEvent], plan: RoutePlan) -> list[RoadEvent
     return shown[:MAX_EVENTS_SHOWN]
 
 
+def show_app_messages() -> None:
+    """Print this app's own messages (ready, road events matched, sources failing) in the server's window.
+
+    Uvicorn prints only its own. This adds the app's, and only those: httpx
+    logs each request's address, and some carry an API key.
+    """
+    app_logger = logging.getLogger("app")
+    if app_logger.handlers:
+        return
+    handler = logging.StreamHandler()
+    handler.setFormatter(logging.Formatter("%(levelname)s:     %(message)s"))  # lined up with uvicorn's
+    app_logger.addHandler(handler)
+    app_logger.setLevel(logging.INFO)
+
+
 def create_app(settings: Settings | None = None, *, http: httpx.Client | None = None) -> FastAPI:
     """Build the API. Tests pass their own settings and a mock http client."""
+    show_app_messages()
     settings = settings or Settings.from_env()
 
     @asynccontextmanager
@@ -287,6 +318,7 @@ def create_app(settings: Settings | None = None, *, http: httpx.Client | None = 
                 client,
                 DailyUsage(settings.cache_dir / "tomtom-requests.json", settings.tomtom_daily_requests),
                 box=graph.bbox if graph else None,
+                saved=settings.cache_dir / "tomtom-incidents.json",
             )
             if tomtom_key
             else None,
@@ -305,11 +337,13 @@ def create_app(settings: Settings | None = None, *, http: httpx.Client | None = 
         app.state.engine = engine
         Thread(target=engine.warm_up, name="road-events-warm-up", daemon=True).start()
         logger.info(
-            "Ready: road graph %s, crash data %s, cache %s, road events from %s",
+            "Started: %s map, road graph %s, crash data %s, cache %s, road events from %s%s",
+            "OpenStreetMap" if settings.map == "osm" else "Google",
             engine.graph.area if engine.graph else "none",
             "loaded" if engine.hotspots else "none",
             settings.cache_mode,
-            ", ".join(settings.road_event_sources) or "nowhere",
+            ", ".join(sources_for_map(settings.road_event_sources, settings.map)) or "nowhere",
+            "; matching them to the map before trips (about a minute)" if graph and graph.bbox else "",
         )
         yield
         if http is None:
@@ -394,7 +428,8 @@ def create_app(settings: Settings | None = None, *, http: httpx.Client | None = 
         if settings.access_code and not hmac.compare_digest(x_access_code or "", settings.access_code):
             raise HTTPException(status_code=401, detail="This demo needs its access code.")
         try:
-            profile = get_profile(trip.profile, trip.weights)
+            limit = {} if trip.max_extra_min is None else {"max_extra_min": trip.max_extra_min}
+            profile = get_profile(trip.profile, {**trip.weights, **limit})
             context = make_turn_context(settings, engine.hotspots, trip.country_code, engine.graph)
         except ValueError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from None
@@ -468,7 +503,7 @@ def create_app(settings: Settings | None = None, *, http: httpx.Client | None = 
             )
 
         own_used = any(candidate.source == "own" for candidate in candidates)
-        plan = plan_from_candidates(candidates, profile)
+        plan = name_routes(plan_from_candidates(candidates, profile), engine.graph)
         return TripResponse(
             plan=plan,
             notes=notes,

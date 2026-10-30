@@ -505,6 +505,237 @@ select:focus-visible,
   box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.3);
 }
 
+/* Closures crowded together on the OpenStreetMap map: one marker with their count.
+   Qualified with Leaflet's class: its stylesheet loads later and sets display: block. */
+.leaflet-marker-icon.cluster {
+  display: grid;
+  place-items: center;
+  border-radius: 50%;
+  background: #202124;
+  border: 2px solid #fff;
+  box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.35), 0 1px 4px rgba(0, 0, 0, 0.3);
+  color: #fff;
+  font-size: 0.8rem;
+  font-weight: 700;
+}
+
+/* A marker's details, opened by a click or tap. */
+.popup strong {
+  display: block;
+}
+
+.popup p {
+  margin: 4px 0 0;
+  max-width: 260px;
+}
+
+/* Header links, the extra controls tucked away, and the recommended route's kind. */
+
+.header-links {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 16px;
+  margin-top: 8px;
+}
+
+.header-links .link-button {
+  margin-left: 0;
+  font-size: 0.85rem;
+}
+
+.advanced {
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 8px 12px;
+}
+
+.advanced summary {
+  cursor: pointer;
+  font-size: 0.9rem;
+  font-weight: 600;
+  color: var(--muted);
+}
+
+.advanced[open] summary {
+  margin-bottom: 10px;
+}
+
+.advanced .toggles {
+  margin-top: 12px;
+}
+
+.winner__kind {
+  margin: -2px 0 6px;
+  font-size: 0.82rem;
+  color: var(--muted);
+}
+
+/* The map key: what the lines and markers mean. */
+
+.legend {
+  position: absolute;
+  top: 12px;
+  right: 12px;
+  z-index: 1000; /* over the map's own layers and controls */
+  max-width: calc(100% - 80px);
+  padding: 6px 10px;
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.95);
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.3);
+  font-size: 0.8rem;
+}
+
+.legend summary {
+  cursor: pointer;
+  font-weight: 600;
+}
+
+.legend__items {
+  margin: 6px 0 0;
+  padding: 0;
+  list-style: none;
+  display: grid;
+  gap: 4px;
+}
+
+.legend__items li {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.key {
+  flex: none;
+  display: inline-grid;
+  place-items: center;
+  width: 28px;
+  height: 6px;
+  border-radius: 3px;
+}
+
+.key--winner {
+  background: var(--accent);
+  box-shadow: 0 0 0 2px #fff, 0 0 0 3px rgba(0, 0, 0, 0.15);
+}
+
+.key--standard {
+  height: 0;
+  border-top: 3px dashed #4a5a6a;
+  border-radius: 0;
+}
+
+.key--alternative {
+  background: #a9b2bc;
+}
+
+.key--closed {
+  background: #202124;
+}
+
+.key--lanes {
+  height: 0;
+  border-top: 3px dashed #e37400;
+  border-radius: 0;
+}
+
+.key--cluster {
+  width: 20px;
+  height: 20px;
+  margin: 0 4px;
+  border-radius: 50%;
+  background: #202124;
+  color: #fff;
+  font-size: 0.7rem;
+  font-weight: 700;
+}
+
+.key--turn {
+  width: 12px;
+  height: 12px;
+  margin: 0 8px;
+  border-radius: 50%;
+  background: var(--risk);
+}
+
+.key--traffic {
+  background: linear-gradient(90deg, #2e9e5b, #f2a600, #d93025, #7a1b14);
+}
+
+.driving .legend {
+  display: none; /* the banner and the road come first while driving */
+}
+
+/* Credits that only apply to the OpenStreetMap map (TomTom's traffic). */
+body:not(.map-osm) .osm-only {
+  display: none;
+}
+
+/* Dialogs: how it works, and the link for phones. */
+
+.dialog {
+  width: min(560px, calc(100vw - 32px));
+  max-height: 85vh;
+  border: none;
+  border-radius: var(--radius);
+  padding: 20px 24px;
+  box-shadow: 0 8px 30px rgba(0, 0, 0, 0.3);
+  color: var(--text);
+  line-height: 1.5;
+}
+
+.dialog::backdrop {
+  background: rgba(0, 0, 0, 0.45);
+}
+
+.dialog h2 {
+  margin: 0 32px 8px 0;
+  font-size: 1.2rem;
+}
+
+.dialog h3 {
+  margin: 16px 0 4px;
+  font-size: 1rem;
+}
+
+.dialog ul {
+  margin: 0;
+  padding-left: 20px;
+}
+
+.dialog__close {
+  position: absolute;
+  top: 8px;
+  right: 10px;
+  border: none;
+  background: none;
+  color: var(--muted);
+  font-size: 1.6rem;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.dialog__credits {
+  margin-bottom: 0;
+  font-size: 0.78rem;
+  color: var(--muted);
+}
+
+.dialog--narrow {
+  width: min(380px, calc(100vw - 32px));
+  text-align: center;
+}
+
+.qr {
+  width: 240px;
+  height: 240px;
+  image-rendering: pixelated;
+}
+
+.qr__link {
+  word-break: break-all;
+  font-size: 0.85rem;
+}
+
 @media (max-width: 760px) {
   .layout {
     grid-template-columns: 1fr;
@@ -575,6 +806,7 @@ select:focus-visible,
   font-size: 0.9rem;
 }
 
-.osm-suggestions li:hover {
+.osm-suggestions li:hover,
+.osm-suggestions li[aria-selected="true"] {
   background: var(--accent-soft);
 }

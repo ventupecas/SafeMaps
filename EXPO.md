@@ -54,7 +54,7 @@ It takes a while.
 
 ### Make the results summary
 
-Runs 20 Milwaukee trips and writes `RESULTS.md` at the repo root: risky turns avoided, closures, fuel and minutes, compared with the standard route. It's a good thing to print for the table. Each new trip costs one cheap Google request, and reruns use saved answers. Rerun it after the road map rebuild so school zones and rail crossings show up.
+Runs 20 Milwaukee trips and writes `RESULTS.md` at the repo root: risky turns avoided, closures, fuel and minutes, compared with the standard route. It's a good thing to print for the table. It also writes `frontend\results.json`, the numbers the page's **How it works** shows visitors. With `ROUTES_MAP=osm` it costs nothing from Google; on Google's map each new trip costs one cheap Google request, and reruns use saved answers. Rerun it after the road map rebuild so school zones and rail crossings show up, and the day before the expo so the numbers reflect that week's closures.
 
 ```powershell
 .\.venv\Scripts\python.exe -m app.evaluate
@@ -98,6 +98,8 @@ Leave this window open all day: closing it stops the app.
 
 - **No `--reload`:** that option is for development. Without it, a stray file save can't restart the server mid-demo.
 - **Keep `--port 3143`:** the map key only works on that port.
+- **Wait for "Ready for trips":** the window prints `Started: ...` at once, then `Ready for trips: ... matched to the map in N s` about a minute later. Trips work before that, just slower.
+- **Restarted within 10 minutes?** TomTom's last answer is reused, so a restart doesn't use another TomTom request.
 
 ### Check it's healthy
 
@@ -121,6 +123,7 @@ Look for:
 Open **http://127.0.0.1:3143** and run the 2–3 trips you plan to show.
 
 - **Pick places with the search boxes, not map clicks,** so the trips repeat exactly.
+- **Try "Extra time you'd accept for a safer route":** "Up to 10 minutes" stops a much slower route from winning on a long trip. Visitors can pick their own.
 - **This also saves Google's answers** for those trips, which the zero-cost fallback below relies on.
 
 ## 4. During the expo
@@ -174,11 +177,12 @@ A free Cloudflare tunnel gives the laptop a public https address, so phones can 
    cloudflared tunnel --url http://localhost:3143
    ```
 4. Add `https://*.trycloudflare.com/*` to the browser key's allowed websites in the Cloud Console, under **APIs & Services → Credentials**. It can take a few minutes to apply.
-5. Make a QR code of `https://something.trycloudflare.com/?code=expo2026` (your address and code). The page remembers the code, so visitors scan once.
+5. On the laptop, open `https://something.trycloudflare.com/?code=expo2026` (your address and code) and click **Open on your phone**. It shows a QR code of that address with the code, for visitors to scan. The page remembers the code, so they scan once.
 
 Things to know:
 
-- **New address each time:** the address changes every time the tunnel starts, so remake the QR code.
+- **New address each time:** the address changes every time the tunnel starts, so open the new one and show its QR code.
+- **On `127.0.0.1`,** **Open on your phone** explains these steps instead: phones can't reach the laptop's own address.
 - **Shared limit:** every visitor's trips count toward your daily Google limit.
 - **When done:** press Ctrl+C in the tunnel window, then remove the `trycloudflare.com` entry from the key.
 

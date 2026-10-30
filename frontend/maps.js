@@ -6,7 +6,10 @@
 //   await view.load()                     load the library
 //   await view.create(element, options)   { center, zoom, onClick(point), onDragStart() }
 //   view.line(points, style)              { color, weight, opacity, dashed } -> { front(on), remove() }
-//   view.marker(point, element, options)  { title, zIndex } -> { move(point), remove() }
+//   view.marker(point, element, options)  { title, zIndex, popup } -> { move(point), remove() }
+//                                         popup: { heading, text }, opened by a click or tap
+//   view.markerGroup()                    -> { add(point, element, options), show(on), clear() }
+//                                         markers that cluster into a count where crowded (OpenStreetMap)
 //   view.fit(points), view.panTo(point), view.setZoom(zoom)
 //   view.traffic(on), view.hasTraffic     a traffic layer, when the map has one
 //   await view.search(container, placeholder, onPick(place))   place search in a box
@@ -16,6 +19,8 @@
 // is TomTom's, served through our server (trafficTiles), which holds the key.
 
 const LEAFLET = "https://unpkg.com/leaflet@1.9.4/dist/";
+const MARKER_CLUSTER = "https://unpkg.com/leaflet.markercluster@1.5.3/dist/";
+const CLUSTER_RADIUS_PX = 40; // markers closer than this on screen share one count
 const OSM_TILES = "https://tile.openstreetmap.org/{z}/{x}/{y}.png";
 const OSM_CREDIT = '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors';
 const TOMTOM_CREDIT = 'Traffic &copy; <a href="https://www.tomtom.com">TomTom</a>';
@@ -87,15 +92,44 @@ class GoogleView {
     };
   }
 
-  marker(point, element, { title = "", zIndex } = {}) {
-    const marker = new this.Marker({ map: this.map, position: point, content: element, title, zIndex });
+  marker(point, element, { title = "", zIndex, popup = null } = {}) {
+    const marker = new this.Marker({ map: this.map, position: point, content: element, title, zIndex, gmpClickable: Boolean(popup) });
+    if (popup) {
+      marker.addListener("click", () => {
+        this.info ||= new google.maps.InfoWindow();
+        this.info.setContent(popupContent(popup));
+        this.info.open({ anchor: marker, map: this.map });
+      });
+    }
     return {
       move: (to) => {
         marker.position = to;
       },
+      show: (on) => {
+        marker.map = on ? this.map : null;
+      },
       remove: () => {
         marker.map = null;
       },
+    };
+  }
+
+  // Google's map shows fewer closures (no TomTom), so its markers don't cluster.
+  markerGroup() {
+    const markers = [];
+    let shown = true;
+    return {
+      add: (point, element, options) => {
+        const marker = this.marker(point, element, options);
+        marker.show(shown);
+        markers.push(marker);
+        return marker;
+      },
+      show: (on) => {
+        shown = on;
+        markers.forEach((marker) => marker.show(on));
+      },
+      clear: () => markers.splice(0).forEach((marker) => marker.remove()),
     };
   }
 
@@ -162,17 +196,19 @@ class OsmView {
   }
 
   async load() {
-    const css = document.createElement("link");
-    css.rel = "stylesheet";
-    css.href = `${LEAFLET}leaflet.css`;
-    document.head.append(css);
-    await new Promise((resolve, reject) => {
-      const script = document.createElement("script");
-      script.src = `${LEAFLET}leaflet.js`;
-      script.onload = resolve;
-      script.onerror = () => reject(new Error("The map couldn't load. Check your network."));
-      document.head.append(script);
-    });
+    addStylesheet(`${LEAFLET}leaflet.css`);
+    try {
+      await loadScript(`${LEAFLET}leaflet.js`);
+    } catch {
+      throw new Error("The map couldn't load. Check your network.");
+    }
+    // Clustering is a nicety: without it, every marker shows on its own.
+    try {
+      addStylesheet(`${MARKER_CLUSTER}MarkerCluster.css`);
+      await loadScript(`${MARKER_CLUSTER}leaflet.markercluster.js`);
+    } catch (error) {
+      console.warn("Marker clustering unavailable:", error);
+    }
   }
 
   async create(element, { center, zoom, onClick, onDragStart }) {
@@ -191,7 +227,8 @@ class OsmView {
     return { front: (on) => on && line.bringToFront(), remove: () => line.remove() };
   }
 
-  marker(point, element, { title = "", zIndex = 0 } = {}) {
+  // layer: a marker group's layer to add it to, instead of the map.
+  marker(point, element, { title = "", zIndex = 0, popup = null, layer = null } = {}) {
     // Anchored at the bottom middle, like Google's markers, so the same styles fit both.
     const anchor = document.createElement("div");
     anchor.className = "lf-anchor";
@@ -200,10 +237,34 @@ class OsmView {
       icon: L.divIcon({ html: anchor, className: "lf-icon", iconSize: [0, 0] }),
       title,
       zIndexOffset: zIndex * 100,
-      interactive: Boolean(title),
-      keyboard: false,
-    }).addTo(this.map);
-    return { move: (to) => marker.setLatLng([to.lat, to.lng]), remove: () => marker.remove() };
+      interactive: Boolean(title || popup),
+      keyboard: Boolean(popup),
+    });
+    if (popup) marker.bindPopup(popupContent(popup), { offset: [0, -6] });
+    marker.addTo(layer || this.map);
+    return {
+      move: (to) => marker.setLatLng([to.lat, to.lng]),
+      show: (on) => (on ? marker.addTo(layer || this.map) : (layer || this.map).removeLayer(marker)),
+      remove: () => (layer || this.map).removeLayer(marker),
+    };
+  }
+
+  // Markers that merge into a count where they crowd together, and split apart as the map zooms in.
+  markerGroup() {
+    const layer = L.markerClusterGroup
+      ? L.markerClusterGroup({
+          maxClusterRadius: CLUSTER_RADIUS_PX,
+          showCoverageOnHover: false,
+          iconCreateFunction: (cluster) =>
+            L.divIcon({ html: `<span>${cluster.getChildCount()}</span>`, className: "cluster", iconSize: [30, 30] }),
+        })
+      : L.layerGroup();
+    layer.addTo(this.map);
+    return {
+      add: (point, element, options) => this.marker(point, element, { ...options, layer }),
+      show: (on) => (on ? layer.addTo(this.map) : layer.remove()),
+      clear: () => layer.clearLayers(),
+    };
   }
 
   fit(points) {
@@ -226,29 +287,50 @@ class OsmView {
     else this.trafficLayer.remove();
   }
 
-  // Place search through Photon, built on OpenStreetMap data (free, fair use).
+  // Place search through Photon, built on OpenStreetMap data (free, fair use). Arrow keys move
+  // through the suggestions, Enter picks one (the first if none is highlighted), Escape closes them.
   async search(container, placeholder, onPick) {
+    const listId = `${container.id}-suggestions`;
     const input = document.createElement("input");
-    input.type = "search";
-    input.className = "osm-search";
-    input.placeholder = placeholder;
-    input.autocomplete = "off";
+    Object.assign(input, { type: "search", className: "osm-search", placeholder, autocomplete: "off" });
+    input.setAttribute("role", "combobox");
+    input.setAttribute("aria-label", placeholder);
+    input.setAttribute("aria-autocomplete", "list");
+    input.setAttribute("aria-controls", listId);
+    input.setAttribute("aria-expanded", "false");
     const list = document.createElement("ul");
-    list.className = "osm-suggestions";
-    list.hidden = true;
+    Object.assign(list, { id: listId, className: "osm-suggestions", hidden: true });
+    list.setAttribute("role", "listbox");
     let timer = null;
     let results = [];
+    let active = -1; // the highlighted suggestion
 
+    const open = (on) => {
+      list.hidden = !on;
+      input.setAttribute("aria-expanded", String(on));
+      if (!on) highlight(-1);
+    };
+    const highlight = (index) => {
+      active = index;
+      [...list.children].forEach((item, i) => item.setAttribute("aria-selected", String(i === index)));
+      if (index >= 0) {
+        input.setAttribute("aria-activedescendant", `${listId}-${index}`);
+        list.children[index].scrollIntoView({ block: "nearest" });
+      } else {
+        input.removeAttribute("aria-activedescendant");
+      }
+    };
     const choose = (place) => {
       input.value = place.label;
-      list.hidden = true;
+      open(false);
       onPick(place);
     };
     const show = () => {
       list.replaceChildren(
-        ...results.map((place) => {
+        ...results.map((place, i) => {
           const item = document.createElement("li");
-          item.textContent = place.label;
+          Object.assign(item, { id: `${listId}-${i}`, textContent: place.label });
+          item.setAttribute("role", "option");
           item.addEventListener("mousedown", (event) => {
             event.preventDefault(); // keep focus, so blur doesn't hide the list first
             choose(place);
@@ -256,7 +338,8 @@ class OsmView {
           return item;
         }),
       );
-      list.hidden = results.length === 0;
+      open(results.length > 0);
+      highlight(-1);
     };
     input.addEventListener("input", () => {
       clearTimeout(timer);
@@ -276,11 +359,56 @@ class OsmView {
       }, 300);
     });
     input.addEventListener("keydown", (event) => {
-      if (event.key === "Enter" && results.length) choose(results[0]);
+      const count = list.hidden ? 0 : results.length;
+      if (event.key === "ArrowDown" && count) {
+        event.preventDefault();
+        highlight((active + 1) % count);
+      } else if (event.key === "ArrowUp" && count) {
+        event.preventDefault();
+        highlight(active <= 0 ? count - 1 : active - 1);
+      } else if (event.key === "Enter" && results.length) {
+        event.preventDefault();
+        choose(results[Math.max(active, 0)]);
+      } else if (event.key === "Escape" && count) {
+        event.preventDefault();
+        open(false);
+      }
     });
-    input.addEventListener("blur", () => setTimeout(() => (list.hidden = true), 150));
+    input.addEventListener("blur", () => setTimeout(() => open(false), 150));
     container.replaceChildren(input, list);
   }
+}
+
+// A marker's popup: a heading and a line of text, set as text (feed descriptions are never parsed as HTML).
+function popupContent({ heading, text }) {
+  const box = document.createElement("div");
+  box.className = "popup";
+  const title = document.createElement("strong");
+  title.textContent = heading;
+  box.append(title);
+  if (text) {
+    const body = document.createElement("p");
+    body.textContent = text;
+    box.append(body);
+  }
+  return box;
+}
+
+function addStylesheet(href) {
+  const css = document.createElement("link");
+  css.rel = "stylesheet";
+  css.href = href;
+  document.head.append(css);
+}
+
+export function loadScript(src) {
+  return new Promise((resolve, reject) => {
+    const script = document.createElement("script");
+    script.src = src;
+    script.onload = resolve;
+    script.onerror = () => reject(new Error(`${src} didn't load`));
+    document.head.append(script);
+  });
 }
 
 async function photon(text) {

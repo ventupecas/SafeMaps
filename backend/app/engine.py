@@ -13,6 +13,7 @@ Either pool can then be ranked under any number of profiles.
 
 from __future__ import annotations
 
+from collections import defaultdict
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 from datetime import datetime, time
@@ -23,7 +24,7 @@ from app.candidates import CandidateOptions, RawCandidate, RouteFetcher, gather_
 from app.config import Settings
 from app.driving_side import DrivingSide, driving_side_for_country
 from app.features import TurnContext, directions, extract_features
-from app.geo import Point, decode_polyline
+from app.geo import Point, decode_polyline, densify, haversine_m, initial_bearing_deg, midpoint
 from app.hotspots import CrashHotspots
 from app.models import CandidateRoute, LatLng, RoutePlan, ScoredRoute, ScoringProfile
 from app.pricing import design_match, price_route
@@ -38,6 +39,7 @@ from app.scoring import rank_candidates
 # better-ranked one: on the map it would look like the same route. The winner
 # and the standard route (the baseline the winner is compared with) always stay.
 MAX_SHARED_WITH_BETTER = 0.7
+VIA_SAMPLE_M = 100.0  # how often a route's road is looked up to find the one it's known by
 
 
 class NoRouteFoundError(LookupError):
@@ -301,6 +303,55 @@ def plan_from_candidates(candidates: Sequence[CandidateRoute], profile: ScoringP
         else:
             hidden[route.id] = followed
     return RoutePlan(profile=profile, winner=ranked[0], candidates=kept, hidden=hidden)
+
+
+def name_routes(plan: RoutePlan, graph: RoadGraph | None) -> RoutePlan:
+    """The plan with each route's via: the road it's known by, so routes read apart ("via W Wisconsin Ave").
+
+    That's the route's longest named road, unless a better-ranked route already
+    goes by it; then its next longest. Without a road map, routes keep no via.
+    """
+    if graph is None:
+        return plan
+    taken: set[str] = set()
+    via: dict[str, str] = {}
+    for route in plan.candidates:
+        lengths = _road_lengths(graph, decode_polyline(route.encoded_polyline))
+        longest = sorted(lengths, key=lambda name: -lengths[name])
+        name = next((name for name in longest if name not in taken), longest[0] if longest else "")
+        taken.add(name)
+        via[route.id] = short_road_name(name)
+    candidates = [route.model_copy(update={"via": via[route.id]}) for route in plan.candidates]
+    winner = next((route for route in candidates if route.id == plan.winner.id), plan.winner)
+    return plan.model_copy(update={"candidates": candidates, "winner": winner})
+
+
+def _road_lengths(graph: RoadGraph, points: Sequence[Point]) -> dict[str, float]:
+    """Meters of a route on each named road, sampled every VIA_SAMPLE_M."""
+    lengths: dict[str, float] = defaultdict(float)
+    samples = densify(points, VIA_SAMPLE_M)
+    for a, b in zip(samples, samples[1:]):
+        step = haversine_m(a, b)
+        if step >= 1 and (name := graph.road_name_at(midpoint(a, b), initial_bearing_deg(a, b))):
+            lengths[name] += step
+    return lengths
+
+
+_DIRECTIONS = {"north": "N", "south": "S", "east": "E", "west": "W"}
+_ROAD_TYPES = {
+    "avenue": "Ave", "street": "St", "road": "Rd", "boulevard": "Blvd", "drive": "Dr", "parkway": "Pkwy",
+    "lane": "Ln", "court": "Ct", "place": "Pl", "terrace": "Ter", "highway": "Hwy",
+}  # fmt: skip
+
+
+def short_road_name(name: str) -> str:
+    """A road name as street signs put it: "West Wisconsin Avenue" -> "W Wisconsin Ave"."""
+    words = name.split()
+    if len(words) >= 3 and words[0].lower() in _DIRECTIONS:  # not "North Avenue", a street of its own
+        words[0] = _DIRECTIONS[words[0].lower()]
+    if len(words) >= 2 and words[-1].lower() in _ROAD_TYPES:
+        words[-1] = _ROAD_TYPES[words[-1].lower()]
+    return " ".join(words)
 
 
 def _mostly_follows(route: ScoredRoute, better: Sequence[ScoredRoute], points: dict[str, list[Point]]) -> str | None:

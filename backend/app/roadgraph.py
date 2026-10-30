@@ -499,7 +499,7 @@ class RoadGraph:
             if event.road in RAMP_KINDS and not event.along:
                 ramp = self._ramp_near(event)
                 if not ramp:
-                    logger.info("No ramp found for road event %r; left out", event.description[:80])
+                    logger.debug("No ramp found for road event %r; left out", event.description[:80])
                 else:
                     # The whole ramp, in travel order: its first segment alone runs right beside the freeway.
                     points: list[Point] = []

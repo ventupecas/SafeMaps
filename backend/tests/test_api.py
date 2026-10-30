@@ -260,6 +260,17 @@ def test_an_access_code_guards_route_requests_when_set(tmp_path, google):
     assert len(google.requests) == 1  # nothing reached Google before the right code
 
 
+def test_routes_are_known_by_their_roads_and_a_driver_can_cap_the_extra_minutes(api):
+    trip = api.post(
+        "/route", json={"origin": ORIGIN, "destination": DESTINATION, "live_traffic": False, "max_extra_min": 5}
+    ).json()
+    assert trip["plan"]["profile"]["max_extra_min"] == 5
+    own = [route["via"] for route in trip["plan"]["candidates"] if route["source"] == "own"]
+    assert own and all(own) and len(set(own)) == len(own)  # each of our designs reads apart, e.g. "Main St"
+    assert trip["plan"]["winner"]["via"] == trip["plan"]["candidates"][0]["via"]
+    assert api.post("/route", json={"origin": ORIGIN, "destination": DESTINATION, "max_extra_min": -1}).status_code == 422
+
+
 def test_routes_come_with_turn_by_turn_directions(api):
     trip = api.post("/route", json={"origin": ORIGIN, "destination": DESTINATION, "live_traffic": False}).json()
     own = next(route for route in trip["plan"]["candidates"] if route["source"] == "own")

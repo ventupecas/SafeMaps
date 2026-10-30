@@ -1,0 +1,23 @@
+{
+ "generated": "2026-10-30",
+ "live_traffic": false,
+ "trips": 20,
+ "different": 19,
+ "risky_turns_standard": 67,
+ "risky_turns_ours": 0,
+ "closures_standard": 3,
+ "closures_ours": 0,
+ "lane_closures_standard": 8,
+ "lane_closures_ours": 0,
+ "school_zones_standard": 0,
+ "school_zones_ours": 0,
+ "rail_crossings_standard": 64,
+ "rail_crossings_ours": 19,
+ "fuel_gal_standard": 10.99,
+ "fuel_gal_ours": 12.53,
+ "minutes_standard": 490.49,
+ "minutes_ours": 620.63,
+ "miles_standard": 251.09,
+ "miles_ours": 256.54,
+ "minutes_added_per_trip": 6.5
+}

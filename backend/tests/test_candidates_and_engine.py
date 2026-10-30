@@ -2,7 +2,7 @@ import pytest
 
 from app.candidates import CandidateOptions, gather_candidates, via_points
 from app.driving_side import DrivingSide
-from app.engine import NoRouteFoundError, plan_route
+from app.engine import NoRouteFoundError, plan_route, short_road_name
 from app.features import TurnContext
 from app.geo import decode_polyline, encode_polyline, haversine_m, initial_bearing_deg, midpoint
 from app.models import LatLng
@@ -145,3 +145,17 @@ def test_school_zones_count_on_school_day_mornings_and_afternoons(moment, in_ses
 
     windows = ((time(7, 0), time(9, 0)), (time(14, 0), time(16, 30)))
     assert school_in_session(datetime.fromisoformat(moment), windows) is in_session
+
+
+@pytest.mark.parametrize(
+    ("name", "short"),
+    [
+        ("West Wisconsin Avenue", "W Wisconsin Ave"),
+        ("South 27th Street", "S 27th St"),
+        ("North Avenue", "North Ave"),  # a street of its own, not a direction
+        ("East-West Freeway", "East-West Freeway"),
+        ("Lincoln Memorial Drive", "Lincoln Memorial Dr"),
+    ],
+)
+def test_route_names_read_like_street_signs(name, short):
+    assert short_road_name(name) == short

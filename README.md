@@ -33,7 +33,7 @@ backend/
     crash_data.py     Downloads fatal crashes (NHTSA FARS) for the crash-prone junction rule
     evaluate.py       Runs 20 Milwaukee trips and writes RESULTS.md: what the engine changes
   data/               Downloaded OSM tiles and built graphs (gitignored)
-  tests/              298 tests, no network needed
+  tests/              307 tests, no network needed; GitHub runs them on every push (.github/workflows/tests.yml)
 frontend/
   index.html, app.js, styles.css   The web map: place search, routes drawn and explained, driving mode
   maps.js                          The map underneath: Google's or OpenStreetMap's (ROUTES_MAP)
@@ -78,7 +78,7 @@ Then open **http://127.0.0.1:3143** for the map, or **http://127.0.0.1:3143/docs
 |---|---|
 | `GET /health` | What's loaded (road graph, crash data, cache mode) and today's Google usage |
 | `GET /profiles` | The preset profiles, for the profile picker |
-| `POST /route` | Ranks routes for one trip. Body: `origin`, `destination` (`{lat, lng}`), optional `profile`, `weights`, `country_code`, `live_traffic`, `use_router`. Returns the ranked `plan` (the map draws `plan.winner.encoded_polyline`), `notes`, `attribution` and Google usage. |
+| `POST /route` | Ranks routes for one trip. Body: `origin`, `destination` (`{lat, lng}`), optional `profile`, `weights`, `country_code`, `live_traffic`, `use_router`, `max_extra_min` (the most extra minutes a safer route may take). Returns the ranked `plan` (the map draws `plan.winner.encoded_polyline`; each route's `via` names its main road), `notes`, `attribution` and Google usage. |
 
 Errors come back as: 422 bad input, 404 no route, 429 the daily Google limit is used up, 502 Google failed, 503 a replay-mode trip that wasn't recorded.
 
@@ -89,10 +89,16 @@ Errors come back as: 422 bad input, 404 no route, 429 the daily Google limit is 
 
 Until then, the page shows these steps in place of the map. On the page:
 - Search for the start and destination, or click the map: the first click sets the start, the next the destination. **Use my location** sets the start from the device.
-- The recommended route is drawn bold green, the standard route (Google's own choice) dashed, and the other options in gray. Red dots mark risky turns on the recommended route.
+- The recommended route is drawn bold green, the standard route (Google's own choice, or our fastest on the OpenStreetMap map) dashed, and the other options in gray. Red dots mark risky turns on the recommended route. The **Map key** in the corner says what each line and marker means; it starts folded on a phone.
+- Closed roads are black and lane closures dashed orange. Tap a closure's marker (or a risky turn's) for the details. On the OpenStreetMap map, closure markers close together merge into a numbered circle that splits apart as you zoom in. **Show closures** hides them all.
+- Routes are named by their main road, "Via W Wisconsin Ave", from our road map: each route's longest road that no better route already goes by. Below the name: what it is ("Our safer design 2", "Standard route") and the reason for its place.
+- **Extra time you'd accept for a safer route:** no fixed limit (a route up to 1.6× the fastest can win), or at most 5, 10 or 15 minutes more. The reasons say which limit applied.
 - The panel lists every route with its minutes, miles, gallons, risky turns and the reason for its place, plus how the winner compares with the standard route. Alternatives take different roads, even when they're much slower; a route that mostly runs along a better one is left out (`plan.hidden` in the API says which).
 - Pick a route in the list to follow it (the recommended one is picked to start with).
-- The page itself never names Google: routes are labeled "Our safer design", "Standard route" and "Alternative route", and the server's notes and errors are reworded for drivers (the raw notes go to the browser console). Google's logo and terms on the map, and the credit in the place search list, are required by Google's terms and stay.
+- **Advanced** (folded) holds the controls visitors don't need: where closures come from, Live traffic, and Our router.
+- **How it works** explains the ranking for visitors, with the headline numbers of the latest results summary (`frontend/results.json`, see "Results summary"). **Open on your phone** shows a QR code of the page's address, with the access code, once the page is opened from the tunnel's https link (see EXPO.md).
+- Place search on the OpenStreetMap map works from the keyboard: arrow keys move through the suggestions, Enter picks one, Escape closes the list.
+- The page itself never names Google: routes are labeled by road or as "Our safer design", "Standard route" and "Alternative route", and the server's notes and errors are reworded for drivers (the raw notes go to the browser console). Google's logo and terms on the map, and the credit in the place search list, are required by Google's terms and stay.
 - Distances are shown in miles and fuel in gallons. The backend works in km and liters.
 
 **Driving.** After a route is found, **Start driving** follows the device's location:
@@ -265,7 +271,7 @@ What each kind of event does:
 
   On that afternoon: 368 incidents, 293 events after the first two rules, 265 on our map, and 29 more already reported by the work zone feed.
 - **Traffic map:** with `ROUTES_MAP=osm`, **Show traffic** shows TomTom's traffic tiles. The page asks this server for them (`/traffic-tiles/{z}/{x}/{y}.png`), which fetches each from TomTom with the key and keeps it for 3 minutes for everyone looking at that spot. At most `ROUTES_TOMTOM_DAILY_TILES` (6,000) are fetched a day; a map view takes about 20. With an access code set, the tiles need it too.
-- **Usage:** `/health` shows `tomtom_requests_today` and `tomtom_tiles_today`. The daily caps keep a month inside the free plan: 80 × 31 = 2,480 requests, 6,000 × 31 = 186,000 tiles.
+- **Usage:** `/health` shows `tomtom_requests_today` and `tomtom_tiles_today`. The daily caps keep a month inside the free plan: 80 × 31 = 2,480 requests, 6,000 × 31 = 186,000 tiles. The last answer is also kept in `.cache/routes/tomtom-incidents.json`, so a server restarted within 10 minutes (with `--reload`, every saved code change restarts it) uses it instead of asking again.
 
 **Getting the TomTom key:**
 1. Create a free account at <https://developer.tomtom.com> (no credit card).
@@ -298,7 +304,7 @@ Both come from OpenStreetMap with the road map, so they need a rebuild (`python 
 .\.venv\Scripts\python.exe -m app.evaluate
 ```
 
-Runs 20 trips across Milwaukee through the same API the web map uses. It compares our recommended route with the standard route (Google's choice) and writes [RESULTS.md](RESULTS.md) at the repo root, plus `data/results.csv`. Each new trip costs one cheap Google request, and reruns use saved answers. `--live-traffic` uses live times, at up to about 7 requests a trip.
+Runs 20 trips across Milwaukee through the same API the web map uses. It compares our recommended route with the standard route (Google's choice, or our fastest route on the OpenStreetMap map) and writes [RESULTS.md](RESULTS.md) at the repo root, `data/results.csv`, and `frontend/results.json`, the headline numbers the page's **How it works** shows. On the OpenStreetMap map it costs nothing from Google. On Google's map each new trip costs one cheap Google request, and reruns use saved answers; `--live-traffic` uses live times, at up to about 7 requests a trip.
 
 ## Own router (Milwaukee metro)
 

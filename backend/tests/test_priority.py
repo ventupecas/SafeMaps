@@ -127,3 +127,17 @@ def test_a_winner_that_wins_only_because_safer_routes_are_too_slow_says_so():
     ranked = rank_candidates([quick, careful], PRIORITY)
     assert ranked[0].id == "quick"
     assert ranked[0].reason == "safest within 1.6x the fastest time; safer routes take longer"
+
+
+def test_a_driver_can_cap_the_extra_minutes_a_safer_route_may_take():
+    quick = route("quick", minutes=30, fuel=2.0, busy_lefts=2)
+    careful = route("careful", minutes=42, fuel=2.2)  # 12 min more: within 1.6x
+    assert ranked_ids([quick, careful]) == ["careful", "quick"]
+    capped = rank_candidates([quick, careful], ScoringProfile(ranking="priority", max_extra_min=10))
+    assert [r.id for r in capped] == ["quick", "careful"]
+    assert capped[0].reason == "safest within 10 min of the fastest time; safer routes take longer"
+    assert capped[1].reason == "too slow: over 10 min longer than the fastest route"
+    # On a short trip 1.6x is the tighter limit, and the reasons say so.
+    short = rank_candidates([route("a", minutes=10, fuel=1, busy_lefts=1), route("b", minutes=17, fuel=1)],
+                            ScoringProfile(ranking="priority", max_extra_min=10))
+    assert short[1].reason == "too slow: over 1.6x the fastest route's time"
