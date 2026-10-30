@@ -112,7 +112,7 @@ def _rank_by_priority(scored: list[ScoredRoute], profile: ScoringProfile) -> lis
     winner = ranked[0]
     risky = _risk_words(scored)
     return [
-        route.model_copy(update={"reason": _priority_reason(route, winner, eligible, profile, risky)})
+        route.model_copy(update={"reason": _priority_reason(route, winner, eligible, profile, risky, scored)})
         for route in ranked
     ]
 
@@ -124,7 +124,12 @@ def _priority_pick(pool: list[ScoredRoute], profile: ScoringProfile) -> ScoredRo
 
 
 def _priority_reason(
-    route: ScoredRoute, winner: ScoredRoute, eligible: list[ScoredRoute], profile: ScoringProfile, risky: str
+    route: ScoredRoute,
+    winner: ScoredRoute,
+    eligible: list[ScoredRoute],
+    profile: ScoringProfile,
+    risky: str,
+    all_routes: Sequence[ScoredRoute] = (),
 ) -> str:
     if not route.eligible:
         if route.features.closures:
@@ -132,6 +137,12 @@ def _priority_reason(
         return f"too slow: over {profile.max_detour_ratio:g}x the fastest route's time"
     if route.id == winner.id:
         safest = _within(eligible, risk, 0.0)
+        slower_but_safer = any(
+            not other.eligible and not other.features.closures and risk(other) < risk(route) - _EPSILON
+            for other in all_routes
+        )
+        if slower_but_safer:
+            return f"safest within {profile.max_detour_ratio:g}x the fastest time; safer routes take longer"
         if len(safest) == 1:
             return f"safest: fewest {risky}"
         if len(_within(safest, _fuel, profile.fuel_tolerance)) == 1:

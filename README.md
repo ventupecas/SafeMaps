@@ -32,9 +32,10 @@ backend/
     crash_data.py     Downloads fatal crashes (NHTSA FARS) for the crash-prone junction rule
     evaluate.py       Runs 20 Milwaukee trips and writes RESULTS.md: what the engine changes
   data/               Downloaded OSM tiles and built graphs (gitignored)
-  tests/              277 tests, no network needed
+  tests/              281 tests, no network needed
 frontend/
-  index.html, app.js, styles.css   The web map: place search, routes drawn and explained
+  index.html, app.js, styles.css   The web map: place search, routes drawn and explained, driving mode
+  maps.js                          The map underneath: Google's or OpenStreetMap's (ROUTES_MAP)
   config.example.js                Copy to config.js (gitignored) with the browser key
 ```
 
@@ -101,6 +102,17 @@ Until then, the page shows these steps in place of the map. On the page:
 - **Cost:** each new route is a full trip request: with Live traffic on, up to 4 Google requests at the Pro tier (a heading also makes Google suggestions Pro). Turn Live traffic off to reroute on our own estimates.
 - **Spoken directions:** the banner shows the next turn ("In 0.3 miles: Turn right onto West Wisconsin Avenue") above the miles and minutes left, and the browser reads it aloud about 400 m before the turn and again at it. It also says when it's finding a new route and when you've arrived. Untick **Spoken directions while driving** to keep it quiet. Each route's `maneuvers` in the API carry the instructions, named from the road map.
 - **Phones:** browsers only share location with secure pages: `https://`, or `localhost` on the same computer. Opening `http://<this computer's IP>:3143` on a phone won't get a location. See "Sharing the demo over a link" below.
+
+**Two maps: Google's or OpenStreetMap's.** `ROUTES_MAP` in `backend/.env` picks which one the page shows.
+- **`google`** (the default): Google's map, place search and live traffic. Google's terms require its logo on its map, so the logo stays.
+- **`osm`:** an OpenStreetMap map through [Leaflet](https://leafletjs.com), with no Google logo and no Google at all. Google's terms don't allow its results (routes, places, traffic) on another map, so in this mode:
+  - **Place search** uses [Photon](https://photon.komoot.io), which is built on OpenStreetMap data.
+  - **Our router designs every route.** The "standard route" to compare with is its fastest one.
+  - **There's no live traffic.** Times are the road map's estimates, and Live traffic and Show traffic are hidden.
+  - **Still on:** work zones, 511, crash data, school zones and rail crossings.
+  - **Keys:** neither Google key is needed, any port works, and the page credits "© OpenStreetMap contributors".
+
+  Leaflet loads from unpkg.com, map tiles from tile.openstreetmap.org, and search from photon.komoot.io. All three are free for light use like a demo, with fair-use policies, so don't use them for heavy traffic.
 
 **Sharing the demo over a link.** A free tunnel gives the laptop a public https address, so visitors can open the app on their phones, driving mode included. Anyone with the address could use your Google requests, so set an access code: with `ROUTES_ACCESS_CODE=...` in `backend/.env`, route requests without it are refused (401). Share the address with `?code=...` on the end; the page remembers the code. EXPO.md has the step-by-step instructions.
 

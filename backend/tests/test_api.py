@@ -259,3 +259,21 @@ def test_routes_come_with_turn_by_turn_directions(api):
     trip = api.post("/route", json={"origin": ORIGIN, "destination": DESTINATION, "live_traffic": False}).json()
     own = next(route for route in trip["plan"]["candidates"] if route["source"] == "own")
     assert own["maneuvers"] and all(step["instruction"] and step["location"] for step in own["maneuvers"])
+
+
+def test_the_openstreetmap_map_never_asks_google(tmp_path, google):
+    app = create_app(make_settings(tmp_path, map="osm"), http=httpx.Client(transport=httpx.MockTransport(google)))
+    with TestClient(app) as client:
+        assert client.get("/app-config").json() == {"map": "osm"}
+        trip = client.post("/route", json={"origin": ORIGIN, "destination": DESTINATION, "live_traffic": True}).json()
+    assert google.requests == []  # no Google: not even with live traffic asked for
+    standard = [route for route in trip["plan"]["candidates"] if route["is_standard"]]
+    assert [route["source"] for route in standard] == ["baseline"]  # our fastest route stands in for Google's
+    assert all(not route["live_traffic"] for route in trip["plan"]["candidates"])
+    assert trip["road_events_source"] != "google" and "google" not in trip["road_events_skipped"]
+
+
+def test_googles_default_is_the_standard_route_on_the_google_map(api):
+    trip = api.post("/route", json={"origin": ORIGIN, "destination": DESTINATION}).json()
+    assert [r["id"] for r in trip["plan"]["candidates"] if r["is_standard"]] == ["google-1"]
+    assert api.get("/app-config").json() == {"map": "google"}

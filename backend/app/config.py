@@ -40,6 +40,9 @@ class Settings:
     apify_daily_tiles: int = 300  # traffic tiles per day the paid Apify source may fetch
     # When set, route requests must send it (X-Access-Code): for a demo shared over a public link.
     access_code: str | None = None
+    # The web map: "google" (Google's map, live traffic) or "osm" (OpenStreetMap, no Google at all;
+    # Google's terms don't allow its results on another map, so that mode never asks Google).
+    map: str = "google"
     # When school zones count: these local times on weekdays, outside July and August.
     school_hours: tuple[tuple[time, time], ...] = ((time(7, 0), time(9, 0)), (time(14, 0), time(16, 30)))
 
@@ -72,6 +75,9 @@ class Settings:
             raise ValueError(f"ROUTES_ROAD_EVENT_SOURCES may only list {', '.join(ROAD_EVENT_SOURCES)}; got {unknown}")
         wzdx_file = os.getenv("ROUTES_WZDX_FILE")
         school_hours = _time_windows(os.getenv("ROUTES_SCHOOL_HOURS") or "07:00-09:00,14:00-16:30")
+        map_kind = (os.getenv("ROUTES_MAP") or "google").strip().lower()
+        if map_kind not in ("google", "osm"):
+            raise ValueError(f"ROUTES_MAP must be google or osm; got {map_kind!r}")
         apify_daily_tiles = int(os.getenv("ROUTES_APIFY_DAILY_TILES") or 300)
         if apify_daily_tiles < 0:
             raise ValueError("ROUTES_APIFY_DAILY_TILES must be 0 or more")
@@ -96,6 +102,7 @@ class Settings:
             apify_token=os.getenv("APIFY_TOKEN") or None,
             apify_daily_tiles=apify_daily_tiles,
             access_code=os.getenv("ROUTES_ACCESS_CODE") or None,
+            map=map_kind,
             school_hours=school_hours,
         )
 

@@ -201,6 +201,11 @@ class CandidateRoute(BaseModel):
     description: str = Field("", description="Short summary, usually the main road name.")
     encoded_polyline: str
     is_google_default: bool = Field(False, description="True for the route Google itself would choose.")
+    is_standard: bool = Field(
+        False,
+        description="The baseline the recommendation is compared with: Google's own choice, or with the "
+        "OpenStreetMap map (no Google), our router's fastest route.",
+    )
     live_traffic: bool = Field(False, description="True when the travel time includes Google's live traffic.")
     design_match: float | None = Field(
         None,

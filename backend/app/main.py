@@ -259,6 +259,11 @@ def create_app(settings: Settings | None = None, *, http: httpx.Client | None = 
     def profiles() -> dict[str, Any]:
         return {"default": DEFAULT_PROFILE, "profiles": [profile.model_dump() for profile in PRESETS.values()]}
 
+    @app.get("/app-config")
+    def app_config() -> dict[str, Any]:
+        """What the web map needs before it loads: which map to show (ROUTES_MAP)."""
+        return {"map": settings.map}
+
     @app.post("/route", response_model=TripResponse)
     def route(
         trip: TripRequest, request: Request, x_access_code: str | None = Header(None, include_in_schema=False)
@@ -273,6 +278,15 @@ def create_app(settings: Settings | None = None, *, http: httpx.Client | None = 
         except ValueError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from None
 
+        # The OpenStreetMap map never asks Google: Google's terms don't allow its
+        # results on another map. Our router designs every route, the fastest
+        # one standing in for Google's, and there's no live traffic.
+        google = settings.map == "google"
+        if not google:
+            if engine.graph is None:
+                raise HTTPException(status_code=503, detail="The OpenStreetMap map needs the road map: build it first.")
+            trip = trip.model_copy(update={"use_router": True, "live_traffic": False})
+
         use_router = trip.use_router and engine.graph is not None
         heading = None if trip.heading is None else round(trip.heading) % 360
         notes: list[str] = []
@@ -280,6 +294,8 @@ def create_app(settings: Settings | None = None, *, http: httpx.Client | None = 
             notes.append("Own router unavailable: no road graph is loaded.")
 
         order = {"auto": settings.road_event_sources, "off": ()}.get(trip.road_events, (trip.road_events,))
+        if not google:  # both of these are Google data
+            order = tuple(g for g in ("+".join(s for s in group.split("+") if s not in ("google", "apify")) for group in order) if g)
         area = trip_area(trip.origin, trip.destination)
         report = collect_road_events(
             order,
@@ -307,6 +323,7 @@ def create_app(settings: Settings | None = None, *, http: httpx.Client | None = 
                         heading=heading,
                         context=context,
                         traffic_on_polyline=report.google,
+                        baseline=None if google else PRESETS["fastest"],
                     )
                     candidates = pool.candidates
                     notes += pool.notes
