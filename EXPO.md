@@ -73,9 +73,10 @@ All tests should pass. They don't call Google or cost anything. Run them after a
 | Setting | Value | Why |
 |---|---|---|
 | `WI511_API_KEY` | the key 511WI emails you | Adds crashes and incidents to the work zones. See the README's "Getting the Wisconsin 511 key". |
+| `TOMTOM_API_KEY` | your key from developer.tomtom.com | Live traffic on every street (jams, closures, lane closures, crashes) and the traffic map under **Show traffic**, on the OpenStreetMap map. Free plan; the server keeps each day under 80 requests and 6,000 map tiles (`ROUTES_TOMTOM_DAILY_REQUESTS`, `ROUTES_TOMTOM_DAILY_TILES`). |
 | `ROUTES_DAILY_LIMIT` | 7 × the trips you expect, e.g. `700` for 100 trips | Each trip with Live traffic on costs about 4–7 Google requests. Google's free allowance for these is 5,000 a month. |
 | `ROUTES_CACHE_MODE` | `record` (leave as is) | Live answers, saved as they come. |
-| `ROUTES_MAP` | `google` or `osm` | `osm` shows an OpenStreetMap map with no Google logo and no Google calls at all, so no Google costs. Live traffic then comes from Wisconsin 511's travel times (freeways and main highways), and **Show traffic** draws it. `google` keeps Google's map with Google's live traffic. Restart the server after changing it. |
+| `ROUTES_MAP` | `google` or `osm` | `osm` shows an OpenStreetMap map with no Google logo and no Google calls at all, so no Google costs. Live traffic then comes from TomTom (every street) and Wisconsin 511, and **Show traffic** shows TomTom's traffic map. `google` keeps Google's map with Google's live traffic, and TomTom isn't used. Restart the server after changing it. |
 
 ### Do a test trip from the command line
 
@@ -109,9 +110,11 @@ curl.exe http://127.0.0.1:3143/health
 Look for:
 
 - `road_graph` showing `milwaukee-metro`
-- `google_api_key_set: true`
+- `google_api_key_set: true` (on Google's map)
 - `wi511_key_set: true` (once you have the 511 key)
-- `google_requests_today` well under your daily limit
+- `tomtom_key_set: true` (on the OpenStreetMap map)
+- `matched_ahead: true`: the closures and jams across the metro are matched to the road map, so trips don't wait for it. It takes about a minute after the server starts; check again if it's still `false`.
+- `google_requests_today` well under your daily limit, and `tomtom_requests_today` under 80
 
 ### Rehearse the showcase trips
 
@@ -122,9 +125,9 @@ Open **http://127.0.0.1:3143** and run the 2–3 trips you plan to show.
 
 ## 4. During the expo
 
-### Watch Google usage
+### Watch usage
 
-Every hour or so, run the `/health` check above and look at `google_requests_today`.
+Every hour or so, run the `/health` check above and look at `google_requests_today` (Google's map), or `tomtom_requests_today` and `tomtom_tiles_today` (the OpenStreetMap map). When TomTom's daily cap is reached, trips still work with work zones and 511, and **Show traffic** stops showing new map squares until midnight.
 
 ### Fallback 1: Google limit used up, or Google not answering
 
@@ -150,7 +153,7 @@ Remove-Item Env:ROUTES_CACHE_MODE
 ### Limits to know
 
 - **Internet is needed no matter what.** The map, place search and work-zone feed all come from the internet. Saved-answers mode only removes the cost of Google's routing.
-- **Fallback 3: no Google at all.** Set `ROUTES_MAP=osm` in `backend\.env` and restart the server. You get the OpenStreetMap map, live traffic from Wisconsin 511 instead of Google, and no Google costs or Google key.
+- **Fallback 3: no Google at all.** Set `ROUTES_MAP=osm` in `backend\.env` and restart the server. You get the OpenStreetMap map, live traffic from TomTom and Wisconsin 511 instead of Google, and no Google costs or Google key.
 - **Phones need the tunnel.** Driving mode (following your location) works in the laptop's browser. Visitors' phones need the https link from "Let visitors use their phones" below.
 - **Sound on.** Spoken directions come through the laptop's speakers; untick **Spoken directions while driving** for quiet.
 - **School zones** only count at drop-off and pickup times (weekdays 7–9 and 2–4:30), so they may not show during the expo.

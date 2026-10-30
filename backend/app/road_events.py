@@ -1,6 +1,6 @@
 """Road events the router steers around: closures, lane closures and traffic jams.
 
-Four sources. ROUTES_ROAD_EVENT_SOURCES lists them in order of preference; a
+Five sources. ROUTES_ROAD_EVENT_SOURCES lists them in order of preference; a
 trip uses the first one that is set up and answers, so the later ones are
 backups. "a+b" in that list uses a and b together (when either answers). A
 trip can also ask for one by name.
@@ -15,6 +15,13 @@ trip can also ask for one by name.
           construction and incidents, statewide. Free, with a developer key
           (WI511_API_KEY) that 511WI approves by email. The feed allows 10 calls
           a minute, so it's fetched at most every WI511_REFRESH.
+* tomtom  TomTom's traffic incidents (TOMTOM_API_KEY): jams with their delay,
+          closures, lane closures and crashes on every road, side streets
+          included. One request covers the whole road map's area, made at most
+          every TOMTOM_REFRESH and capped per day (the free plan has 2,500 a
+          month). The OpenStreetMap map only. Together with wi511, TomTom's
+          jams replace 511's travel times, and TomTom closures an official
+          feed already reports are dropped (without_repeats).
 * google  Google's traffic speeds along its own suggested routes
           (TRAFFIC_ON_POLYLINE on the request already sent for them). No new
           account, but billed at a higher Routes tier than a plain live-traffic
@@ -41,7 +48,7 @@ import re
 import time
 from collections import defaultdict
 from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Literal
@@ -107,6 +114,22 @@ _COMPASS = {
     "north": 0.0, "northbound": 0.0, "east": 90.0, "eastbound": 90.0,
     "south": 180.0, "southbound": 180.0, "west": 270.0, "westbound": 270.0,
 }  # fmt: skip
+
+TOMTOM_INCIDENTS_URL = "https://api.tomtom.com/traffic/services/5/incidentDetails"
+TOMTOM_REFRESH = timedelta(minutes=10)  # at most 6 requests an hour, only while trips are planned
+TOMTOM_STALE_OK = timedelta(minutes=30)  # if a refresh fails, the last copy is used until it's this old
+TOMTOM_MAX_BOX_KM2 = 10_000.0  # the largest box one request may cover; a larger one is split
+# A closure listed once per direction: two lines, each one's ends within this of the other's, swapped.
+TOMTOM_PAIR_M = 60.0
+_TOMTOM_FIELDS = (
+    "{incidents{type,geometry{type,coordinates},properties{id,iconCategory,magnitudeOfDelay,"
+    "events{description,code,iconCategory},from,to,length,delay,roadNumbers}}}"
+)
+# TomTom's incident categories (iconCategory) that matter here; the rest are weather and the like.
+_TT_ACCIDENT, _TT_JAM, _TT_LANE_CLOSED, _TT_ROAD_CLOSED, _TT_ROADWORKS = 1, 6, 7, 8, 9
+# A TomTom closure with this share of its stretch on official ones (WZDx, 511) is one they already report.
+REPEAT_SHARE = 0.75
+OFFICIAL_SOURCES = frozenset({"wzdx", "wi511"})
 
 APIFY_ACTOR_URL = "https://api.apify.com/v2/acts/romy~google-maps-traffic-scraper/run-sync-get-dataset-items"
 APIFY_REFRESH = timedelta(minutes=10)
@@ -498,6 +521,227 @@ def _wi511_path(item: Mapping[str, Any]) -> tuple[Point, ...]:
     return (first, second) if 20 < haversine_m(first, second) < 50_000 else (first,)
 
 
+# ---- TomTom: traffic incidents on every road
+
+
+class TomTomFeed:
+    """TomTom's jams, closures and lane closures, refreshed at most every TOMTOM_REFRESH.
+
+    Each request covers a whole box: the road map's area when given (box), so
+    every trip shares one answer, or else the trip's own area. Requests are
+    counted against usage, a daily cap that keeps a month inside the free plan.
+    """
+
+    name = "tomtom"
+
+    def __init__(
+        self,
+        key: str,
+        http: httpx.Client,
+        usage: DailyUsage,
+        *,
+        box: BBox | None = None,
+        clock: Callable[[], float] = time.monotonic,
+    ) -> None:
+        self._key = key
+        self._http = http
+        self.usage = usage  # requests made today, against ROUTES_TOMTOM_DAILY_REQUESTS
+        self._box = box
+        self._clock = clock
+        self._events: list[RoadEvent] | None = None
+        self._fetched_box: BBox | None = None
+        self._fetched_at = 0.0
+
+    def events(self, area: BBox) -> list[RoadEvent]:
+        box = self._box or area
+        age = self._clock() - self._fetched_at
+        if self._events is None or box != self._fetched_box or age > TOMTOM_REFRESH.total_seconds():
+            try:
+                self._events = self._fetch(box)
+                self._fetched_box, self._fetched_at = box, self._clock()
+            except EventSourceError:
+                if self._events is None or box != self._fetched_box or age > TOMTOM_STALE_OK.total_seconds():
+                    raise
+                logger.warning("TomTom refresh failed; using the copy from %.0f minutes ago", age / 60)
+        return in_area(self._events, area)
+
+    def _fetch(self, box: BBox) -> list[RoadEvent]:
+        parts = split_box(box, TOMTOM_MAX_BOX_KM2)
+        if not self.usage.take(len(parts)):
+            raise EventSourceError(f"today's {self.usage.limit} requests are used up (ROUTES_TOMTOM_DAILY_REQUESTS)")
+        incidents: dict[str, Mapping[str, Any]] = {}
+        for part in parts:
+            for incident in self._get(part):
+                # An incident crossing two parts comes back in both.
+                found = (incident.get("properties") or {}).get("id") or f"#{len(incidents)}"
+                incidents.setdefault(str(found), incident)
+        events = tomtom_events(incidents.values())
+        logger.info("TomTom: %d road events from %d incidents", len(events), len(incidents))
+        return events
+
+    def _get(self, part: BBox) -> list[Mapping[str, Any]]:
+        params = {
+            "key": self._key,
+            "bbox": f"{part.west},{part.south},{part.east},{part.north}",
+            "fields": _TOMTOM_FIELDS,
+            "language": "en-US",
+            "timeValidityFilter": "present",
+        }
+        try:
+            response = self._http.get(TOMTOM_INCIDENTS_URL, params=params, timeout=20.0)
+        except httpx.HTTPError as exc:
+            raise EventSourceError(f"couldn't reach TomTom: {type(exc).__name__}") from None  # the URL holds the key
+        if response.status_code in (401, 403):
+            raise EventSourceError("TomTom refused the key, or its free allowance is used up; check TOMTOM_API_KEY")
+        if response.status_code == 429:
+            raise EventSourceError("TomTom is throttling requests")
+        if response.is_error:
+            raise EventSourceError(f"TomTom answered {response.status_code}")
+        try:
+            data = response.json()
+        except ValueError:
+            raise EventSourceError("TomTom sent something that isn't JSON") from None
+        incidents = data.get("incidents") if isinstance(data, Mapping) else None
+        if not isinstance(incidents, list):
+            raise EventSourceError("TomTom's answer has no incidents list")
+        return [incident for incident in incidents if isinstance(incident, Mapping)]
+
+
+def split_box(box: BBox, max_km2: float) -> list[BBox]:
+    """box cut into equal parts of at most max_km2 each."""
+    height_km = haversine_m((box.south, box.west), (box.north, box.west)) / 1000
+    width_km = max(haversine_m((lat, box.west), (lat, box.east)) for lat in (box.south, box.north)) / 1000
+    pieces = max(1, math.ceil(height_km * width_km / max_km2))
+    columns = math.ceil(math.sqrt(pieces))
+    return box.tiles(math.ceil(pieces / columns), columns)
+
+
+def tomtom_events(incidents: Iterable[Mapping[str, Any]]) -> list[RoadEvent]:
+    """TomTom incidents as road events; a closure listed once per direction becomes one event for both.
+
+    Each incident is one direction of traffic, its line drawn the way that
+    traffic goes, so a street closed both ways comes as two lines, each the
+    other reversed. One event covers both: one closure on the map, not two.
+    """
+    parsed = [found for incident in incidents if (found := _tomtom_event(incident)) is not None]
+    cell = TOMTOM_PAIR_M * 2 / 111_320.0  # degrees: a point within TOMTOM_PAIR_M is in the same cell or the next
+
+    def cell_of(point: Point) -> tuple[int, int]:
+        return math.floor(point[0] / cell), math.floor(point[1] / cell)
+
+    ends: dict[tuple[int, int], list[int]] = defaultdict(list)  # where each closure's line ends -> its index
+    for i, (event, _) in enumerate(parsed):
+        if event.kind in ("closed", "lanes"):
+            ends[cell_of(event.path[-1])].append(i)
+    taken: set[int] = set()  # closures already part of a pair
+
+    def other_way(i: int, event: RoadEvent) -> int | None:
+        ci, cj = cell_of(event.path[0])
+        for j in (j for a in (ci - 1, ci, ci + 1) for b in (cj - 1, cj, cj + 1) for j in ends.get((a, b), ())):
+            other = parsed[j][0]
+            if (
+                j > i
+                and j not in taken
+                and other.kind == event.kind
+                and haversine_m(event.path[0], other.path[-1]) <= TOMTOM_PAIR_M
+                and haversine_m(event.path[-1], other.path[0]) <= TOMTOM_PAIR_M
+            ):
+                return j
+        return None
+
+    events: list[RoadEvent] = []
+    for i, (event, properties) in enumerate(parsed):
+        if i in taken:
+            continue
+        j = other_way(i, event) if event.kind in ("closed", "lanes") else None
+        if j is not None:
+            taken.add(j)
+            event = replace(event, along=False, description=_tomtom_description(properties, both_ways=True))
+        events.append(event)
+    return events
+
+
+def _tomtom_event(incident: Mapping[str, Any]) -> tuple[RoadEvent, Mapping[str, Any]] | None:
+    properties = incident.get("properties") or {}
+    kind = _tomtom_kind(properties)
+    if kind is None:
+        return None
+    geometry = incident.get("geometry") or {}
+    coordinates = geometry.get("coordinates") or []
+    if geometry.get("type") == "Point":
+        coordinates = [coordinates]
+    try:
+        path = tuple((float(lat), float(lng)) for lng, lat, *_ in coordinates)
+    except (TypeError, ValueError):
+        return None
+    if not path:
+        return None
+    categories = _tomtom_categories(properties)
+    if kind in ("jam", "slow"):
+        category = "traffic"
+    elif _TT_ACCIDENT in categories:
+        category = "incident"
+    else:
+        category = "roadwork" if _TT_ROADWORKS in categories else "closure"
+    try:
+        delay_min = max(0.0, float(properties.get("delay") or 0) / 60)
+    except (TypeError, ValueError):
+        delay_min = 0.0
+    event = RoadEvent(
+        source="tomtom",
+        kind=kind,
+        path=path,
+        along=True,  # one direction of traffic, drawn the way it goes
+        description=_tomtom_description(properties),
+        category=category,
+        delay_min=delay_min,
+    )
+    return event, properties
+
+
+def _tomtom_details(properties: Mapping[str, Any]) -> list[Mapping[str, Any]]:
+    """An incident's events: what happened, one or more ("Accident", "Lane closed")."""
+    return [detail for detail in properties.get("events") or [] if isinstance(detail, Mapping)]
+
+
+def _tomtom_categories(properties: Mapping[str, Any]) -> set[Any]:
+    return {properties.get("iconCategory")} | {detail.get("iconCategory") for detail in _tomtom_details(properties)}
+
+
+def _tomtom_kind(properties: Mapping[str, Any]) -> EventKind | None:
+    details = _tomtom_details(properties)
+    categories = _tomtom_categories(properties)
+    if _TT_ROAD_CLOSED in categories:
+        return "closed"
+    lanes = [detail for detail in details if detail.get("iconCategory") == _TT_LANE_CLOSED]
+    if any("shoulder" not in str(detail.get("description") or "").lower() for detail in lanes) or (
+        properties.get("iconCategory") == _TT_LANE_CLOSED and not details
+    ):
+        return "lanes"  # a travel lane, not just the shoulder
+    if _TT_ACCIDENT in categories:
+        return "lanes"  # a crash scene takes lanes for a while, and invites another crash
+    if _TT_JAM in categories:
+        return "slow" if properties.get("magnitudeOfDelay") == 1 else "jam"
+    return None  # roadwork beside the road, a car on the shoulder, weather: no lane taken
+
+
+def _tomtom_description(properties: Mapping[str, Any], *, both_ways: bool = False) -> str:
+    """'I-94 W: Accident, Broken down vehicle (Holt Ave to Becher St), 4 min delay'."""
+    what = ", ".join(dict.fromkeys(str(d["description"]) for d in _tomtom_details(properties) if d.get("description")))
+    roads = ", ".join(str(road) for road in properties.get("roadNumbers") or [])
+    text = f"{roads}: {what or 'Traffic incident'}" if roads else what or "Traffic incident"
+    stretch = " to ".join(str(properties[end]) for end in ("from", "to") if properties.get(end))
+    if stretch or both_ways:
+        text += f" ({', '.join(part for part in (stretch, 'both directions' if both_ways else '') if part)})"
+    try:
+        delay_s = float(properties.get("delay") or 0)
+    except (TypeError, ValueError):
+        delay_s = 0.0
+    if delay_s >= 60:
+        text += f", {round(delay_s / 60)} min delay"
+    return text[:300]
+
+
 # ---- Google: traffic speeds along its own suggested routes
 
 
@@ -655,6 +899,7 @@ def collect(
     wi511: Wi511Feed | None,
     apify: ApifyTraffic | None,
     google_ready: bool,
+    tomtom: TomTomFeed | None = None,
 ) -> EventReport:
     """Road events for a trip from the first group of sources in order ("a+b" is a group) where any answers."""
     report = EventReport(source=None, events=[])
@@ -670,6 +915,10 @@ def collect(
                     if wi511 is None:
                         raise EventSourceError("WI511_API_KEY is not set")
                     answered[name] = wi511.events(area)
+                elif name == "tomtom":
+                    if tomtom is None:
+                        raise EventSourceError("TOMTOM_API_KEY is not set")
+                    answered[name] = tomtom.events(area)
                 elif name == "google":
                     if not google_ready:
                         raise EventSourceError("it needs live traffic and our router")
@@ -688,6 +937,9 @@ def collect(
             if "wzdx" in answered and "wi511" in answered:
                 # The same work zones, in less detail: keep 511's incidents and closures only.
                 answered["wi511"] = [event for event in answered["wi511"] if event.category != "roadwork"]
+            if "tomtom" in answered and "wi511" in answered:
+                # TomTom's jams cover every road, 511's travel times only highways: both would count a jam twice.
+                answered["wi511"] = [event for event in answered["wi511"] if event.category != "traffic"]
             report.source = "+".join(answered)
             report.events = [event for events in answered.values() for event in events]
             return report
@@ -725,6 +977,65 @@ def delay_on_route(points: Sequence[Point], events: Iterable[RoadEvent]) -> floa
         return 0.0
     route = _RouteIndex(points)
     return sum(event.delay_min * route.share_along(event) for event in traffic)
+
+
+def without_repeats(events: Sequence[RoadEvent]) -> list[RoadEvent]:
+    """The events, less TomTom's closures and lane closures that an official feed (WZDx, 511) already reports.
+
+    For events matched to the map (Engine.snap): stretches of road, each in
+    its direction of travel. A TomTom one with REPEAT_SHARE of its stretch on
+    official closures, or official ones of its own kind, is the same thing
+    reported twice. The official one says more (workers on site, the speed
+    limit, which ramp), and counting both would make a route look riskier.
+    """
+    official = [
+        event for event in events if event.source in OFFICIAL_SOURCES and event.kind in ("closed", "lanes") and len(event.path) > 1
+    ]
+    if not official:
+        return list(events)
+    indexes: dict[int, _RouteIndex] = {}
+
+    def index(event: RoadEvent) -> _RouteIndex:
+        if id(event) not in indexes:
+            indexes[id(event)] = _RouteIndex(event.path)
+        return indexes[id(event)]
+
+    def repeated(event: RoadEvent) -> bool:
+        lines = [index(other) for other in _near(event.path, official) if other.kind in ("closed", event.kind)]
+        if not lines:
+            return False
+        samples = densify(event.path, EVENT_MATCH_M / 2)
+        covered = 0
+        for i, point in enumerate(samples):
+            a, b = (point, samples[i + 1]) if i + 1 < len(samples) else (samples[i - 1], point)
+            line = initial_bearing_deg(a, b)
+            covered += any(
+                carries(bearing, line, event.direction, event.along)
+                for other in lines
+                for bearing in other.bearings_near(point, ON_ROUTE_M)
+            )
+        return covered >= REPEAT_SHARE * len(samples)
+
+    return [
+        event
+        for event in events
+        if not (event.source == "tomtom" and event.kind in ("closed", "lanes") and len(event.path) > 1 and repeated(event))
+    ]
+
+
+def near_routes(events: Iterable[RoadEvent], routes: Sequence[Sequence[Point]], within_m: float) -> list[RoadEvent]:
+    """The events that come within about within_m of a route (up to three times that): the ones worth drawing."""
+    if not any(routes):
+        return []
+    cell_lat = within_m / 111_320.0
+    cell_lng = cell_lat / max(math.cos(math.radians(next(route for route in routes if route)[0][0])), 0.01)
+
+    def cell(point: Point) -> tuple[int, int]:
+        return math.floor(point[0] / cell_lat), math.floor(point[1] / cell_lng)
+
+    on_routes = {cell(point) for route in routes for point in densify(route, within_m / 2)}
+    reach = {(i + a, j + b) for i, j in on_routes for a in (-1, 0, 1) for b in (-1, 0, 1)}
+    return [event for event in events if any(cell(point) in reach for point in densify(event.path, within_m / 2))]
 
 
 def _near(points: Sequence[Point], events: Iterable[RoadEvent]) -> list[RoadEvent]:

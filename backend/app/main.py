@@ -7,14 +7,17 @@ Run from backend/:
 Then open http://127.0.0.1:3143 for the map, or http://127.0.0.1:3143/docs to
 try the API directly.
 
-    GET  /health    what's loaded: road graph, crash data, cache mode, today's Google usage
-    GET  /profiles  the preset driver profiles and their weights
-    POST /route     rank routes for one trip; the map draws plan.winner.encoded_polyline
-    GET  /          the web map (frontend/), when that folder exists
+    GET  /health      what's loaded: road graph, crash data, cache mode, today's Google usage
+    GET  /profiles    the preset driver profiles and their weights
+    GET  /app-config  which map the page shows (ROUTES_MAP), and whether it has a traffic layer
+    POST /route       rank routes for one trip; the map draws plan.winner.encoded_polyline
+    GET  /traffic-tiles/{z}/{x}/{y}.png   TomTom's traffic map, for the OpenStreetMap page
+    GET  /            the web map (frontend/), when that folder exists
 
 The frontend never calls Google's Routes API itself. Routing, scoring and
 every Google call happen here, behind the server-side API key. So do road
-events (closures, lane closures, jams): see app.road_events.
+events (closures, lane closures, jams): see app.road_events. TomTom's traffic
+tiles come through here too, so its key stays on the server.
 """
 
 from __future__ import annotations
@@ -24,11 +27,11 @@ import logging
 from collections.abc import AsyncIterator, Sequence
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field, replace
-from threading import Lock
+from threading import Lock, Thread
 from typing import Any, Literal
 
 import httpx
-from fastapi import FastAPI, Header, HTTPException, Request
+from fastapi import FastAPI, Header, HTTPException, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict, Field
@@ -47,16 +50,26 @@ from app.engine import (
     plan_from_candidates,
 )
 from app.features import TurnContext
-from app.geo import encode_polyline
+from app.geo import decode_polyline, encode_polyline
 from app.hotspots import CrashHotspots
 from app.models import LatLng, RoutePlan
 from app.overpass import ATTRIBUTION
 from app.profiles import DEFAULT_PROFILE, PRESETS, get_profile
-from app.road_events import ApifyTraffic, RoadEvent, Wi511Feed, WzdxFeed, trip_area
+from app.road_events import (
+    ApifyTraffic,
+    RoadEvent,
+    TomTomFeed,
+    Wi511Feed,
+    WzdxFeed,
+    near_routes,
+    trip_area,
+    without_repeats,
+)
 from app.road_events import collect as collect_road_events
 from app.roadgraph import RoadGraph
 from app.router import Router
 from app.routes_client import DailyLimitReached, RoutesApiError, RoutesClient, daily_usage
+from app.traffic_tiles import TILE_REFRESH, TileError, TrafficTiles
 from app.usage import DailyUsage
 
 logger = logging.getLogger(__name__)
@@ -65,6 +78,9 @@ logger = logging.getLogger(__name__)
 LOCALHOST_ORIGINS = r"https?://(localhost|127\.0\.0\.1)(:\d+)?"
 FRONTEND_DIR = BACKEND_DIR.parent / "frontend"
 MAX_EVENTS_SHOWN = 200
+# Closures are drawn when they're about this close to a route shown: the rest of
+# the trip's area (5 km around it) would bury the routes under a city's closures.
+SHOWN_NEAR_ROUTES_M = 300.0
 
 
 class TripRequest(BaseModel):
@@ -91,7 +107,7 @@ class TripRequest(BaseModel):
         description="Direction the car is driving at the origin, degrees clockwise from north (when rerouting a "
         "moving car). Routes then start along its road instead of turning around.",
     )
-    road_events: Literal["auto", "wzdx", "wi511", "google", "apify", "off"] = Field(
+    road_events: Literal["auto", "wzdx", "wi511", "tomtom", "google", "apify", "off"] = Field(
         "auto",
         description="Where closures, lane closures and jams come from. auto: the server's ROUTES_ROAD_EVENT_SOURCES "
         "order, the first that's set up and answers. A named source is used alone.",
@@ -106,7 +122,9 @@ class GoogleUsage(BaseModel):
 
 
 class RoadEventOut(BaseModel):
-    kind: Literal["closed", "lanes", "slow", "jam"] = Field(description="slow and jam: measured 511 travel times.")
+    kind: Literal["closed", "lanes", "slow", "jam"] = Field(
+        description="slow and jam: measured traffic (511 travel times, TomTom's jams)."
+    )
     source: str
     description: str
     path: str = Field(description="Encoded polyline; a single point when the source gave no stretch.")
@@ -136,7 +154,10 @@ class Engine:
     usage: DailyUsage
     wzdx: WzdxFeed | None = None
     wi511: Wi511Feed | None = None
+    tomtom: TomTomFeed | None = None
     apify: ApifyTraffic | None = None
+    tiles: TrafficTiles | None = None  # TomTom's traffic map, on the OpenStreetMap page only
+    warmed_up: bool = False  # the road events across the map are matched to it (warm_up)
     _routers: dict[DrivingSide, Router] = field(default_factory=dict)
     _snapped: dict[tuple[Any, ...], list[RoadEvent]] = field(default_factory=dict)
     _lock: Lock = field(default_factory=Lock)
@@ -156,14 +177,44 @@ class Engine:
             known = self._snapped.get(key)
             if known is None:
                 known = self.graph.snap_events([event])
-                if event.category == "traffic" and all(s.path == event.path for s in known):
-                    known = []  # no road matched: as a straight line it would only add false delays
+                if (event.category == "traffic" or event.source == "tomtom") and all(s.path == event.path for s in known):
+                    # No road on our map matched. A traffic reading as a straight line would only
+                    # add false delays, and TomTom reports alleys and parking lots our map leaves out.
+                    known = []
                 with self._lock:
                     if len(self._snapped) > 20_000:
                         self._snapped.clear()
                     self._snapped[key] = known
             snapped += [replace(event, path=s.path, direction=s.direction, along=s.along) for s in known]
         return snapped
+
+    def warm_up(self) -> None:
+        """Fetch the road events across the whole road map and match them to it, so trips don't wait for it.
+
+        Matching takes a search per event, about 30 s for the metro's work zones
+        and TomTom's closures, so the server does it once at startup, in the
+        background. The paid sources (apify) and Google's are left out.
+        """
+        if self.graph is None or self.graph.bbox is None:
+            return
+        try:
+            report = collect_road_events(
+                sources_for_map(self.settings.road_event_sources, self.settings.map),
+                self.graph.bbox,
+                wzdx=self.wzdx,
+                wi511=self.wi511,
+                tomtom=self.tomtom,
+                apify=None,
+                google_ready=False,
+            )
+            snapped = self.snap(report.events)
+            router = self.router(make_turn_context(self.settings, self.hotspots, None, self.graph))
+            for event in snapped:
+                router.event_edges(event)  # the router's own lookup, remembered too
+            logger.info("Road events matched to the map ahead of trips: %d from %s", len(report.events), report.source)
+            self.warmed_up = True
+        except Exception:  # a background nicety: trips still match what they need
+            logger.exception("Matching road events ahead of trips failed")
 
     def routes_client(self) -> RoutesClient:
         # One client per request so its counters describe that request; the
@@ -180,6 +231,37 @@ class Engine:
             return router
 
 
+def sources_for_map(order: Sequence[str], map_kind: str) -> tuple[str, ...]:
+    """The road event sources in order, less those whose data the map may not show.
+
+    Each map takes traffic from its own provider: Google's data (google,
+    apify) stays on Google's map, and TomTom's on the OpenStreetMap one.
+    """
+    elsewhere = ("tomtom",) if map_kind == "google" else ("google", "apify")
+    return tuple(g for g in ("+".join(s for s in group.split("+") if s not in elsewhere) for group in order) if g)
+
+
+def shown_events(events: Sequence[RoadEvent], plan: RoutePlan) -> list[RoadEventOut]:
+    """What the map draws: closures and lane closures near the routes, once each, and the measured traffic.
+
+    A closure of both directions of a two-way street is matched as one stretch
+    per direction, each the other reversed: drawn once.
+    """
+    routes = [decode_polyline(route.encoded_polyline) for route in plan.candidates]
+    closures = near_routes([event for event in events if event.kind in ("closed", "lanes")], routes, SHOWN_NEAR_ROUTES_M)
+    traffic = [event for event in events if event.category == "traffic"]
+    shown: list[RoadEventOut] = []
+    drawn: set[tuple[str, tuple[Any, ...]]] = set()
+    for event in closures + traffic:
+        if (event.kind, event.path[::-1]) in drawn:
+            continue
+        drawn.add((event.kind, event.path))
+        shown.append(
+            RoadEventOut(kind=event.kind, source=event.source, description=event.description, path=encode_polyline(event.path))
+        )
+    return shown[:MAX_EVENTS_SHOWN]
+
+
 def create_app(settings: Settings | None = None, *, http: httpx.Client | None = None) -> FastAPI:
     """Build the API. Tests pass their own settings and a mock http client."""
     settings = settings or Settings.from_env()
@@ -187,9 +269,11 @@ def create_app(settings: Settings | None = None, *, http: httpx.Client | None = 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         client = http or httpx.Client(timeout=10.0)
+        graph = load_graph(settings)
+        tomtom_key = settings.tomtom_api_key
         engine = Engine(
             settings=settings,
-            graph=load_graph(settings),
+            graph=graph,
             hotspots=load_hotspots(settings),
             http=client,
             usage=daily_usage(settings),
@@ -197,6 +281,18 @@ def create_app(settings: Settings | None = None, *, http: httpx.Client | None = 
             if settings.wzdx_file
             else WzdxFeed(client, url=settings.wzdx_url),
             wi511=Wi511Feed(settings.wi511_api_key, client) if settings.wi511_api_key else None,
+            # One request covers the road map's whole area, shared by every trip.
+            tomtom=TomTomFeed(
+                tomtom_key,
+                client,
+                DailyUsage(settings.cache_dir / "tomtom-requests.json", settings.tomtom_daily_requests),
+                box=graph.bbox if graph else None,
+            )
+            if tomtom_key
+            else None,
+            tiles=TrafficTiles(tomtom_key, client, DailyUsage(settings.cache_dir / "tomtom-tiles.json", settings.tomtom_daily_tiles))
+            if tomtom_key and settings.map == "osm"
+            else None,
             # The paid scraper only runs when it's both listed and given a token.
             apify=ApifyTraffic(
                 settings.apify_token,
@@ -207,6 +303,7 @@ def create_app(settings: Settings | None = None, *, http: httpx.Client | None = 
             else None,
         )
         app.state.engine = engine
+        Thread(target=engine.warm_up, name="road-events-warm-up", daemon=True).start()
         logger.info(
             "Ready: road graph %s, crash data %s, cache %s, road events from %s",
             engine.graph.area if engine.graph else "none",
@@ -252,8 +349,12 @@ def create_app(settings: Settings | None = None, *, http: httpx.Client | None = 
             "daily_limit": engine.usage.limit,
             "road_events": {
                 "order": list(settings.road_event_sources),
+                "matched_ahead": engine.warmed_up,  # false for a minute or so after startup
                 "wzdx": str(settings.wzdx_file.name) if settings.wzdx_file else settings.wzdx_url,
                 "wi511_key_set": engine.wi511 is not None,
+                "tomtom_key_set": engine.tomtom is not None,
+                "tomtom_requests_today": engine.tomtom.usage.used_today() if engine.tomtom else 0,
+                "tomtom_tiles_today": engine.tiles.usage.used_today() if engine.tiles else 0,
                 "apify_enabled": engine.apify is not None,
                 "apify_tiles_today": engine.apify.usage.used_today() if engine.apify else 0,
             },
@@ -264,9 +365,25 @@ def create_app(settings: Settings | None = None, *, http: httpx.Client | None = 
         return {"default": DEFAULT_PROFILE, "profiles": [profile.model_dump() for profile in PRESETS.values()]}
 
     @app.get("/app-config")
-    def app_config() -> dict[str, Any]:
-        """What the web map needs before it loads: which map to show (ROUTES_MAP)."""
-        return {"map": settings.map}
+    def app_config(request: Request) -> dict[str, Any]:
+        """What the web map needs before it loads: which map to show (ROUTES_MAP), and whether
+        /traffic-tiles serves a traffic layer for it."""
+        return {"map": settings.map, "traffic_tiles": request.app.state.engine.tiles is not None}
+
+    @app.get("/traffic-tiles/{z}/{x}/{y}.png", include_in_schema=False)
+    def traffic_tile(z: int, x: int, y: int, request: Request, code: str | None = None) -> Response:
+        """One tile of TomTom's traffic map. The page's map layer can't send headers, so the access code comes as ?code=."""
+        engine: Engine = request.app.state.engine
+        if engine.tiles is None:
+            raise HTTPException(status_code=404, detail="No traffic map: it needs ROUTES_MAP=osm and TOMTOM_API_KEY.")
+        if settings.access_code and not hmac.compare_digest(code or "", settings.access_code):
+            raise HTTPException(status_code=401, detail="This demo needs its access code.")
+        try:
+            png = engine.tiles.tile(z, x, y)
+        except TileError as exc:
+            raise HTTPException(status_code=exc.status, detail=str(exc)) from None
+        # Browsers keep it as long as the server does, so panning back doesn't fetch it again.
+        return Response(png, media_type="image/png", headers={"Cache-Control": f"max-age={int(TILE_REFRESH.total_seconds())}"})
 
     @app.post("/route", response_model=TripResponse)
     def route(
@@ -284,7 +401,7 @@ def create_app(settings: Settings | None = None, *, http: httpx.Client | None = 
 
         # The OpenStreetMap map never asks Google: Google's terms don't allow its
         # results on another map. Our router designs every route, the fastest
-        # one standing in for Google's, and there's no live traffic.
+        # one standing in for Google's, and live traffic comes from 511 and TomTom.
         google = settings.map == "google"
         if not google:
             if engine.graph is None:
@@ -298,20 +415,21 @@ def create_app(settings: Settings | None = None, *, http: httpx.Client | None = 
             notes.append("Own router unavailable: no road graph is loaded.")
 
         order = {"auto": settings.road_event_sources, "off": ()}.get(trip.road_events, (trip.road_events,))
-        if not google:  # both of these are Google data
-            order = tuple(g for g in ("+".join(s for s in group.split("+") if s not in ("google", "apify")) for group in order) if g)
+        order = sources_for_map(order, settings.map)
         area = trip_area(trip.origin, trip.destination)
         report = collect_road_events(
             order,
             area,
             wzdx=engine.wzdx,
             wi511=engine.wi511,
+            tomtom=engine.tomtom,
             apify=engine.apify,
             google_ready=use_router and trip.live_traffic and bool(settings.google_maps_api_key),
         )
         notes += report.notes
-        # Redrawn along the roads they lie on, for routing, scoring and the map alike.
-        events = engine.snap(report.events)
+        # Redrawn along the roads they lie on, for routing, scoring and the map alike,
+        # less TomTom's reports of closures an official feed already gives.
+        events = without_repeats(engine.snap(report.events))
         context = replace(context, events=tuple(events))
 
         with engine.routes_client() as client:
@@ -350,8 +468,9 @@ def create_app(settings: Settings | None = None, *, http: httpx.Client | None = 
             )
 
         own_used = any(candidate.source == "own" for candidate in candidates)
+        plan = plan_from_candidates(candidates, profile)
         return TripResponse(
-            plan=plan_from_candidates(candidates, profile),
+            plan=plan,
             notes=notes,
             driving_side=context.driving_side,
             own_router_used=own_used,
@@ -360,13 +479,7 @@ def create_app(settings: Settings | None = None, *, http: httpx.Client | None = 
             school_hours=context.school_hours,
             road_events_source=report.source,
             road_events_skipped=report.skipped,
-            road_events=[
-                RoadEventOut(
-                    kind=event.kind, source=event.source, description=event.description, path=encode_polyline(event.path)
-                )
-                for event in events
-                if event.kind in ("closed", "lanes") or event.category == "traffic"
-            ][:MAX_EVENTS_SHOWN],
+            road_events=shown_events(events, plan),
         )
 
     # Mounted last, so the API routes above take precedence over file names.

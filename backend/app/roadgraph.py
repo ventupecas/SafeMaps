@@ -101,6 +101,7 @@ _VEHICLE_SURE_M = 15.0
 STRETCH_DETOUR = 1.5
 STRETCH_SLACK_M = 500.0
 MAX_WAYPOINTS = 12  # lines with this few points are waypoints, matched one to the next
+WAYPOINT_SPOT_M = 30.0  # waypoints closer together than this mark one spot
 SAME_ROAD_M = 5.0  # roads this much farther from a point than the nearest one are other roads
 # Hazards from OSM: a street within SCHOOL_ZONE_M of a school (its center) is in
 # its school zone; freeways never are. A route passes a railroad crossing when
@@ -539,10 +540,21 @@ class RoadGraph:
         """
         if len(path) <= 2 or len(path) > MAX_WAYPOINTS:
             return self._stretch(path, road)
+        # Points closer together than WAYPOINT_SPOT_M are one spot: a short line drawn
+        # with many points (TomTom's) is matched from its two ends.
+        waypoints = [path[0]]
+        for point in path[1:-1]:
+            if haversine_m(point, waypoints[-1]) >= WAYPOINT_SPOT_M:
+                waypoints.append(point)
+        if len(waypoints) > 1 and haversine_m(path[-1], waypoints[-1]) < WAYPOINT_SPOT_M:
+            waypoints.pop()  # the line's end stands for that spot
+        waypoints.append(path[-1])
+        if len(waypoints) <= 2:
+            return self._stretch(path, road)
         edges: list[int] = []
-        for a, b in zip(path, path[1:]):
-            if haversine_m(a, b) < SAME_ROAD_M * 6:
-                continue  # two waypoints at one spot
+        for a, b in zip(waypoints, waypoints[1:]):
+            if haversine_m(a, b) < SAME_ROAD_M:
+                continue  # turned back to the same spot
             piece = self._stretch([a, b], road)
             if piece is None:
                 return None

@@ -44,6 +44,7 @@ const COLORS = {
 const EVENT_SOURCES = {
   wzdx: "Wisconsin work zones (WZDx)",
   wi511: "Wisconsin 511",
+  tomtom: "TomTom traffic",
   google: "traffic speeds along the routes",
   apify: "traffic tiles",
 };
@@ -58,14 +59,14 @@ const PROFILE_LABELS = {
 
 const state = {
   view: null, // the map (see maps.js)
-  mapKind: "google", // or "osm": no Google at all, so no live traffic
+  mapKind: "google", // or "osm": no Google at all; traffic from 511 and TomTom
   origin: null, // { lat, lng, label, countryCode }
   destination: null,
   pins: { origin: null, destination: null },
   routeLines: [], // { id, lines: [line handle] }
   turnMarkers: [],
   eventShapes: [], // closures and lane closures drawn on the map
-  trafficEvents: [], // slow and jammed stretches (511 travel times) from the last trip
+  trafficEvents: [], // slow and jammed stretches (511 travel times, TomTom's jams) from the last trip
   trafficShapes: [], // ...drawn, when "Show traffic" is on and the map has no traffic layer of its own
   plan: null, // the last plan from the server
   paths: {}, // route id -> { points: [{ lat, lng }], cumulative: [m], lengthM, minutes, label }
@@ -95,8 +96,11 @@ async function boot() {
   loadProfiles();
   wireControls();
 
+  let trafficTiles = false;
   try {
-    state.mapKind = (await (await fetch("/app-config")).json()).map;
+    const appConfig = await (await fetch("/app-config")).json();
+    state.mapKind = appConfig.map;
+    trafficTiles = Boolean(appConfig.traffic_tiles);
   } catch {
     state.mapKind = "google"; // an older server: it only knew Google's map
   }
@@ -106,9 +110,11 @@ async function boot() {
     return;
   }
   if (state.mapKind === "osm") useOsmControls();
+  else $("road-events").querySelector('option[value="tomtom"]').remove(); // TomTom's traffic is for the other map
   state.view = createMapView(state.mapKind, {
     mapsApiKey: config.mapsApiKey,
     mapId: config.mapId,
+    trafficTiles: trafficTiles ? trafficTileUrl() : null,
     onAuthFailure: () =>
       showSetup("The map key was rejected. Check which websites it allows and that the map service is enabled for it."),
   });
@@ -121,14 +127,21 @@ async function boot() {
   await initMap();
 }
 
-// The OpenStreetMap map has no Google behind it: no live traffic, no traffic layer,
-// and no closure sources that come from Google.
+// The OpenStreetMap map has no Google behind it: no Google live traffic or traffic
+// layer, and no closure sources that come from Google.
 function useOsmControls() {
   $("live-traffic").checked = false;
   $("live-traffic").closest("label").hidden = true;
-  // "Show traffic" draws the 511 travel times instead of Google's traffic layer.
+  // "Show traffic" shows TomTom's traffic map, or without it draws the measured slowdowns.
   $("traffic-layer").checked = false;
   for (const source of ["google", "apify"]) $("road-events").querySelector(`option[value="${source}"]`).remove();
+}
+
+// TomTom's traffic map comes through our server, which holds the key. A map layer
+// can't send headers, so a shared demo's access code rides in the address.
+function trafficTileUrl() {
+  const code = accessCode();
+  return `/traffic-tiles/{z}/{x}/{y}.png${code ? `?code=${encodeURIComponent(code)}` : ""}`;
 }
 
 async function initMap() {
@@ -179,7 +192,7 @@ function wireControls() {
   $("recenter").addEventListener("click", recenter);
   $("traffic-layer").addEventListener("change", (event) => {
     if (state.view && state.view.hasTraffic) state.view.traffic(event.target.checked);
-    else drawTraffic(); // the OpenStreetMap map: measured 511 travel times
+    else drawTraffic(); // no traffic layer: the measured slowdowns from the last trip
   });
   // A screen wake lock is dropped whenever the page is hidden; take it again on return.
   document.addEventListener("visibilitychange", () => {
@@ -384,7 +397,7 @@ function roadEventsLine(trip) {
   if (!trip.road_events_source) return `No closure or slowdown data for this trip${unavailable}.`;
   // Sources used together arrive joined with "+".
   const used = trip.road_events_source.split("+").map((name) => EVENT_SOURCES[name] || name).join(" and ");
-  // A closure affecting both directions arrives as one event per direction.
+  // A closure of both directions of a divided road arrives once per carriageway.
   const closures = trip.road_events.filter((event) => !isTraffic(event));
   const shown = new Set(closures.map((event) => `${event.kind}|${event.description}`)).size;
   const counted = shown ? `; ${shown} closure${shown === 1 ? "" : "s"} nearby` : "";
@@ -396,7 +409,8 @@ function isTraffic(event) {
   return event.kind === "slow" || event.kind === "jam";
 }
 
-// Measured traffic (511 travel times): orange where slow, red where jammed, under "Show traffic".
+// Measured traffic (511 travel times, TomTom's jams): orange where slow, red where jammed,
+// under "Show traffic" on a map without a traffic layer of its own.
 function drawTraffic() {
   for (const shape of state.trafficShapes) shape.remove();
   state.trafficShapes = [];

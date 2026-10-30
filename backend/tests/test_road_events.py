@@ -1,18 +1,21 @@
-"""Road events: the four sources, choosing between them, and which events a route drives through."""
+"""Road events: the five sources, choosing between them, and which events a route drives through."""
 
+import itertools
 import json
 from datetime import datetime, timezone
 
 import httpx
 import pytest
 
-from app.geo import destination_point, encode_polyline
+from app.geo import destination_point, encode_polyline, haversine_m
 from app.overpass import AREAS, BBox
 from app.road_events import (
     APIFY_MAX_RADIUS,
+    TOMTOM_MAX_BOX_KM2,
     ApifyTraffic,
     EventSourceError,
     RoadEvent,
+    TomTomFeed,
     Wi511Feed,
     WzdxFeed,
     collect,
@@ -22,7 +25,11 @@ from app.road_events import (
     _ramp_road,
     _road_kind,
     jams_on_routes,
+    near_routes,
+    split_box,
     tiles_for,
+    tomtom_events,
+    without_repeats,
 )
 from app.usage import DailyUsage
 
@@ -430,3 +437,155 @@ def test_a_route_picks_up_the_delay_of_the_slow_stretch_it_drives():
     half = route[: len(route) // 2 + 1]
     assert delay_on_route(half, [jam]) == pytest.approx(4.0, abs=0.8)
     assert delay_on_route(list(reversed(route)), [jam]) == 0.0  # the other direction flows freely
+
+
+# ---- TomTom
+
+_incident_ids = itertools.count(1)
+
+
+def tomtom_incident(category: int, line, *, events=None, magnitude: int = 0, delay=None, **properties) -> dict:
+    """A TomTom Incident Details incident along line (one direction of traffic), shaped like Milwaukee's answers."""
+    names = {1: "Accident", 2: "Fog", 6: "Stopped traffic", 7: "Lane closed", 8: "Closed", 9: "Roadworks"}
+    if events is None:
+        events = [{"description": names[category], "code": 0, "iconCategory": category}]
+    return {
+        "type": "Feature",
+        "geometry": {"type": "LineString", "coordinates": [[lng, lat] for lat, lng in line]},
+        "properties": {
+            "id": f"tt-{next(_incident_ids)}",
+            "iconCategory": category,
+            "magnitudeOfDelay": magnitude,
+            "events": events,
+            "from": "W Wells St",
+            "to": "W Michigan St",
+            "delay": delay,
+            "roadNumbers": [],
+            **properties,
+        },
+    }
+
+
+def detail(description: str, category: int) -> dict:
+    return {"description": description, "code": 0, "iconCategory": category}
+
+
+def test_tomtom_incidents_become_closures_lane_closures_and_jams():
+    line = [DOWNTOWN, destination_point(DOWNTOWN, 0, 300)]
+    incidents = [
+        tomtom_incident(8, line, events=[detail("Closed", 8), detail("Parade", 0)]),
+        tomtom_incident(7, line, events=[detail("Lane closed", 7), detail("Hard shoulder closed", 7)], roadNumbers=["WI-60"]),
+        tomtom_incident(7, line, events=[detail("Hard shoulder closed", 7)]),  # no travel lane taken
+        tomtom_incident(9, line, events=[detail("Roadworks", 9), detail("Traffic pattern changes", 9)]),  # beside the road
+        tomtom_incident(1, line, events=[detail("Accident", 1), detail("Broken down vehicle", 14)], roadNumbers=["I-94 W"]),
+        tomtom_incident(6, line, magnitude=3, delay=600),
+        tomtom_incident(6, line, magnitude=1, delay=45, events=[detail("Slow traffic", 6)]),
+        tomtom_incident(2, line),  # fog
+    ]
+    closed, lanes, crash, jam, slow = tomtom_events(incidents)
+    assert (closed.kind, closed.category, closed.along, closed.source) == ("closed", "closure", True, "tomtom")
+    assert closed.path[0] == pytest.approx(DOWNTOWN)  # GeoJSON's [lng, lat] read the right way round
+    assert closed.description == "Closed, Parade (W Wells St to W Michigan St)"
+    assert lanes.kind == "lanes" and lanes.description.startswith("WI-60: Lane closed, Hard shoulder closed")
+    assert (crash.kind, crash.category) == ("lanes", "incident")  # a crash scene counts as a lane closure
+    assert (jam.kind, jam.category, jam.delay_min, jam.slowdown) == ("jam", "traffic", 10.0, None)
+    assert jam.description.endswith(", 10 min delay")
+    assert (slow.kind, slow.delay_min) == ("slow", 0.75)
+
+
+def test_a_closure_listed_once_per_direction_becomes_one_for_both():
+    north = [DOWNTOWN, destination_point(DOWNTOWN, 0, 150), destination_point(DOWNTOWN, 0, 300)]
+    south = [destination_point(point, 90, 10) for point in reversed(north)]  # its own line, drawn a little apart
+    one_way = [destination_point(DOWNTOWN, 90, 1_000), destination_point(DOWNTOWN, 90, 1_300)]
+    both, alone = tomtom_events([tomtom_incident(8, north), tomtom_incident(8, south), tomtom_incident(8, one_way)])
+    assert (both.along, both.direction, len(both.path)) == (False, None, 3)
+    assert both.description == "Closed (W Wells St to W Michigan St, both directions)"
+    assert alone.along
+
+
+def tomtom_feed(incidents, tmp_path, *, status: int = 200, daily: int = 80):
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(status, json={"incidents": incidents})
+
+    clock, usage = Clock(), DailyUsage(tmp_path / "tomtom.json", daily)
+    feed = TomTomFeed("tt-secret", httpx.Client(transport=httpx.MockTransport(handler)), usage, box=METRO, clock=clock)
+    return feed, requests, clock, usage
+
+
+def test_tomtom_is_asked_about_the_whole_map_at_most_every_ten_minutes(tmp_path):
+    line = [DOWNTOWN, destination_point(DOWNTOWN, 0, 300)]
+    feed, requests, clock, usage = tomtom_feed([tomtom_incident(8, line)], tmp_path)
+    assert len(feed.events(BBox(43.03, -87.92, 43.05, -87.90))) == 1
+    assert feed.events(BBox(42.90, -88.10, 42.95, -88.00)) == []  # another trip, answered from the same copy
+    (sent,) = requests
+    assert sent.url.params["bbox"] == f"{METRO.west},{METRO.south},{METRO.east},{METRO.north}"
+    assert sent.url.params["key"] == "tt-secret" and usage.used_today() == 1
+    clock.now = 601
+    feed.events(METRO)
+    assert len(requests) == 2
+
+
+def test_tomtom_keeps_to_its_daily_limit_and_never_shows_the_key(tmp_path):
+    feed, requests, _, _ = tomtom_feed([], tmp_path, daily=0)
+    with pytest.raises(EventSourceError, match="ROUTES_TOMTOM_DAILY_REQUESTS"):
+        feed.events(METRO)
+    assert requests == []
+    feed, _, _, _ = tomtom_feed([], tmp_path / "refused", status=403)
+    with pytest.raises(EventSourceError, match="refused the key") as error:
+        feed.events(METRO)
+    assert "tt-secret" not in str(error.value)
+
+
+def area_km2(box: BBox) -> float:
+    height = haversine_m((box.south, box.west), (box.north, box.west)) / 1000
+    return height * haversine_m((box.south, box.west), (box.south, box.east)) / 1000  # the wider, southern edge
+
+
+def test_a_box_too_big_for_one_request_is_split():
+    (whole,) = split_box(METRO, TOMTOM_MAX_BOX_KM2)  # the metro, about 80 by 65 km, takes one request
+    assert whole == METRO
+    wisconsin = BBox(42.5, -92.9, 47.1, -86.8)
+    parts = split_box(wisconsin, TOMTOM_MAX_BOX_KM2)
+    assert len(parts) > 1 and all(area_km2(part) <= TOMTOM_MAX_BOX_KM2 for part in parts)
+    assert (parts[0].south, parts[0].west) == (wisconsin.south, wisconsin.west)
+    assert (parts[-1].north, parts[-1].east) == pytest.approx((wisconsin.north, wisconsin.east))
+
+
+def test_tomtom_jams_replace_511_travel_times():
+    stretch = (DOWNTOWN, destination_point(DOWNTOWN, 90, 500))
+    jam_511 = RoadEvent("wi511", "jam", stretch, along=True, category="traffic", slowdown=3.0)
+    crash_511 = RoadEvent("wi511", "lanes", (DOWNTOWN,), category="incident")
+    jam = RoadEvent("tomtom", "jam", stretch, along=True, category="traffic", delay_min=4.0)
+    report = collect(
+        ["wzdx+wi511+tomtom"],
+        METRO,
+        wzdx=None,
+        wi511=FixedSource([jam_511, crash_511]),
+        tomtom=FixedSource([jam]),
+        apify=None,
+        google_ready=False,
+    )
+    assert (report.source, report.events, report.skipped) == ("wi511+tomtom", [crash_511, jam], ["wzdx"])
+
+
+def test_closures_an_official_feed_reports_are_not_counted_again_from_tomtom():
+    east = tuple(straight_east(600))
+    north_of = tuple(destination_point(point, 0, 500) for point in east)  # a parallel street
+    official = RoadEvent("wzdx", "closed", east, along=True)
+    same = RoadEvent("tomtom", "closed", east[2:10], along=True)
+    lanes_in_it = RoadEvent("tomtom", "lanes", east, along=True)
+    other_way = RoadEvent("tomtom", "closed", east[::-1], along=True)
+    official_lanes = RoadEvent("wi511", "lanes", north_of, along=True)
+    closed_there = RoadEvent("tomtom", "closed", north_of, along=True)  # more than the official lane closure says
+    kept = without_repeats([official, same, lanes_in_it, other_way, official_lanes, closed_there])
+    assert kept == [official, other_way, official_lanes, closed_there]
+
+
+def test_closures_are_drawn_when_they_are_near_a_route():
+    route = straight_east(2_000)
+    beside = RoadEvent("tomtom", "closed", (destination_point(route[10], 0, 150), destination_point(route[12], 0, 150)))
+    far = RoadEvent("tomtom", "closed", (destination_point(route[10], 0, 3_000),))
+    assert near_routes([beside, far], [route], 300) == [beside]

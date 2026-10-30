@@ -38,7 +38,7 @@ from app.features import (
 from app.fuel import MIN_L_PER_KM, SIGNAL_L, TURN_L, cruise_liters
 from app.geo import Point, angle_between_deg, encode_polyline, haversine_m
 from app.models import ScoringProfile
-from app.road_events import WORKERS_PRESENT_FACTOR, RoadEvent
+from app.road_events import MAX_SLOWDOWN, WORKERS_PRESENT_FACTOR, RoadEvent
 from app.roadgraph import DEFAULT_SPEED_FACTOR, RoadGraph
 
 LINK_CLASSES = frozenset({"motorway_link", "trunk_link", "primary_link", "secondary_link", "tertiary_link"})
@@ -79,7 +79,8 @@ PRIORITY_FUEL_BOOST = 2.5
 CONNECTOR_MAX_M = 30.0
 UTURN_MIN_DEG = 150.0
 # Road events (app.road_events): a jammed segment takes about this many times
-# its free-flow time, a slow one or one with a lane closed less so. Driving
+# its free-flow time, a slow one or one with a lane closed less so, unless the
+# source measures it (Router._slowdown). Driving
 # into a lane closure also costs lane_closure_weight once: a forced merge.
 JAM_FACTOR = 3.0
 SLOW_FACTOR = 1.5
@@ -423,7 +424,9 @@ class Router:
                     zones[edge] = {SCHOOL_ZONE}
         keep = set(keep)
         for number, event in enumerate(events):
-            for edge in self.event_edges(event):
+            edges = self.event_edges(event)
+            slowdown = self._slowdown(event, edges) if event.kind in ("jam", "slow") else 1.0
+            for edge in edges:
                 if event.kind == "closed":
                     if edge not in keep:
                         edge_costs[edge] = math.inf
@@ -438,8 +441,8 @@ class Router:
                     zone_costs[number] = profile.lane_closure_weight * (
                         WORKERS_PRESENT_FACTOR if event.workers else 1.0
                     )
-                else:  # measured slowdowns (511 travel times) where known, else typical ones
-                    edge_costs[edge] *= event.slowdown or (JAM_FACTOR if event.kind == "jam" else SLOW_FACTOR)
+                else:
+                    edge_costs[edge] *= slowdown
         return _Costs(
             profile=profile,
             edges=edge_costs,
@@ -447,6 +450,20 @@ class Router:
             zones={edge: frozenset(numbers) for edge, numbers in zones.items()},
             zone_costs=zone_costs,
         )
+
+    def _slowdown(self, event: RoadEvent, edges: Iterable[int]) -> float:
+        """How many times its usual time a slow or jammed stretch takes.
+
+        Measured where the source says (511 travel times); from the delay over
+        the stretch's usual time where it gives that (TomTom's jams); typical
+        otherwise (JAM_FACTOR, SLOW_FACTOR).
+        """
+        if event.slowdown:
+            return event.slowdown
+        usual_s = sum(self.graph.time_s[edge] for edge in edges)
+        if event.delay_min > 0 and usual_s > 0:
+            return min(1 + event.delay_min * 60 / usual_s, MAX_SLOWDOWN)
+        return JAM_FACTOR if event.kind == "jam" else SLOW_FACTOR
 
     def _search(
         self,
