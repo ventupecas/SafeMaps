@@ -373,3 +373,15 @@ def test_driving_past_a_closed_ramp_is_not_driving_through_it():
     assert count_on_route(freeway, [closed]) == (0, 0, 0)  # stays on the freeway beside it
     taking_the_exit = freeway[:7] + list(exit_ramp[1:])
     assert count_on_route(taking_the_exit, [closed]) == (1, 0, 0)
+
+
+def test_511_roadwork_closures_are_known_as_roadwork_and_by_their_road():
+    item = wi511_item(
+        EventType="closures",
+        IsFullClosure=True,
+        Description="Roadwork - System Interchange Full Closure on WIS 175 SB at WIS 175 SB TO I-94 WB (N-W STADIUM)",
+    )
+    feed, _, _ = wi511_feed([item, wi511_item(ID=2, EventType="accidentsAndIncidents", Description="Crash blocking right lane")])
+    roadwork, crash = feed.events(METRO)
+    assert (roadwork.category, roadwork.road, roadwork.ramp_toward) == ("roadwork", "off-ramp", 270.0)
+    assert crash.category == "incident"

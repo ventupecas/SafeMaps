@@ -304,9 +304,10 @@ def _road_kind(description: str) -> str:
     """Which roads a description says an event is on ("Ramp Full Closure on I-94 EB at OFF RAMP TO HAWLEY RD").
 
     WZDx descriptions open with the kind of road (Ramp, Mainline, Local
-    Road); other descriptions are searched for an off- or on-ramp.
+    Road); 511's put the event type first ("Roadwork - Ramp Full Closure ...").
+    Other descriptions are searched for an off- or on-ramp.
     """
-    text = description.strip().lower()
+    text = re.sub(r"^(roadwork|incident|closures?)\s*-\s*", "", description.strip().lower())
     if text.startswith(("mainline", "local road")):
         return "mainline" if text.startswith("mainline") else "any"
     if text.startswith("system interchange"):
@@ -405,7 +406,10 @@ def _wi511_event(item: Mapping[str, Any], now: float) -> RoadEvent | None:
         path=path,
         direction=_COMPASS.get(str(item.get("DirectionOfTravel") or "").strip().lower()),
         description=f"{road}: {description}"[:300] if road else description[:300],
-        category=_WI511_CATEGORIES.get(str(item.get("EventType") or ""), ""),
+        # Work zone closures are filed under "closures", but their description says "Roadwork - ...".
+        category="roadwork"
+        if description.strip().lower().startswith("roadwork")
+        else _WI511_CATEGORIES.get(str(item.get("EventType") or ""), ""),
         road=_road_kind(description),
         ramp_road=_ramp_road(description),
         ramp_toward=_ramp_toward(description),
