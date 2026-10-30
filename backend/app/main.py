@@ -19,6 +19,7 @@ events (closures, lane closures, jams): see app.road_events.
 
 from __future__ import annotations
 
+import hmac
 import logging
 from collections.abc import AsyncIterator, Sequence
 from contextlib import asynccontextmanager
@@ -27,7 +28,7 @@ from threading import Lock
 from typing import Any, Literal
 
 import httpx
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, Header, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict, Field
@@ -121,6 +122,7 @@ class TripResponse(BaseModel):
     road_events_source: str | None = Field(description='The road event sources used, joined with "+"; or None.')
     road_events_skipped: list[str] = Field(description="Sources tried first that weren't set up or didn't answer.")
     road_events: list[RoadEventOut] = Field(description="Closures and lane closures around the trip, to draw.")
+    school_hours: bool = Field(description="School zones count on this trip: it's a school-day drop-off or pickup time.")
 
 
 @dataclass
@@ -223,7 +225,7 @@ def create_app(settings: Settings | None = None, *, http: httpx.Client | None = 
         allow_origins=list(settings.cors_origins),
         allow_origin_regex=LOCALHOST_ORIGINS,
         allow_methods=["GET", "POST"],
-        allow_headers=["Content-Type"],
+        allow_headers=["Content-Type", "X-Access-Code"],
     )
 
     @app.get("/health")
@@ -234,6 +236,12 @@ def create_app(settings: Settings | None = None, *, http: httpx.Client | None = 
             "status": "ok",
             "road_graph": {"area": graph.area, "junctions": graph.node_count} if graph else None,
             "crash_data": engine.hotspots is not None,
+            "hazards": {
+                "crash_locations": engine.hotspots.locations if engine.hotspots else 0,
+                "rail_crossings": len(graph.rail_crossing_points) if graph else 0,
+                "schools": len(graph.school_points) if graph else 0,
+                "school_hours_now": make_turn_context(settings, None).school_hours,
+            },
             "cache_mode": settings.cache_mode,
             "google_api_key_set": bool(settings.google_maps_api_key),
             "google_requests_today": engine.usage.used_today(),
@@ -252,8 +260,13 @@ def create_app(settings: Settings | None = None, *, http: httpx.Client | None = 
         return {"default": DEFAULT_PROFILE, "profiles": [profile.model_dump() for profile in PRESETS.values()]}
 
     @app.post("/route", response_model=TripResponse)
-    def route(trip: TripRequest, request: Request) -> TripResponse:
+    def route(
+        trip: TripRequest, request: Request, x_access_code: str | None = Header(None, include_in_schema=False)
+    ) -> TripResponse:
         engine: Engine = request.app.state.engine
+        # A demo shared over a public link: only people given the code can spend its Google requests.
+        if settings.access_code and not hmac.compare_digest(x_access_code or "", settings.access_code):
+            raise HTTPException(status_code=401, detail="This demo needs its access code.")
         try:
             profile = get_profile(trip.profile, trip.weights)
             context = make_turn_context(settings, engine.hotspots, trip.country_code, engine.graph)
@@ -323,6 +336,7 @@ def create_app(settings: Settings | None = None, *, http: httpx.Client | None = 
             own_router_used=own_used,
             attribution=[f"Route design: map data {ATTRIBUTION}"] if own_used else [],
             google=google,
+            school_hours=context.school_hours,
             road_events_source=report.source,
             road_events_skipped=report.skipped,
             road_events=[

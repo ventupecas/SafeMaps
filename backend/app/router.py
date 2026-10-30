@@ -38,8 +38,8 @@ from app.features import (
 from app.fuel import MIN_L_PER_KM, SIGNAL_L, TURN_L, cruise_liters
 from app.geo import Point, angle_between_deg, encode_polyline, haversine_m
 from app.models import ScoringProfile
-from app.road_events import RoadEvent
-from app.roadgraph import RoadGraph
+from app.road_events import WORKERS_PRESENT_FACTOR, RoadEvent
+from app.roadgraph import DEFAULT_SPEED_FACTOR, RoadGraph
 
 LINK_CLASSES = frozenset({"motorway_link", "trunk_link", "primary_link", "secondary_link", "tertiary_link"})
 FREEWAY_CLASSES = frozenset({"motorway", "trunk"})
@@ -84,6 +84,13 @@ UTURN_MIN_DEG = 150.0
 JAM_FACTOR = 3.0
 SLOW_FACTOR = 1.5
 LANE_CLOSURE_FACTOR = 1.5
+# OSM hazards: a railroad crossing at grade adds RAIL_CROSSING_S (slowing down,
+# and now and then a train) plus rail_crossing_weight. During school hours a
+# school zone is driven at SCHOOL_ZONE_KMH (20 mph), and entering one costs
+# school_zone_weight once.
+RAIL_CROSSING_S = 20.0
+SCHOOL_ZONE_KMH = 32.0
+SCHOOL_ZONE = -1  # the zone number all school zones share (lane closures use their event numbers)
 
 _ALL_MANEUVERS = DECISION_MANEUVERS | {"STRAIGHT"}
 
@@ -107,7 +114,8 @@ class _Costs:
     profile: ScoringProfile
     edges: list[float]
     table: dict[tuple[str, bool], float]
-    lane_closures: dict[int, frozenset[int]]
+    zones: dict[int, frozenset[int]]  # segment -> the zones it's in: lane closures (by event number), school zones
+    zone_costs: dict[int, float]  # zone -> what driving into it costs
 
 
 class OutsideGraphError(LookupError):
@@ -130,6 +138,8 @@ def design_profile(profile: ScoringProfile) -> ScoringProfile:
             "busy_crossing_weight": profile.busy_crossing_weight * PRIORITY_SAFETY_BOOST,
             "hotspot_crossing_weight": profile.hotspot_crossing_weight * PRIORITY_SAFETY_BOOST,
             "lane_closure_weight": profile.lane_closure_weight * PRIORITY_SAFETY_BOOST,
+            "school_zone_weight": profile.school_zone_weight * PRIORITY_SAFETY_BOOST,
+            "rail_crossing_weight": profile.rail_crossing_weight * PRIORITY_SAFETY_BOOST,
             "fuel_weight": profile.fuel_weight * PRIORITY_FUEL_BOOST,
         }
     )
@@ -176,6 +186,7 @@ class Router:
         avoid: Sequence[Sequence[Point]] = (),
         heading: float | None = None,
         events: Sequence[RoadEvent] = (),
+        school_hours: bool = False,
     ) -> list[RoutedPath]:
         """Up to count distinct routes for this profile, best first.
 
@@ -187,6 +198,7 @@ class Router:
         road it's on, without turning around. events are closures, lane
         closures and jams on the roads now: closed roads are left out (except
         under the car), and the rest cost more (see JAM_FACTOR and below).
+        During school_hours, school zones cost more too (see SCHOOL_ZONE_KMH).
         """
         g = self.graph
         departures = self._departures(origin, heading)
@@ -197,7 +209,7 @@ class Router:
         if heading is None and g.edge_from[departures[0]] == end:
             return []
 
-        costs = self._costs(design_profile(profile), events, keep=departures)
+        costs = self._costs(design_profile(profile), events, keep=departures, school_hours=school_hours)
         on_offer = [edges for edges in (g.edges_along(points) for points in avoid) if edges]
         penalties: dict[int, float] = {}
         found: list[RoutedPath] = []
@@ -391,13 +403,23 @@ class Router:
             self._event_edges[event] = edges
         return edges
 
-    def _costs(self, profile: ScoringProfile, events: Sequence[RoadEvent], *, keep: Iterable[int]) -> _Costs:
-        """What every segment and turn costs this trip, with its road events applied.
+    def _costs(
+        self, profile: ScoringProfile, events: Sequence[RoadEvent], *, keep: Iterable[int], school_hours: bool = False
+    ) -> _Costs:
+        """What every segment and turn costs this trip, with its road events (and school zones, in school hours) applied.
 
         Segments in keep (where the car is) are never closed off: it's already there.
         """
+        g = self.graph
         edge_costs = self._edge_costs(profile)
-        lane_closures: dict[int, set[int]] = {}
+        zones: dict[int, set[int]] = {}
+        zone_costs: dict[int, float] = {}
+        if school_hours:
+            zone_costs[SCHOOL_ZONE] = profile.school_zone_weight
+            for edge in range(g.edge_count):
+                if g.school_zone[edge]:
+                    edge_costs[edge] *= max(1.0, g.speed_kmh[edge] / SCHOOL_ZONE_KMH)
+                    zones[edge] = {SCHOOL_ZONE}
         keep = set(keep)
         for number, event in enumerate(events):
             for edge in self.event_edges(event):
@@ -405,15 +427,24 @@ class Router:
                     if edge not in keep:
                         edge_costs[edge] = math.inf
                 elif event.kind == "lanes":
-                    edge_costs[edge] *= LANE_CLOSURE_FACTOR
-                    lane_closures.setdefault(edge, set()).add(number)
+                    # Slower by the reduced speed limit if there is one (the expected speed is
+                    # below the posted one, hence the factor), and by LANE_CLOSURE_FACTOR at least.
+                    slower = LANE_CLOSURE_FACTOR
+                    if event.speed_limit_kmh:
+                        slower = max(slower, g.speed_kmh[edge] / (event.speed_limit_kmh * DEFAULT_SPEED_FACTOR))
+                    edge_costs[edge] *= slower
+                    zones.setdefault(edge, set()).add(number)
+                    zone_costs[number] = profile.lane_closure_weight * (
+                        WORKERS_PRESENT_FACTOR if event.workers else 1.0
+                    )
                 else:
                     edge_costs[edge] *= JAM_FACTOR if event.kind == "jam" else SLOW_FACTOR
         return _Costs(
             profile=profile,
             edges=edge_costs,
             table=self._turn_table(profile),
-            lane_closures={edge: frozenset(numbers) for edge, numbers in lane_closures.items()},
+            zones={edge: frozenset(numbers) for edge, numbers in zones.items()},
+            zone_costs=zone_costs,
         )
 
     def _search(
@@ -476,11 +507,11 @@ class Router:
         cost, previous = 0.0, edge
         for nxt in step.edges:
             cost += costs.edges[nxt] * penalties.get(nxt, 1.0) + self._cut_through_cost(previous, nxt)
-            entered = costs.lane_closures.get(nxt)
+            entered = costs.zones.get(nxt)
             if entered:
-                # Driving into a lane closure means a forced merge: as risky as a busy turn, once per closure.
-                newly = entered - costs.lane_closures.get(previous, frozenset())
-                cost += costs.profile.lane_closure_weight * len(newly)
+                # Driving into a lane closure (a forced merge) or a school zone costs once per zone, like a risky turn.
+                newly = entered - costs.zones.get(previous, frozenset())
+                cost += sum(costs.zone_costs[zone] for zone in newly)
             previous = nxt
         for node, maneuver, crossing, busy in step.turns:
             cost += self._turn_cost(costs.table, costs.profile, node, maneuver, crossing, busy)
@@ -501,6 +532,9 @@ class Router:
                 cost += profile.highway_weight * minutes
             elif g.winding[edge]:
                 cost -= profile.scenic_weight * minutes  # never negative: scenic_weight <= time_weight
+            if g.rail_crossings[edge]:
+                per_crossing = profile.time_weight * RAIL_CROSSING_S / 60 + profile.rail_crossing_weight
+                cost += g.rail_crossings[edge] * per_crossing
             costs.append(cost)
         return costs
 

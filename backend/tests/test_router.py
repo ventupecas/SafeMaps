@@ -206,3 +206,37 @@ def test_a_car_already_on_a_closed_road_can_still_leave_it():
     closed = RoadEvent("wi511", "closed", (point(1, 1), point(1, 2)))
     (best, *_) = Router(graph).routes(on_main, point(2, 2), FASTEST, heading=90, events=[closed])
     assert visited(graph, best) == [(1, 1), (1, 2), (2, 2)]
+
+
+def test_workers_on_site_make_a_lane_closure_cost_more():
+    graph = build_graph(grid_city().osm.elements)
+    router = Router(graph)
+    on_2_ave = (point(1, 2), point(2, 2))
+    empty = RoadEvent("wzdx", "lanes", on_2_ave, direction=0)
+    crew = RoadEvent("wzdx", "lanes", on_2_ave, direction=0, workers=True, speed_limit_kmh=24)
+    path = router.routes(point(1, 0), point(2, 2), FASTEST)[0]
+    plain = router._path_cost(list(path.edges), router._costs(FASTEST, [], keep=()))
+    with_empty = router._path_cost(list(path.edges), router._costs(FASTEST, [empty], keep=()))
+    with_crew = router._path_cost(list(path.edges), router._costs(FASTEST, [crew], keep=()))
+    assert plain < with_empty < with_crew
+
+
+def test_a_railroad_crossing_is_driven_around_when_there_is_a_fair_alternative():
+    from tests.test_roadgraph import city_with_hazards
+
+    graph = build_graph(city_with_hazards().osm.elements)
+    (best, *_) = Router(graph).routes(point(1, 0), point(2, 2), FASTEST)
+    assert visited(graph, best) == [(1, 0), (1, 1), (2, 1), (2, 2)]  # not along Main St over the tracks
+
+
+def test_school_zones_cost_more_only_during_school_hours():
+    from tests.test_roadgraph import city_with_hazards
+
+    graph = build_graph(city_with_hazards().osm.elements)
+    router = Router(graph)
+    path = router.routes(point(1, 0), point(2, 3), FASTEST)[0]
+    after_school = router._path_cost(list(path.edges), router._costs(FASTEST, [], keep=()))
+    drop_off = router._path_cost(list(path.edges), router._costs(FASTEST, [], keep=(), school_hours=True))
+    assert drop_off > after_school + FASTEST.school_zone_weight - 0.01
+    features = extract_features(router.to_route_json(path), TurnContext(junctions=graph, school_hours=True))
+    assert features.school_zones == 1

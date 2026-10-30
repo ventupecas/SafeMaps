@@ -434,7 +434,13 @@ select:focus-visible,
   font-size: 1.15rem;
   font-weight: 700;
   text-align: center;
+  white-space: pre-line; /* the next turn, then what's left, on its own line */
   box-shadow: 0 2px 8px rgba(0, 0, 0, 0.3);
+}
+
+.voice {
+  font-size: 0.85rem;
+  color: var(--muted);
 }
 
 .recenter {

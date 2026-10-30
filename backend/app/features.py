@@ -19,6 +19,8 @@ The heuristics are deliberately simple enough to explain on a demo stage:
   through the rough model in app.fuel.
 * Closures and lane closures: the trip's road events (app.road_events) the
   route drives through, the way their traffic goes.
+* Railroad crossings at grade, and school zones during school hours: counted
+  on the road graph along the route's street stretches.
 """
 
 from __future__ import annotations
@@ -29,9 +31,9 @@ from typing import Any, Protocol
 
 from app.driving_side import DrivingSide
 from app.fuel import CONGESTION_L_PER_HOUR, SIGNAL_L, TURN_L, cruise_liters
-from app.geo import Point, decode_polyline, path_length_m, total_heading_change_deg
+from app.geo import Point, decode_polyline, path_length_m, point_along, total_heading_change_deg
 from app.hotspots import CrashHotspots
-from app.models import CrossingTurn, LatLng, RouteFeatures
+from app.models import CrossingTurn, LatLng, Maneuver, RouteFeatures
 from app.road_events import RoadEvent, count_on_route
 
 # Calibration knobs. Tune them against routes you have recorded in the cache.
@@ -93,6 +95,10 @@ class JunctionLookup(Protocol):
         """Distinct traffic signals the given stretches of road pass."""
         ...
 
+    def road_name_at(self, point: Point, heading: float) -> str:
+        """The name of the road at point running along heading; "" if unknown."""
+        ...
+
 
 @dataclass(frozen=True)
 class TurnContext:
@@ -110,6 +116,8 @@ class TurnContext:
     junctions: JunctionLookup | None = None
     # Closures, lane closures and jams on the roads now (see app.road_events).
     events: tuple[RoadEvent, ...] = ()
+    # School zones count only while schools are in session (see engine.school_in_session).
+    school_hours: bool = False
 
     def __post_init__(self) -> None:
         if self.min_hotspot_crashes <= 0:
@@ -189,14 +197,20 @@ def extract_features(route: Mapping[str, Any], context: TurnContext = TurnContex
     if covered_m == 0 and distance_m > 0 and static_s > 0:
         cruise_l = cruise_liters(distance_m, distance_m / static_s * 3.6)  # no steps: use the route average
     delay_s = max(0.0, duration_s - static_s)
-    # Google's steps don't list traffic signals; the road graph knows where they are.
-    counter = getattr(context.junctions, "signals_along", None)
-    signals = counter(street_stretches) if counter is not None else 0
+    # Google's steps don't list traffic signals, railroad crossings or schools;
+    # the road graph knows where they are. Freeway stretches pass over them.
+    def along(method: str) -> int:
+        counter = getattr(context.junctions, method, None)
+        return counter(street_stretches) if counter is not None else 0
+
+    signals = along("signals_along")
+    rail_crossings = along("rail_crossings_along")
+    school_zones = along("schools_along") if context.school_hours else 0
     fuel_l = cruise_l + maneuvers * TURN_L + signals * SIGNAL_L + delay_s / 3600 * CONGESTION_L_PER_HOUR
-    closures, lane_closures = (
+    closures, lane_closures, with_workers = (
         count_on_route(decode_polyline(route.get("polyline", {}).get("encodedPolyline", "")), context.events)
         if context.events
-        else (0, 0)
+        else (0, 0, 0)
     )
 
     return RouteFeatures(
@@ -213,7 +227,60 @@ def extract_features(route: Mapping[str, Any], context: TurnContext = TurnContex
         crossing_turns=tuple(crossing_turns),
         closures=closures,
         lane_closures=lane_closures,
+        lane_closures_with_workers=with_workers,
+        school_zones=school_zones,
+        rail_crossings=rail_crossings,
     )
+
+
+# Turn-by-turn wording per maneuver; "onto <road>" follows when the road has a name.
+_SAY = {
+    "TURN_LEFT": "Turn left",
+    "TURN_RIGHT": "Turn right",
+    "TURN_SLIGHT_LEFT": "Bear left",
+    "TURN_SLIGHT_RIGHT": "Bear right",
+    "TURN_SHARP_LEFT": "Turn sharp left",
+    "TURN_SHARP_RIGHT": "Turn sharp right",
+    "UTURN_LEFT": "Make a U-turn",
+    "UTURN_RIGHT": "Make a U-turn",
+    "RAMP_LEFT": "Take the ramp on the left",
+    "RAMP_RIGHT": "Take the ramp on the right",
+    "MERGE": "Merge",
+    "FORK_LEFT": "Keep left",
+    "FORK_RIGHT": "Keep right",
+    "ROUNDABOUT_LEFT": "Enter the roundabout",
+    "ROUNDABOUT_RIGHT": "Enter the roundabout",
+    "NAME_CHANGE": "Continue",
+}
+
+
+def directions(route: Mapping[str, Any], context: TurnContext = TurnContext()) -> tuple[Maneuver, ...]:
+    """Turn-by-turn instructions: one per maneuver, where it's made.
+
+    Google's steps here carry no road names, so with the road graph each
+    instruction names the road the maneuver leads onto.
+    """
+    road_name_at = getattr(context.junctions, "road_name_at", None)
+    result = []
+    for step in iter_steps(route):
+        maneuver = step.get("navigationInstruction", {}).get("maneuver", "")
+        say = _SAY.get(maneuver)
+        points = decode_polyline(step.get("polyline", {}).get("encodedPolyline", ""))
+        if say is None or len(points) < 2:
+            continue
+        road = ""
+        if road_name_at is not None and not maneuver.startswith("UTURN"):
+            ahead, bearing = point_along(points, min(30.0, path_length_m(points) / 2))
+            road = road_name_at(ahead, bearing)
+        start = points[0]
+        result.append(
+            Maneuver(
+                maneuver=maneuver,
+                instruction=f"{say} onto {road}" if road else say,
+                location=LatLng(lat=start[0], lng=start[1]),
+            )
+        )
+    return tuple(result)
 
 
 def _crossing_turn(

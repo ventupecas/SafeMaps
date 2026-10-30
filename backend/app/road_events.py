@@ -76,6 +76,9 @@ EVENT_MATCH_M = 30.0
 # ramp merging beside a closure's end runs alongside it for a little while.
 EVENT_ON_ROUTE_M = 300.0
 ON_ROUTE_M = 15.0
+# A lane closure with workers on site is this much riskier than an empty one.
+WORKERS_PRESENT_FACTOR = 1.5
+KMH_PER_MPH = 1.609344
 EVENT_MATCH_DEG = 60.0  # a direction of travel this close counts as the same
 PARALLEL_DEG = 45.0  # a road this close to a line, either way, runs along it
 TRIP_MARGIN_M = 5_000.0  # events this far outside the trip's box can still matter
@@ -124,6 +127,9 @@ class RoadEvent:
     # this it would close the freeway.
     road: str = "any"
     ramp_road: str = ""  # words naming the street a closed ramp leads to or comes from, e.g. "hawley"
+    ramp_toward: float | None = None  # for a freeway-to-freeway ramp: the compass direction of the freeway it joins
+    workers: bool = False  # workers on site now (WZDx worker_presence)
+    speed_limit_kmh: float | None = None  # a reduced speed limit through it
 
 
 class EventSourceError(RuntimeError):
@@ -237,15 +243,25 @@ def _wzdx_event(feature: Mapping[str, Any], now: datetime) -> RoadEvent | None:
         return None
     roads = ", ".join(core.get("road_names") or [])
     description = core.get("description") or roads
+    workers = bool((properties.get("worker_presence") or {}).get("are_workers_present"))
+    try:
+        limit = float(properties["reduced_speed_limit_kph"]) or None
+    except (KeyError, TypeError, ValueError):
+        limit = None
+    details = [f"speed limit {round(limit / KMH_PER_MPH)} mph"] if limit else []
+    details += ["workers present"] if workers else []
     return RoadEvent(
         source="wzdx",
         kind=kind,
         path=path,
         direction=_COMPASS.get(str(core.get("direction") or "").lower()),
-        description=description[:300],
+        description=(description[:260] + (f" ({', '.join(details)})" if details else "")),
         category="roadwork",
         road=_road_kind(description),
         ramp_road=_ramp_road(description),
+        ramp_toward=_ramp_toward(description),
+        workers=workers,
+        speed_limit_kmh=limit,
     )
 
 
@@ -266,6 +282,16 @@ def road_words(name: str) -> frozenset[str]:
     return frozenset(word for word in re.findall(r"[a-z0-9]+", name.lower()) if word not in _ROAD_NOISE)
 
 
+_RAMP_TOWARD = re.compile(r"\bto\s+[a-z]+[- ]?\d+\s+(nb|eb|sb|wb)\b", re.IGNORECASE)
+_SHORT_COMPASS = {"nb": 0.0, "eb": 90.0, "sb": 180.0, "wb": 270.0}
+
+
+def _ramp_toward(description: str) -> float | None:
+    """Which way the freeway a system ramp joins runs ("... WIS 175 SB TO I-94 WB" -> 270)."""
+    match = _RAMP_TOWARD.search(description)
+    return _SHORT_COMPASS[match.group(1).lower()] if match else None
+
+
 def _ramp_road(description: str) -> str:
     """The street a ramp in the description leads to or comes from ("OFF RAMP TO HAWLEY RD" -> "hawley")."""
     match = _RAMP_ROAD.search(description)
@@ -283,6 +309,8 @@ def _road_kind(description: str) -> str:
     text = description.strip().lower()
     if text.startswith(("mainline", "local road")):
         return "mainline" if text.startswith("mainline") else "any"
+    if text.startswith("system interchange"):
+        return "off-ramp"  # a freeway-to-freeway ramp, leaving the road the event is on
     if re.search(r"\boff[- ]?ramp\b|\bexit ramp\b", text):
         return "off-ramp"
     if re.search(r"\bon[- ]?ramp\b|\bentrance ramp\b", text):
@@ -380,6 +408,7 @@ def _wi511_event(item: Mapping[str, Any], now: float) -> RoadEvent | None:
         category=_WI511_CATEGORIES.get(str(item.get("EventType") or ""), ""),
         road=_road_kind(description),
         ramp_road=_ramp_road(description),
+        ramp_toward=_ramp_toward(description),
     )
 
 
@@ -608,10 +637,10 @@ def collect(
 # ---- Which events a route drives through
 
 
-def count_on_route(points: Sequence[Point], events: Iterable[RoadEvent]) -> tuple[int, int]:
-    """(closures, lane closures) a route drives through, the way their traffic goes."""
+def count_on_route(points: Sequence[Point], events: Iterable[RoadEvent]) -> tuple[int, int, int]:
+    """(closures, lane closures, lane closures with workers present) a route drives through, the way their traffic goes."""
     if len(points) < 2:
-        return 0, 0
+        return 0, 0, 0
     # A quick box test first: a trip can have a hundred work zones around it.
     margin = EVENT_MATCH_M / 111_320.0 * 2
     south, north = min(p[0] for p in points) - margin, max(p[0] for p in points) + margin
@@ -626,16 +655,17 @@ def count_on_route(points: Sequence[Point], events: Iterable[RoadEvent]) -> tupl
         and max(p[1] for p in event.path) >= west
     ]
     if not relevant:
-        return 0, 0
+        return 0, 0, 0
     route = _RouteIndex(points)
-    closures = lane_closures = 0
+    closures = lane_closures = with_workers = 0
     for event in relevant:
         if route.runs_along(event):
             if event.kind == "closed":
                 closures += 1
             else:
                 lane_closures += 1
-    return closures, lane_closures
+                with_workers += event.workers
+    return closures, lane_closures, with_workers
 
 
 class _RouteIndex:
@@ -666,6 +696,10 @@ class _RouteIndex:
             # A source's point may sit a little off the road: the looser match.
             near = self.bearings_near(event.path[0], EVENT_MATCH_M)
             return any(carries(bearing, None, event.direction, event.along) for bearing in near)
+        if event.road in RAMP_KINDS and not (
+            self.bearings_near(event.path[0], ON_ROUTE_M) and self.bearings_near(event.path[-1], ON_ROUTE_M)
+        ):
+            return False  # a ramp runs beside its freeway for a while: using it means passing both its ends
         spacing = EVENT_MATCH_M / 2
         samples = densify(event.path, spacing)
         longest = run = misses = 0

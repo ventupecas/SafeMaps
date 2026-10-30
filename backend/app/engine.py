@@ -15,13 +15,14 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from dataclasses import dataclass, field
+from datetime import datetime, time
 from typing import Any
 
 from app.cache import CacheMiss
 from app.candidates import CandidateOptions, RawCandidate, RouteFetcher, gather_candidates
 from app.config import Settings
 from app.driving_side import DrivingSide, driving_side_for_country
-from app.features import TurnContext, extract_features
+from app.features import TurnContext, directions, extract_features
 from app.geo import Point, decode_polyline
 from app.hotspots import CrashHotspots
 from app.models import CandidateRoute, LatLng, RoutePlan, ScoredRoute, ScoringProfile
@@ -64,13 +65,15 @@ def make_turn_context(
     hotspots: CrashHotspots | None,
     country_code: str | None = None,
     graph: RoadGraph | None = None,
+    *,
+    now: datetime | None = None,
 ) -> TurnContext:
-    """Turn-judging context for one trip.
+    """Turn-judging context for one trip, leaving now (local time; the clock's by default).
 
     The driving side comes from the trip's country (the frontend gets it from
     the Places selection), else ROUTES_DEFAULT_COUNTRY, else keep-right. With
     the road graph, every route's turns, Google's included, are judged by the
-    roads meeting at each junction.
+    roads meeting at each junction, and its school zones count during school hours.
     """
     code = country_code or settings.default_country
     return TurnContext(
@@ -78,7 +81,18 @@ def make_turn_context(
         hotspots=hotspots,
         min_hotspot_crashes=settings.crash_min_count,
         junctions=graph,
+        school_hours=school_in_session(now or datetime.now(), settings.school_hours),
     )
+
+
+def school_in_session(now: datetime, windows: Sequence[tuple[time, time]]) -> bool:
+    """Whether school zones count at now: in one of the windows on a weekday, outside July and August.
+
+    A simplification: school holidays and each district's own calendar aren't known.
+    """
+    if now.weekday() >= 5 or now.month in (7, 8):
+        return False
+    return any(start <= now.time() <= end for start, end in windows)
 
 
 def build_candidates(
@@ -152,6 +166,7 @@ def build_router_candidates(
             avoid=on_offer,
             heading=heading,
             events=[*context.events, *pool.events],
+            school_hours=context.school_hours,
         )
     except OutsideGraphError as exc:
         pool.notes.append(f"Own router skipped: {exc}.")
@@ -282,6 +297,7 @@ def _unique_paths(
     avoid: Sequence[Sequence[Point]],
     heading: int | None,
     events: Sequence[RoadEvent],
+    school_hours: bool,
 ) -> list[RoutedPath]:
     paths: dict[tuple[int, ...], RoutedPath] = {}
     for profile in profiles:
@@ -293,6 +309,7 @@ def _unique_paths(
             avoid=avoid,
             heading=heading,
             events=events,
+            school_hours=school_hours,
         )
         for path in found:
             paths.setdefault(path.edges, path)
@@ -318,4 +335,5 @@ def _candidate(
         live_traffic=live_traffic,
         design_match=design_match,
         features=extract_features(route, context),
+        maneuvers=directions(route, context),
     )

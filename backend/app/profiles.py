@@ -18,6 +18,8 @@ PRESETS: dict[str, ScoringProfile] = {
             busy_crossing_weight=0.0,
             hotspot_crossing_weight=0.0,
             lane_closure_weight=0.0,
+            school_zone_weight=0.0,
+            rail_crossing_weight=0.0,
             fuel_weight=0.0,
         ),
         # The default: safety first, then fuel, then time. The safest route wins;
@@ -38,6 +40,8 @@ PRESETS: dict[str, ScoringProfile] = {
             busy_crossing_weight=4.0,
             hotspot_crossing_weight=8.0,
             lane_closure_weight=4.0,
+            school_zone_weight=4.0,
+            rail_crossing_weight=1.5,
         ),
         # Fuel first: a liter feels like 15 minutes and time counts half.
         ScoringProfile(name="eco", time_weight=0.5, fuel_weight=15.0),

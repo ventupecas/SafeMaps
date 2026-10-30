@@ -289,3 +289,44 @@ def test_a_ramp_closure_on_the_freeway_closes_the_named_ramp_not_the_freeway():
     assert graph.event_edges(replace(closure, ramp_road="")) == set()
     # A ramp that can't be found is left out, rather than closing the freeway.
     assert graph.snap_events([replace(closure, ramp_road="nowhere")]) == []
+
+
+def city_with_hazards():
+    """The grid with a railroad crossing on Main St between 1 Ave and 2 Ave, and a school by North St and 3 Ave."""
+    city = grid_city()
+    crossing = city.osm.node(5000, midpoint(point(1, 1), point(1, 2)), railway="level_crossing")
+    main = next(e for e in city.osm.elements if e["type"] == "way" and e["id"] == city.main)
+    main["nodes"].insert(2, crossing)
+    city.osm.elements.append({"type": "way", "id": 900, "tags": {"amenity": "school"}, "center": {"lat": point(2, 3)[0] + 0.0012, "lon": point(2, 3)[1]}})
+    return city
+
+
+def test_railroad_crossings_and_school_zones_are_built_into_the_map(tmp_path):
+    graph = build_graph(city_with_hazards().osm.elements)
+    crossing_both_ways = {edge_between(graph, (1, 1), (1, 2)), edge_between(graph, (1, 2), (1, 1))}
+    assert {e for e in range(graph.edge_count) if graph.rail_crossings[e]} == crossing_both_ways
+    assert len(graph.rail_crossing_points) == 1 and len(graph.school_points) == 1
+    assert graph.school_zone[edge_between(graph, (2, 2), (2, 3))]  # North St by the school
+    assert not graph.school_zone[edge_between(graph, (1, 0), (1, 1))]  # far away
+    assert graph.stats["schools"] == 1 and graph.stats["rail_crossings"] == 1
+    graph.save(tmp_path / "g.json.gz")
+    again = RoadGraph.load(tmp_path / "g.json.gz")
+    assert again.rail_crossings == graph.rail_crossings and again.school_zone == graph.school_zone
+    assert again.rail_crossings_along([[point(1, 0), point(1, 3)]]) == 1  # Main St passes the crossing
+    assert again.schools_along([[point(2, 1), point(2, 3)]]) == 1
+
+
+def test_a_map_built_before_hazards_still_loads(tmp_path):
+    import gzip
+    import json
+
+    build_graph(grid_city().osm.elements).save(tmp_path / "old.json.gz")
+    with gzip.open(tmp_path / "old.json.gz", "rt", encoding="utf-8") as handle:
+        data = json.load(handle)
+    for key in ("rail_crossings", "school"):
+        del data["edges"][key]
+    del data["rail_crossing_points"], data["school_points"]
+    with gzip.open(tmp_path / "old.json.gz", "wt", encoding="utf-8") as handle:
+        json.dump(data, handle)
+    graph = RoadGraph.load(tmp_path / "old.json.gz")
+    assert graph.rail_crossings == [0] * graph.edge_count and not any(graph.school_zone)
