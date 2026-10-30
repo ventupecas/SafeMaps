@@ -7,19 +7,23 @@ Run from the backend/ directory:
 
 Each trip goes through the same API the web map uses (same profile, road
 events, school hours), and the recommended route is compared with the
-standard route (Google's own choice): risky turns, lane closures, school
-zones, railroad crossings, fuel and time. Writes RESULTS.md at the repo root
-and data/results.csv.
+standard route (Google's own choice, or with the OpenStreetMap map our
+fastest route): risky turns, lane closures, school zones, railroad
+crossings, fuel and time. Writes RESULTS.md at the repo root,
+data/results.csv, and frontend/results.json (the headline numbers for the
+web map's "How it works").
 
-Cost: without --live-traffic, one Essentials request per trip for Google's
-suggestions (free on a rerun: answers are cached). With it, up to about 7
-live-traffic requests per trip.
+Cost: on the OpenStreetMap map (ROUTES_MAP=osm), nothing from Google. On
+Google's map, without --live-traffic, one Essentials request per trip for
+Google's suggestions (free on a rerun: answers are cached); with it, up to
+about 7 live-traffic requests per trip.
 """
 
 from __future__ import annotations
 
 import argparse
 import csv
+import json
 import sys
 from collections.abc import Sequence
 from dataclasses import dataclass
@@ -126,16 +130,36 @@ def run(client: TestClient, origin: str, destination: str, *, live_traffic: bool
         return f"{name}: the server answered {response.status_code} ({response.json().get('detail', '')})"
     plan = response.json()["plan"]
     winner = plan["winner"]
-    standard = next((route for route in plan["candidates"] if route["is_google_default"]), None)
+    standard = next((route for route in plan["candidates"] if route["is_standard"]), None)
     mine = measure(winner)
     theirs = measure(standard) if standard else mine
     return Outcome(
         trip=name,
-        recommended="Standard route" if winner["is_google_default"] else "Our safer design",
+        recommended="Standard route" if winner["is_standard"] else "Our safer design",
         standard_found=standard is not None,
         differs=standard is not None and standard["id"] != winner["id"],
         numbers={key: (theirs[key], mine[key]) for key in mine},
     )
+
+
+def headline(outcomes: Sequence[Outcome], live_traffic: bool) -> dict[str, Any]:
+    """The totals over the trips compared with a standard route, for frontend/results.json."""
+    compared = [o for o in outcomes if o.standard_found]
+    totals = {
+        f"{key}_{side}": round(sum(o.numbers[key][which] for o in compared), 2)
+        for key, _ in MEASURES
+        for which, side in ((0, "standard"), (1, "ours"))
+    }
+    return {
+        "generated": f"{datetime.now():%Y-%m-%d}",
+        "live_traffic": live_traffic,
+        "trips": len(compared),
+        "different": sum(o.differs for o in compared),
+        **totals,
+        "minutes_added_per_trip": round((totals["minutes_ours"] - totals["minutes_standard"]) / len(compared), 1)
+        if compared
+        else 0.0,
+    }
 
 
 def report(outcomes: Sequence[Outcome], failures: Sequence[str], live_traffic: bool, health: dict[str, Any]) -> str:
@@ -201,8 +225,10 @@ def report(outcomes: Sequence[Outcome], failures: Sequence[str], live_traffic: b
         "## How to read this",
         "",
         "- Safety comes first in the ranking, then fuel, then time, so extra minutes are expected where a safer route exists.",
-        "- Without live traffic, our routes' times are our road map's estimates and the standard route's are Google's"
-        " no-traffic estimates: close, but not the same model. Run with `--live-traffic` for live times on both.",
+        "- With the OpenStreetMap map, the standard route is our router's fastest, so both are timed by the same"
+        " model, with live delays from 511 and TomTom. With Google's map and no live traffic, the standard route's"
+        " time is Google's no-traffic estimate: close, but not the same model. Run with `--live-traffic` for live"
+        " times on both.",
         "- Lane closures come from the live work-zone feed, so they change from day to day; school zones count only"
         " during school drop-off and pickup times.",
     ]
@@ -222,7 +248,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     with TestClient(create_app(settings)) as client:
         health = client.get("/health").json()
         for number, (origin, destination) in enumerate(TRIPS, start=1):
-            print(f"[{number}/{len(TRIPS)}] {origin} → {destination}", flush=True)
+            print(f"[{number}/{len(TRIPS)}] {origin} to {destination}", flush=True)  # plain text: any console prints it
             result = run(client, origin, destination, live_traffic=args.live_traffic, access_code=settings.access_code)
             (failures if isinstance(result, str) else outcomes).append(result)
 
@@ -235,7 +261,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         writer.writerow(["trip", "recommended", *(f"{key}_{side}" for key, _ in MEASURES for side in ("standard", "ours"))])
         for o in outcomes:
             writer.writerow([o.trip, o.recommended, *(round(v, 3) for key, _ in MEASURES for v in o.numbers[key])])
-    print(f"\nWrote {out} and {table}")
+    numbers = BACKEND_DIR.parent / "frontend" / "results.json"
+    numbers.write_text(json.dumps(headline(outcomes, args.live_traffic), indent=1) + "\n", encoding="utf-8")
+    print(f"\nWrote {out}, {table} and {numbers}")
     return 0
 
 

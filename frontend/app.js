@@ -13,7 +13,7 @@
 // Nothing on the page names the map provider; Google's logo and terms on its
 // map, and the credits on either map, are required and stay.
 
-import { bearing, createMapView, decodePolyline, distanceM } from "./maps.js";
+import { bearing, createMapView, decodePolyline, distanceM, loadScript } from "./maps.js";
 
 const MILWAUKEE = { lat: 43.0389, lng: -87.9065 };
 const KM_TO_MI = 0.621371;
@@ -48,6 +48,8 @@ const EVENT_SOURCES = {
   google: "traffic speeds along the routes",
   apify: "traffic tiles",
 };
+const QR_LIBRARY = "https://unpkg.com/qrcode-generator@1.4.4/qrcode.js";
+const NARROW = "(max-width: 760px)"; // the phone layout in styles.css
 const PROFILE_LABELS = {
   "safe-economy": "Safe & economical (recommended)",
   fastest: "Fastest",
@@ -65,7 +67,9 @@ const state = {
   pins: { origin: null, destination: null },
   routeLines: [], // { id, lines: [line handle] }
   turnMarkers: [],
-  eventShapes: [], // closures and lane closures drawn on the map
+  closures: [], // closures and lane closures from the last trip
+  closureLines: [], // ...drawn, when "Show closures" is on
+  closureMarkers: null, // their markers, a group that clusters where crowded
   trafficEvents: [], // slow and jammed stretches (511 travel times, TomTom's jams) from the last trip
   trafficShapes: [], // ...drawn, when "Show traffic" is on and the map has no traffic layer of its own
   plan: null, // the last plan from the server
@@ -104,6 +108,7 @@ async function boot() {
   } catch {
     state.mapKind = "google"; // an older server: it only knew Google's map
   }
+  document.body.classList.toggle("map-osm", state.mapKind === "osm"); // shows the .osm-only credits
   const config = window.ROUTES_CONFIG || {};
   if (state.mapKind === "google" && (window.ROUTES_CONFIG_MISSING || !config.mapsApiKey)) {
     showSetup();
@@ -167,6 +172,7 @@ async function initMap() {
       ),
     ),
   );
+  state.closureMarkers = state.view.markerGroup();
 }
 
 // ---- Trip input
@@ -193,7 +199,13 @@ function wireControls() {
   $("traffic-layer").addEventListener("change", (event) => {
     if (state.view && state.view.hasTraffic) state.view.traffic(event.target.checked);
     else drawTraffic(); // no traffic layer: the measured slowdowns from the last trip
+    $("legend-traffic").hidden = !event.target.checked;
   });
+  $("closures-layer").addEventListener("change", drawClosures);
+  $("about-open").addEventListener("click", showAbout);
+  $("phone-open").addEventListener("click", showPhoneLink);
+  // The map key starts folded on a phone, where it would cover much of the map.
+  if (window.matchMedia(NARROW).matches) $("legend").open = false;
   // A screen wake lock is dropped whenever the page is hidden; take it again on return.
   document.addEventListener("visibilitychange", () => {
     if (state.nav.active && document.visibilityState === "visible") keepScreenOn();
@@ -231,6 +243,7 @@ function clearAll() {
   state.trafficEvents = [];
   drawTraffic();
   state.plan = null;
+  $("osm-credit").hidden = true;
   $("results").replaceChildren();
   $("drive").hidden = true;
   setNavStatus(null);
@@ -266,6 +279,7 @@ async function requestTrip(origin, destination, heading = null) {
     use_router: $("use-router").checked,
     road_events: $("road-events").value,
   };
+  if ($("extra-time").value) payload.max_extra_min = Number($("extra-time").value);
   if (heading !== null) payload.heading = Math.round(heading * 10) / 10;
   const headers = { "Content-Type": "application/json" };
   const code = accessCode();
@@ -336,7 +350,8 @@ function showTrip(trip, { fit = true } = {}) {
   clearRoutes();
   drawRoutes(plan, fit);
   drawRiskyTurns(plan.winner);
-  drawRoadEvents(trip.road_events.filter((event) => !isTraffic(event)));
+  state.closures = trip.road_events.filter((event) => !isTraffic(event));
+  drawClosures();
   state.trafficEvents = trip.road_events.filter(isTraffic);
   drawTraffic();
 
@@ -354,12 +369,17 @@ function showTrip(trip, { fit = true } = {}) {
     ...(notes.length ? [element("ul", { className: "notes" }, ...notes.map((note) => element("li", {}, note)))] : []),
     element("p", { className: "usage" }, roadEventsLine(trip)),
     ...(trip.school_hours ? [element("p", { className: "usage" }, "School zones count now: it's a school drop-off or pickup time.")] : []),
-    element(
-      "p",
-      { className: "usage" },
-      `Route data requests for this trip: ${usage.live_requests}` +
-        (usage.daily_limit ? ` (${usage.used_today} of ${usage.daily_limit} today)` : ""),
-    ),
+    // Route data requests are paid ones; the OpenStreetMap map never makes any.
+    ...(state.mapKind === "osm"
+      ? []
+      : [
+          element(
+            "p",
+            { className: "usage" },
+            `Route data requests for this trip: ${usage.live_requests}` +
+              (usage.daily_limit ? ` (${usage.used_today} of ${usage.daily_limit} today)` : ""),
+          ),
+        ]),
   );
   selectRoute(plan.winner.id);
   $("drive").hidden = false;
@@ -421,21 +441,27 @@ function drawTraffic() {
   }
 }
 
-function drawRoadEvents(events) {
-  for (const event of events) {
+// Closed roads in black, lane closures in dashed orange, each with a marker to tap for the details.
+// Crowded markers merge into a count on the OpenStreetMap map. "Show closures" hides them all.
+function drawClosures() {
+  for (const line of state.closureLines) line.remove();
+  state.closureLines = [];
+  if (!state.closureMarkers) return;
+  state.closureMarkers.clear();
+  if (!$("closures-layer").checked) return;
+  for (const event of state.closures) {
     const path = decodePolyline(event.path);
     if (path.length > 1) {
-      const color = event.kind === "closed" ? COLORS.closed : COLORS.lanes;
-      state.eventShapes.push(
+      state.closureLines.push(
         event.kind === "closed"
-          ? state.view.line(path, { color, weight: 7, zIndex: 25 })
-          : state.view.line(path, { color, dashed: true, zIndex: 25 }),
+          ? state.view.line(path, { color: COLORS.closed, weight: 7, zIndex: 25 })
+          : state.view.line(path, { color: COLORS.lanes, dashed: true, zIndex: 25 }),
       );
     }
-    const what = event.kind === "closed" ? "Road closed" : "Lane closure";
+    const heading = event.kind === "closed" ? "Road closed" : "Lane closure";
     const dot = element("div", { className: `event-dot event-dot--${event.kind}` });
-    const title = event.description ? `${what}: ${event.description}` : what;
-    state.eventShapes.push(state.view.marker(path[0], dot, { title, zIndex: 26 }));
+    const title = event.description ? `${heading}: ${event.description}` : heading;
+    state.closureMarkers.add(path[0], dot, { title, zIndex: 26, popup: { heading, text: event.description } });
   }
 }
 
@@ -448,7 +474,7 @@ function followablePath(points, route, plan) {
     cumulative,
     lengthM: cumulative[cumulative.length - 1],
     minutes: route.features.duration_min,
-    label: routeLabel(route, plan),
+    label: route.via ? `the route via ${route.via}` : routeKind(route, plan), // "Following ... instead"
   };
   // Where each turn-by-turn instruction falls along the route, to know which comes next.
   followable.maneuvers = route.maneuvers.map((maneuver) => ({
@@ -463,7 +489,10 @@ function drawRiskyTurns(route) {
     if (!(turn.busy || turn.hotspot) || !turn.location) continue;
     const why = turn.hotspot ? "a crash-prone junction" : "a busy junction";
     const dot = element("div", { className: "turn-dot" });
-    state.turnMarkers.push(state.view.marker(turn.location, dot, { title: `Turn across traffic at ${why}`, zIndex: 30 }));
+    const text = `The recommended route turns across oncoming traffic at ${why}${turn.hotspot ? ", where fatal crashes have happened" : ""}.`;
+    state.turnMarkers.push(
+      state.view.marker(turn.location, dot, { title: `Turn across traffic at ${why}`, zIndex: 30, popup: { heading: "Risky turn", text } }),
+    );
   }
 }
 
@@ -481,10 +510,10 @@ function selectRoute(id) {
 function clearRoutes() {
   for (const entry of state.routeLines) entry.lines.forEach((line) => line.remove());
   for (const marker of state.turnMarkers) marker.remove();
-  for (const shape of state.eventShapes) shape.remove();
   state.routeLines = [];
   state.turnMarkers = [];
-  state.eventShapes = [];
+  state.closures = [];
+  drawClosures();
   state.paths = {};
   state.activeRouteId = null;
 }
@@ -494,8 +523,9 @@ function winnerCard(plan, standard) {
   const card = element(
     "section",
     { className: "winner" },
-    element("h2", { className: "winner__title" }, `Recommended: ${routeLabel(winner, plan)}`),
+    element("h2", { className: "winner__title" }, `Recommended: ${winner.via ? `via ${winner.via}` : routeKind(winner, plan)}`),
   );
+  if (winner.via) card.append(element("p", { className: "winner__kind" }, routeKind(winner, plan)));
   if (winner.reason) card.append(element("p", { className: "winner__reason" }, capitalize(winner.reason)));
   if (standard && standard.id !== winner.id) {
     card.append(element("p", { className: "override" }, comparedWithStandard(winner, standard)));
@@ -542,7 +572,16 @@ function routeList(plan) {
           "div",
           {},
           element("div", { className: "route__name" }, routeLabel(route, plan)),
-          element("div", { className: "route__reason" }, route.reason ? capitalize(route.reason) : route.eligible ? "" : "Too slow to recommend"),
+          element(
+            "div",
+            { className: "route__reason" },
+            [
+              route.via ? routeKind(route, plan) : "",
+              route.reason ? capitalize(route.reason) : route.eligible ? "" : "Too slow to recommend",
+            ]
+              .filter(Boolean)
+              .join(" · "),
+          ),
         ),
         element(
           "div",
@@ -589,7 +628,13 @@ function isStandard(route) {
   return route.is_standard;
 }
 
+// What a route is called: by its road ("Via W Wisconsin Ave"), or else by what it is.
 function routeLabel(route, plan) {
+  return route.via ? `Via ${route.via}` : routeKind(route, plan);
+}
+
+// What a route is: one of our designs, the standard route, or another alternative.
+function routeKind(route, plan) {
   if (route.source === "own") {
     // Number our designs when there are several (ids are own-1, own-2, ...).
     const several = plan.candidates.filter((candidate) => candidate.source === "own").length > 1;
@@ -850,6 +895,84 @@ function nearestOnPath(point, path) {
   return best;
 }
 
+
+// ---- About this app, and the link for phones
+
+// "How it works", with the headline numbers of the latest results summary (python -m app.evaluate).
+async function showAbout() {
+  const dialog = $("about");
+  dialog.showModal();
+  if (dialog.dataset.loaded) return;
+  dialog.dataset.loaded = "yes";
+  try {
+    const response = await fetch("results.json", { cache: "no-store" });
+    const results = response.ok ? await response.json() : null;
+    if (!results || !results.trips) return;
+    $("about-results-title").textContent = `Across ${results.trips} Milwaukee test trips`;
+    $("about-numbers").replaceChildren(...resultLines(results).map((text) => element("li", {}, text)));
+    const day = new Date(`${results.generated}T12:00:00`).toLocaleDateString("en-US", { month: "long", day: "numeric", year: "numeric" });
+    $("about-measured").textContent = `Measured ${day}, with that day's closures and traffic.`;
+    $("about-results").hidden = false;
+  } catch {
+    // The explanation stands on its own without the numbers.
+  }
+}
+
+function resultLines(r) {
+  const count = (value) => String(Math.round(value));
+  const avoided = r.risky_turns_standard - r.risky_turns_ours;
+  const lines = [
+    `${r.different} of ${r.trips} trips got a different route than the standard one.`,
+    `${count(avoided)} risky turns avoided: ${count(r.risky_turns_standard)} on the standard routes, ${count(r.risky_turns_ours)} on ours.`,
+  ];
+  for (const [key, name] of [["closures", "Closed roads"], ["lane_closures", "Lane closures"], ["school_zones", "School zones"], ["rail_crossings", "Railroad crossings"]]) {
+    const [standard, ours] = [r[`${key}_standard`], r[`${key}_ours`]];
+    if (standard > ours) lines.push(`${name}: ${count(standard)} on the standard routes, ${count(ours)} on ours.`);
+  }
+  const minutes = r.minutes_added_per_trip;
+  lines.push(
+    minutes > 0
+      ? `About ${minutes.toFixed(1)} min longer per trip on average: the price of the safer choice.`
+      : `No slower on average (${Math.abs(minutes).toFixed(1)} min ${minutes < 0 ? "faster" : "difference"} per trip).`,
+  );
+  return lines;
+}
+
+// A QR code of this page's address, with the access code, to scan with a phone. Phones need
+// the public https link from the tunnel (EXPO.md): this computer's own address won't open on them.
+async function showPhoneLink() {
+  const body = $("phone-body");
+  $("phone").showModal();
+  if (["localhost", "127.0.0.1", "[::1]"].includes(window.location.hostname)) {
+    body.replaceChildren(
+      element("p", {}, "This page is open at this computer's own address, which phones can't reach."),
+      element(
+        "p",
+        {},
+        "Start the tunnel (EXPO.md, “Let visitors use their phones”) and open this page from its https://…trycloudflare.com address. The code to scan will show here.",
+      ),
+    );
+    return;
+  }
+  const code = accessCode();
+  const link = `${window.location.origin}${window.location.pathname}${code ? `?code=${encodeURIComponent(code)}` : ""}`;
+  body.replaceChildren(element("p", { className: "status" }, "Making the code…"));
+  try {
+    if (!window.qrcode) await loadScript(QR_LIBRARY);
+    const qr = window.qrcode(0, "M");
+    qr.addData(link);
+    qr.make();
+    body.replaceChildren(
+      element("img", { className: "qr", src: qr.createDataURL(6, 3), alt: `QR code for ${link}` }),
+      element("p", { className: "qr__link" }, link),
+      window.location.protocol === "https:"
+        ? element("p", { className: "hint" }, "Point the phone's camera at the code, then tap the link it shows.")
+        : element("p", { className: "hint" }, "Driving mode on a phone needs the secure https link from the tunnel."),
+    );
+  } catch {
+    body.replaceChildren(element("p", {}, "The code couldn't be made. Visitors can type this address:"), element("p", { className: "qr__link" }, link));
+  }
+}
 
 // ---- Small helpers
 

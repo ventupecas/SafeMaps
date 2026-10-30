@@ -528,6 +528,30 @@ def test_tomtom_is_asked_about_the_whole_map_at_most_every_ten_minutes(tmp_path)
     assert len(requests) == 2
 
 
+def test_a_restarted_server_reuses_tomtoms_answer_for_ten_minutes(tmp_path):
+    line = [DOWNTOWN, destination_point(DOWNTOWN, 0, 300)]
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(200, json={"incidents": [tomtom_incident(8, line)]})
+
+    http, wall = httpx.Client(transport=httpx.MockTransport(handler)), Clock()
+
+    def started_server() -> TomTomFeed:  # each with its own clock, as a new process would have
+        usage = DailyUsage(tmp_path / "usage.json", 80)
+        return TomTomFeed("tt-secret", http, usage, box=METRO, saved=tmp_path / "tomtom.json", clock=Clock(), now=wall)
+
+    wall.now = NOW
+    assert len(started_server().events(METRO)) == 1
+    wall.now += 300  # restarted five minutes later
+    assert len(started_server().events(METRO)) == 1 and len(requests) == 1
+    wall.now += 400  # restarted again, eleven minutes after the answer
+    started_server().events(METRO)
+    assert len(requests) == 2
+    assert "tt-secret" not in (tmp_path / "tomtom.json").read_text(encoding="utf-8")
+
+
 def test_tomtom_keeps_to_its_daily_limit_and_never_shows_the_key(tmp_path):
     feed, requests, _, _ = tomtom_feed([], tmp_path, daily=0)
     with pytest.raises(EventSourceError, match="ROUTES_TOMTOM_DAILY_REQUESTS"):

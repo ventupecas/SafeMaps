@@ -92,6 +92,12 @@ class ScoringProfile(BaseModel):
         ge=1.0,
         description="Candidates slower than this multiple of the fastest one are not eligible to win.",
     )
+    max_extra_min: float | None = Field(
+        None,
+        ge=0,
+        description="Nor are candidates more than this many minutes slower than the fastest: the most time the "
+        "driver will give up for a safer route. None: only max_detour_ratio limits them.",
+    )
     ranking: Literal["weighted", "priority"] = Field(
         "weighted",
         description=(
@@ -199,6 +205,11 @@ class CandidateRoute(BaseModel):
     id: str
     source: str = Field(description="How it was generated: google, avoid-highways, via-offset or own (our router).")
     description: str = Field("", description="Short summary, usually the main road name.")
+    via: str = Field(
+        "",
+        description='The road the route is known by, from our road map ("W Wisconsin Ave"): its longest one that no '
+        "better-ranked route already goes by. Empty without a road map.",
+    )
     encoded_polyline: str
     is_google_default: bool = Field(False, description="True for the route Google itself would choose.")
     is_standard: bool = Field(

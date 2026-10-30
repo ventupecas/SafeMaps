@@ -530,6 +530,8 @@ class TomTomFeed:
     Each request covers a whole box: the road map's area when given (box), so
     every trip shares one answer, or else the trip's own area. Requests are
     counted against usage, a daily cap that keeps a month inside the free plan.
+    The last answer is also kept in a file (saved), so a server restarted
+    within TOMTOM_REFRESH uses it instead of asking again.
     """
 
     name = "tomtom"
@@ -541,19 +543,25 @@ class TomTomFeed:
         usage: DailyUsage,
         *,
         box: BBox | None = None,
+        saved: Path | None = None,
         clock: Callable[[], float] = time.monotonic,
+        now: Callable[[], float] = time.time,
     ) -> None:
         self._key = key
         self._http = http
         self.usage = usage  # requests made today, against ROUTES_TOMTOM_DAILY_REQUESTS
         self._box = box
+        self._saved = saved
         self._clock = clock
+        self._now = now
         self._events: list[RoadEvent] | None = None
         self._fetched_box: BBox | None = None
         self._fetched_at = 0.0
 
     def events(self, area: BBox) -> list[RoadEvent]:
         box = self._box or area
+        if self._events is None:
+            self._load_saved(box)
         age = self._clock() - self._fetched_at
         if self._events is None or box != self._fetched_box or age > TOMTOM_REFRESH.total_seconds():
             try:
@@ -577,7 +585,36 @@ class TomTomFeed:
                 incidents.setdefault(str(found), incident)
         events = tomtom_events(incidents.values())
         logger.info("TomTom: %d road events from %d incidents", len(events), len(incidents))
+        self._save(box, list(incidents.values()))
         return events
+
+    def _save(self, box: BBox, incidents: list[Mapping[str, Any]]) -> None:
+        if self._saved is None:
+            return
+        try:
+            self._saved.parent.mkdir(parents=True, exist_ok=True)
+            data = {"fetched": self._now(), "box": [box.south, box.west, box.north, box.east], "incidents": incidents}
+            temporary = self._saved.with_suffix(".tmp")
+            temporary.write_text(json.dumps(data), encoding="utf-8")
+            temporary.replace(self._saved)
+        except OSError as exc:
+            logger.warning("Couldn't keep TomTom's answer in %s: %s", self._saved.name, exc)
+
+    def _load_saved(self, box: BBox) -> None:
+        """The answer a previous run of the server kept, if it's for this box and recent enough."""
+        if self._saved is None or not self._saved.exists():
+            return
+        try:
+            data = json.loads(self._saved.read_text(encoding="utf-8"))
+            age = self._now() - float(data["fetched"])
+            if data["box"] != [box.south, box.west, box.north, box.east] or not 0 <= age <= TOMTOM_REFRESH.total_seconds():
+                return
+            events = tomtom_events(data["incidents"])
+        except (OSError, ValueError, KeyError, TypeError) as exc:
+            logger.warning("Ignoring TomTom's kept answer in %s: %s", self._saved.name, exc)
+            return
+        self._events, self._fetched_box, self._fetched_at = events, box, self._clock() - age
+        logger.info("TomTom: using the answer from %.0f minutes ago, kept across a restart", age / 60)
 
     def _get(self, part: BBox) -> list[Mapping[str, Any]]:
         params = {

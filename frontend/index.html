@@ -12,6 +12,10 @@
         <header class="panel__header">
           <h1>Safe Route Planner</h1>
           <p class="tagline">Safety first, then fuel, then time.</p>
+          <nav class="header-links" aria-label="About this app">
+            <button id="about-open" class="link-button" type="button" aria-haspopup="dialog">How it works</button>
+            <button id="phone-open" class="link-button" type="button" aria-haspopup="dialog">Open on your phone</button>
+          </nav>
         </header>
 
         <section class="trip" aria-label="Trip">
@@ -36,23 +40,39 @@
           </div>
 
           <div class="field">
-            <label class="field__label" for="road-events">Closures and slowdowns</label>
-            <select id="road-events">
-              <option value="auto" selected>Automatic (best available)</option>
-              <option value="wzdx">Wisconsin work zones (WZDx)</option>
-              <option value="wi511">Wisconsin 511 (official)</option>
-              <option value="tomtom">TomTom traffic (every street)</option>
-              <option value="google">Traffic speeds along routes</option>
-              <option value="apify">Traffic tiles (paid)</option>
-              <option value="off">None</option>
+            <label class="field__label" for="extra-time">Extra time you'd accept for a safer route</label>
+            <select id="extra-time">
+              <option value="" selected>No fixed limit</option>
+              <option value="5">Up to 5 minutes</option>
+              <option value="10">Up to 10 minutes</option>
+              <option value="15">Up to 15 minutes</option>
             </select>
           </div>
 
           <div class="toggles">
-            <label><input type="checkbox" id="live-traffic" checked /> Live traffic</label>
-            <label><input type="checkbox" id="use-router" checked /> Our router</label>
             <label><input type="checkbox" id="traffic-layer" /> Show traffic</label>
+            <label><input type="checkbox" id="closures-layer" checked /> Show closures</label>
           </div>
+
+          <details class="advanced">
+            <summary>Advanced</summary>
+            <div class="field">
+              <label class="field__label" for="road-events">Closures and slowdowns</label>
+              <select id="road-events">
+                <option value="auto" selected>Automatic (best available)</option>
+                <option value="wzdx">Wisconsin work zones (WZDx)</option>
+                <option value="wi511">Wisconsin 511 (official)</option>
+                <option value="tomtom">TomTom traffic (every street)</option>
+                <option value="google">Traffic speeds along routes</option>
+                <option value="apify">Traffic tiles (paid)</option>
+                <option value="off">None</option>
+              </select>
+            </div>
+            <div class="toggles">
+              <label><input type="checkbox" id="live-traffic" checked /> Live traffic</label>
+              <label><input type="checkbox" id="use-router" checked /> Our router</label>
+            </div>
+          </details>
 
           <div class="actions">
             <button id="find" class="button button--primary" type="button" disabled>Find route</button>
@@ -69,10 +89,61 @@
         <div id="map" class="map" role="application" aria-label="Map"></div>
         <p id="nav-banner" class="nav-banner" role="status" hidden></p>
         <button id="recenter" class="button recenter" type="button" hidden>Re-center</button>
+        <details id="legend" class="legend" open>
+          <summary>Map key</summary>
+          <ul class="legend__items">
+            <li><span class="key key--winner"></span>Recommended route</li>
+            <li><span class="key key--standard"></span>Standard (fastest) route</li>
+            <li><span class="key key--alternative"></span>Other routes</li>
+            <li><span class="key key--closed"></span>Road closed</li>
+            <li><span class="key key--lanes"></span>Lane closure</li>
+            <li class="osm-only"><span class="key key--cluster">3</span>Several closures: zoom in</li>
+            <li><span class="key key--turn"></span>Risky turn across traffic</li>
+            <li id="legend-traffic" hidden><span class="key key--traffic"></span>Traffic: flowing → jammed</li>
+          </ul>
+        </details>
         <div id="setup" class="setup" hidden></div>
         <p id="osm-credit" class="credit" hidden></p>
       </section>
     </main>
+
+    <dialog id="about" class="dialog" aria-labelledby="about-title">
+      <form method="dialog"><button class="dialog__close" aria-label="Close">×</button></form>
+      <h2 id="about-title">How it works</h2>
+      <p>
+        Most navigation apps pick the fastest route. This one puts your safety first, then fuel, then time: of the
+        routes it finds, the safest wins; among equally safe ones, the one that burns the least fuel; then the fastest.
+      </p>
+      <h3>What makes a route risky</h3>
+      <ul>
+        <li><strong>Turns across oncoming traffic</strong> at busy junctions, more so where fatal crashes have happened.</li>
+        <li>
+          <strong>Closed roads and lane closures</strong>, live from Wisconsin's work zones and 511<span class="osm-only">,
+          and TomTom traffic</span>.
+        </li>
+        <li><strong>School zones</strong> at drop-off and pickup times, and <strong>railroad crossings</strong>.</li>
+      </ul>
+      <h3>How the routes are found</h3>
+      <p>
+        Our own router searches Milwaukee's streets for routes that avoid those risks, then compares each with the
+        standard, fastest route. You choose how much extra time a safer route may take.
+      </p>
+      <section id="about-results" hidden>
+        <h3 id="about-results-title">Across Milwaukee test trips</h3>
+        <ul id="about-numbers"></ul>
+        <p id="about-measured" class="dialog__credits"></p>
+      </section>
+      <p class="dialog__credits">
+        Map data © OpenStreetMap contributors. Work zones and incidents: Wisconsin DOT (511).<span class="osm-only">
+        Traffic © TomTom.</span> Crash locations: NHTSA's Fatality Analysis Reporting System, 2020–2024.
+      </p>
+    </dialog>
+
+    <dialog id="phone" class="dialog dialog--narrow" aria-labelledby="phone-title">
+      <form method="dialog"><button class="dialog__close" aria-label="Close">×</button></form>
+      <h2 id="phone-title">Open on your phone</h2>
+      <div id="phone-body"></div>
+    </dialog>
 
     <script src="config.js" onerror="window.ROUTES_CONFIG_MISSING = true"></script>
     <script src="app.js" type="module"></script>

@@ -125,10 +125,10 @@ class ResponseCache:
             return None
 
         if age > self.max_age:
-            logger.info("Cache entry %s expired (age %s)", path.name, age)
+            logger.debug("Cache entry %s expired (age %s)", path.name, age)
             return None
         if fresh_for is not None and age > fresh_for:
-            logger.info("Cache entry %s is stale for live data (age %s)", path.name, age)
+            logger.debug("Cache entry %s is stale for live data (age %s)", path.name, age)
             return None
         return response
 
