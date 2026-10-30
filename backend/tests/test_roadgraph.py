@@ -1,6 +1,9 @@
+from dataclasses import replace
+
 import pytest
 
-from app.geo import haversine_m
+from app.geo import haversine_m, midpoint
+from app.road_events import RoadEvent
 from app.roadgraph import (
     DEFAULT_SPEED_FACTOR,
     MPH_TO_KMH,
@@ -10,7 +13,7 @@ from app.roadgraph import (
     _speed_kmh,
     build_graph,
 )
-from tests.osm_factory import grid_city, junction, point
+from tests.osm_factory import MEDIAN_HALF_LNG, divided_road, freeway_with_exits, grid_city, junction, point
 
 
 def node_at(graph: RoadGraph, row: int, col: int) -> int:
@@ -164,3 +167,125 @@ def test_nearest_node_skips_ramps_and_respects_the_limit():
     # (1, 0) only touches Main St, now a ramp, so the nearest usable junction is (1, 1).
     assert graph.nearest_node(point(1, 0), 500) == node_at(graph, 1, 1)
     assert graph.nearest_node((43.5, -88.5), 1_000) is None
+
+
+@pytest.mark.parametrize(
+    ("classes", "kind"),
+    [
+        ({"motorway", "motorway_link"}, "interchange"),  # a freeway fork or exit
+        ({"motorway"}, "interchange"),
+        ({"trunk", "trunk_link"}, "interchange"),
+        ({"trunk"}, "busy"),  # two trunk roads alone may cross at grade
+        ({"motorway_link", "secondary"}, "busy"),  # the end of a ramp at a surface street
+        ({"primary", "residential"}, "busy"),
+        ({"residential", "service"}, "quiet"),
+    ],
+)
+def test_classify_junction(classes, kind):
+    from app.roadgraph import classify_junction
+
+    assert classify_junction(classes) == kind
+
+
+def test_junction_kind_by_location():
+    graph = build_graph(grid_city().osm.elements)
+    assert graph.junction_kind(point(1, 2)) == "busy"  # on Main St
+    assert graph.junction_kind(point(0, 2)) == "quiet"
+    assert graph.junction_kind((point(0, 2)[0], point(0, 2)[1] + 0.001)) is None  # mid-block, ~80 m away
+
+
+def test_junction_of_only_one_way_roads():
+    # North St one-way eastbound, 3 Ave one-way southbound: where they meet, nothing comes the other way.
+    graph = build_graph(grid_city(north={"oneway": "yes"}).osm.elements)
+    assert graph.node_kind(node_at(graph, 2, 2)) == "quiet"  # 2 Ave is still two-way here
+    city = grid_city(north={"oneway": "yes"})
+    way = next(e for e in city.osm.elements if e["type"] == "way" and e["id"] == city.avenues[3])
+    way["tags"]["oneway"] = "-1"
+    graph = build_graph(city.osm.elements)
+    assert graph.node_kind(node_at(graph, 2, 3)) == "one-way"
+
+
+def test_signals_along_a_route():
+    city = grid_city()
+    signal = next(e for e in city.osm.elements if e["type"] == "node" and e["id"] == junction(1, 2))
+    signal["tags"] = {"highway": "traffic_signals"}
+    graph = build_graph(city.osm.elements)
+    along_main = [point(1, 0), point(1, 3)]  # passes the signal at (1, 2)
+    along_north = [point(2, 1), point(2, 3)]
+    assert graph.signals_along([along_main]) == 1
+    assert graph.signals_along([along_north]) == 0
+    assert graph.signals_along([along_main, along_main]) == 1  # each signal counts once
+
+
+def test_segment_under_a_moving_car_follows_its_heading():
+    graph = build_graph(grid_city().osm.elements)
+    on_main = midpoint(point(1, 1), point(1, 2))  # on Main St between 1 Ave and 2 Ave
+    assert graph.segment_under(on_main, 85) == edge_between(graph, (1, 1), (1, 2))
+    assert graph.segment_under(on_main, 265) == edge_between(graph, (1, 2), (1, 1))
+    assert graph.segment_under(on_main, 0) is None  # no road runs north here
+
+
+def test_edges_along_a_drawn_route():
+    graph = build_graph(grid_city().osm.elements)
+    drawn = [point(1, 0), point(1, 2), point(2, 2)]  # along Main St, then up 2 Ave
+    along = graph.edges_along(drawn)
+    followed = [((1, 0), (1, 1)), ((1, 1), (1, 2)), ((1, 2), (2, 2))]
+    assert {edge_between(graph, a, b) for a, b in followed} <= along
+    assert edge_between(graph, (1, 1), (2, 1)) not in along  # it crosses the route, doesn't follow it
+
+
+def test_a_divided_road_is_not_a_one_way_street():
+    graph = build_graph(divided_road().elements)
+    median_opening = graph.nearest_node((point(1, 1)[0], point(1, 1)[1] + MEDIAN_HALF_LNG), 5)
+    # Every road there is one-way, but oncoming traffic is just across the median.
+    assert graph.node_kind(median_opening) == "busy"
+
+
+def test_a_closed_stretch_follows_its_road_not_the_cross_streets():
+    graph = build_graph(grid_city().osm.elements)
+    main_st = (point(1, 0), point(1, 3))  # just the two ends, as 511 often gives them
+    eastbound = {edge_between(graph, a, b) for a, b in [((1, 0), (1, 1)), ((1, 1), (1, 2)), ((1, 2), (1, 3))]}
+    westbound = {edge_between(graph, b, a) for a, b in [((1, 0), (1, 1)), ((1, 1), (1, 2)), ((1, 2), (1, 3))]}
+    assert graph.event_edges(RoadEvent("wi511", "closed", main_st)) == eastbound | westbound
+    assert graph.event_edges(RoadEvent("wi511", "closed", main_st, direction=90)) == eastbound
+    assert graph.event_edges(RoadEvent("wi511", "closed", main_st, direction=270)) == westbound
+
+
+def test_a_stretch_whose_ends_only_a_long_drive_connects_matches_nothing():
+    graph = build_graph(grid_city().osm.elements)
+    # From Main St's dead end to North St: the straight line crosses no road, and driving takes a detour.
+    across = (point(1, 0), (point(2, 1)[0], point(1, 0)[1] + 0.0001))
+    assert graph.event_edges(RoadEvent("wi511", "closed", across)) == set()
+
+
+def test_a_closure_at_a_spot_is_the_nearest_road_there():
+    graph = build_graph(grid_city().osm.elements)
+    middle_of_main = midpoint(point(1, 1), point(1, 2))
+    assert graph.event_edges(RoadEvent("wi511", "lanes", (middle_of_main,))) == {
+        edge_between(graph, (1, 1), (1, 2)),
+        edge_between(graph, (1, 2), (1, 1)),
+    }
+
+
+def test_snapped_events_follow_the_road_one_per_direction():
+    graph = build_graph(grid_city().osm.elements)
+    closure = RoadEvent("wi511", "closed", (point(1, 0), point(1, 3)))
+    east, west = graph.snap_events([closure])
+    assert east.along and len(east.path) == 4 and east.path[0] == pytest.approx(point(1, 0))
+    assert west.path[0] == pytest.approx(point(1, 3))
+
+
+def test_a_ramp_closure_on_the_freeway_closes_the_named_ramp_not_the_freeway():
+    graph = build_graph(freeway_with_exits().elements)
+    beside_hawley = (point(0, 0)[0], point(0, 0)[1] + 1_000 / 81_400)  # placed on the freeway, 400 m past the exit
+    closure = RoadEvent(
+        "wzdx", "closed", (beside_hawley,), direction=90.0, road="off-ramp", ramp_road="hawley",
+        description="Ramp Full Closure on I-94 EB at OFF RAMP TO HAWLEY RD",
+    )  # fmt: skip
+    (ramp,) = graph.event_edges(closure)
+    assert graph.class_name(ramp) == "motorway_link"
+    assert graph.names[graph.name[next(iter(graph.out_edges[graph.edge_to[ramp]]))]] == "North Hawley Road"
+    # Unnamed, the nearest exit within RAMP_SEARCH_M wins: the 68th St one is 400 m away, too far.
+    assert graph.event_edges(replace(closure, ramp_road="")) == set()
+    # A ramp that can't be found is left out, rather than closing the freeway.
+    assert graph.snap_events([replace(closure, ramp_road="nowhere")]) == []

@@ -14,18 +14,25 @@ The heuristics are deliberately simple enough to explain on a demo stage:
   faster, judged by its no-traffic speed.
 * Traffic delay: duration minus staticDuration. Only non-zero when the
   request was traffic-aware.
+* Fuel: each step's distance at its average speed, plus turns, traffic
+  signals passed (counted on the road graph, when loaded) and traffic delay,
+  through the rough model in app.fuel.
+* Closures and lane closures: the trip's road events (app.road_events) the
+  route drives through, the way their traffic goes.
 """
 
 from __future__ import annotations
 
-from collections.abc import Iterator, Mapping, Sequence
+from collections.abc import Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Protocol
 
 from app.driving_side import DrivingSide
+from app.fuel import CONGESTION_L_PER_HOUR, SIGNAL_L, TURN_L, cruise_liters
 from app.geo import Point, decode_polyline, path_length_m, total_heading_change_deg
 from app.hotspots import CrashHotspots
 from app.models import CrossingTurn, LatLng, RouteFeatures
+from app.road_events import RoadEvent, count_on_route
 
 # Calibration knobs. Tune them against routes you have recorded in the cache.
 HIGHWAY_SPEED_KMH = 80.0
@@ -71,6 +78,22 @@ CROSSING_MANEUVERS = {
 CROSSING_RAMPS = {DrivingSide.RIGHT: "RAMP_LEFT", DrivingSide.LEFT: "RAMP_RIGHT"}
 
 
+# Junction kinds where no turn crosses an oncoming stream.
+NO_ONCOMING_KINDS = frozenset({"interchange", "one-way"})
+
+
+class JunctionLookup(Protocol):
+    """Knows what kind of junction is at a point; the OSM road graph implements it."""
+
+    def junction_kind(self, point: Point) -> str | None:
+        """'interchange', 'one-way', 'busy' or 'quiet'; None when no junction is close enough."""
+        ...
+
+    def signals_along(self, stretches: Iterable[Sequence[Point]]) -> int:
+        """Distinct traffic signals the given stretches of road pass."""
+        ...
+
+
 @dataclass(frozen=True)
 class TurnContext:
     """Trip-level facts for judging turns; the same for every candidate and profile."""
@@ -80,6 +103,13 @@ class TurnContext:
     # Crashes near a junction needed to call it crash-prone. The right value
     # depends on how many years the crash dataset covers.
     min_hotspot_crashes: float = 3.0
+    # With a road graph, junctions are judged by the roads that meet there:
+    # interchanges have no oncoming traffic, and "busy" means an arterial or
+    # bigger road meets there, the same rule the router uses. Without one,
+    # the road speed proxy applies.
+    junctions: JunctionLookup | None = None
+    # Closures, lane closures and jams on the roads now (see app.road_events).
+    events: tuple[RoadEvent, ...] = ()
 
     def __post_init__(self) -> None:
         if self.min_hotspot_crashes <= 0:
@@ -122,8 +152,10 @@ def extract_features(route: Mapping[str, Any], context: TurnContext = TurnContex
     static_s = parse_duration_s(route.get("staticDuration")) or duration_s
 
     highway_s = highway_m = winding_s = 0.0
+    cruise_l = covered_m = 0.0
     maneuvers = 0
     crossing_turns: list[CrossingTurn] = []
+    street_stretches: list[list[Point]] = []  # below freeway speed: where signals can be
     speed_in: float | None = None  # no-traffic speed of the road the driver is turning off
     for step in iter_steps(route):
         maneuver = step.get("navigationInstruction", {}).get("maneuver", "")
@@ -137,25 +169,50 @@ def extract_features(route: Mapping[str, Any], context: TurnContext = TurnContex
 
         # A step's maneuver happens where it starts: between the previous road and this one.
         if crosses_traffic(maneuver, speed_in, context.driving_side):
-            crossing_turns.append(_crossing_turn(maneuver, points, speed_in, speed, context))
+            turn = _crossing_turn(maneuver, points, speed_in, speed, context)
+            if turn is not None:
+                crossing_turns.append(turn)
 
+        if speed is not None:
+            cruise_l += cruise_liters(step_m, speed)
+            covered_m += step_m
         if speed is not None and speed >= HIGHWAY_SPEED_KMH:
             highway_s += step_s
             highway_m += step_m
-        elif speed is not None and is_winding(points):
-            winding_s += step_s
+        else:
+            street_stretches.append(points)
+            if speed is not None and is_winding(points):
+                winding_s += step_s
         speed_in = speed
 
+    distance_m = route.get("distanceMeters", 0)
+    if covered_m == 0 and distance_m > 0 and static_s > 0:
+        cruise_l = cruise_liters(distance_m, distance_m / static_s * 3.6)  # no steps: use the route average
+    delay_s = max(0.0, duration_s - static_s)
+    # Google's steps don't list traffic signals; the road graph knows where they are.
+    counter = getattr(context.junctions, "signals_along", None)
+    signals = counter(street_stretches) if counter is not None else 0
+    fuel_l = cruise_l + maneuvers * TURN_L + signals * SIGNAL_L + delay_s / 3600 * CONGESTION_L_PER_HOUR
+    closures, lane_closures = (
+        count_on_route(decode_polyline(route.get("polyline", {}).get("encodedPolyline", "")), context.events)
+        if context.events
+        else (0, 0)
+    )
+
     return RouteFeatures(
-        distance_km=route.get("distanceMeters", 0) / 1000,
+        distance_km=distance_m / 1000,
         duration_min=duration_s / 60,
         static_duration_min=static_s / 60,
         highway_min=highway_s / 60,
         highway_km=highway_m / 1000,
-        traffic_delay_min=max(0.0, duration_s - static_s) / 60,
+        traffic_delay_min=delay_s / 60,
         maneuver_count=maneuvers,
         winding_min=winding_s / 60,
+        fuel_l=fuel_l,
+        signal_count=signals,
         crossing_turns=tuple(crossing_turns),
+        closures=closures,
+        lane_closures=lane_closures,
     )
 
 
@@ -165,11 +222,21 @@ def _crossing_turn(
     speed_in: float | None,
     speed_out: float | None,
     context: TurnContext,
-) -> CrossingTurn:
+) -> CrossingTurn | None:
+    """The turn's details, or None if the road graph shows there's no oncoming traffic there."""
     # Crossing is risky if either stream is fast: the road being left (its
     # oncoming lanes) or the road being joined (its near lanes).
     road_speed = max(speed_in or 0.0, speed_out or 0.0)
     junction = points[0] if points else None
+    kind = context.junctions.junction_kind(junction) if context.junctions is not None and junction else None
+    if kind is None and context.junctions is not None and min(speed_in or 0.0, speed_out or 0.0) >= HIGHWAY_SPEED_KMH:
+        # Freeway speed on both sides and no junction on the map nearby: a split
+        # inside an interchange (where Google's point can sit far from OSM's
+        # node), not an at-grade turn, which would have matched a junction.
+        kind = "interchange"
+    if kind in NO_ONCOMING_KINDS:
+        return None  # a freeway split or merge, or only one-way roads: no oncoming traffic to cross
+    busy = kind == "busy" if kind is not None else road_speed >= BUSY_ROAD_SPEED_KMH
     crashes = (
         context.hotspots.crashes_near(junction, HOTSPOT_RADIUS_M)
         if context.hotspots is not None and junction is not None
@@ -180,6 +247,6 @@ def _crossing_turn(
         maneuver=maneuver,
         road_speed_kmh=round(road_speed, 1),
         nearby_crashes=crashes,
-        busy=road_speed >= BUSY_ROAD_SPEED_KMH,
+        busy=busy,
         hotspot=crashes >= context.min_hotspot_crashes,
     )

@@ -6,12 +6,25 @@ from collections.abc import Mapping
 
 from app.models import ScoringProfile
 
+DEFAULT_PROFILE = "safe-economy"
+
 PRESETS: dict[str, ScoringProfile] = {
     profile.name: profile
     for profile in (
-        # Pure trip time, with no turn-safety preference: the baseline that
+        # Pure trip time, with no safety or fuel preference: the baseline that
         # should usually agree with Google's default route.
-        ScoringProfile(name="fastest", busy_crossing_weight=0.0, hotspot_crossing_weight=0.0),
+        ScoringProfile(
+            name="fastest",
+            busy_crossing_weight=0.0,
+            hotspot_crossing_weight=0.0,
+            lane_closure_weight=0.0,
+            fuel_weight=0.0,
+        ),
+        # The default: safety first, then fuel, then time. The safest route wins;
+        # among equally safe ones the least fuel; then the fastest. (The weights,
+        # a busy left = 3 min, crash-prone = 6 more, a liter = 8 min, still shape
+        # the router's designs and the cost column.)
+        ScoringProfile(name=DEFAULT_PROFILE, ranking="priority"),
         # Every minute at highway speed feels like two; extra turns are a small price.
         ScoringProfile(name="highway-averse", highway_weight=1.0, maneuver_weight=0.05),
         # Winding roads give back 60% of their time; highways feel a bit dull.
@@ -22,11 +35,12 @@ PRESETS: dict[str, ScoringProfile] = {
             name="calm",
             traffic_weight=1.5,
             maneuver_weight=0.25,
-            busy_crossing_weight=1.5,
-            hotspot_crossing_weight=4.0,
+            busy_crossing_weight=4.0,
+            hotspot_crossing_weight=8.0,
+            lane_closure_weight=4.0,
         ),
-        # Distance matters as much as time: a stand-in for fuel use.
-        ScoringProfile(name="eco", time_weight=0.5, distance_weight=1.0),
+        # Fuel first: a liter feels like 15 minutes and time counts half.
+        ScoringProfile(name="eco", time_weight=0.5, fuel_weight=15.0),
     )
 }
 

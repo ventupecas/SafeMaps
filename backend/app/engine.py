@@ -18,17 +18,24 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from app.cache import CacheMiss
-from app.candidates import CandidateOptions, RouteFetcher, gather_candidates
+from app.candidates import CandidateOptions, RawCandidate, RouteFetcher, gather_candidates
 from app.config import Settings
 from app.driving_side import DrivingSide, driving_side_for_country
 from app.features import TurnContext, extract_features
+from app.geo import Point, decode_polyline
 from app.hotspots import CrashHotspots
-from app.models import CandidateRoute, LatLng, RoutePlan, ScoringProfile
-from app.pricing import price_route
+from app.models import CandidateRoute, LatLng, RoutePlan, ScoredRoute, ScoringProfile
+from app.pricing import design_match, price_route
+from app.road_events import RoadEvent, jams_on_routes
 from app.roadgraph import RoadGraph
 from app.router import OutsideGraphError, RoutedPath, Router
 from app.routes_client import RoutesApiError
 from app.scoring import rank_candidates
+
+# A route is left out of the plan when more than this share of it runs along a
+# better-ranked one: on the map it would look like the same route. The winner
+# and Google's default (the baseline the winner is compared with) always stay.
+MAX_SHARED_WITH_BETTER = 0.7
 
 
 class NoRouteFoundError(LookupError):
@@ -39,6 +46,7 @@ class NoRouteFoundError(LookupError):
 class CandidatePool:
     candidates: list[CandidateRoute]
     notes: list[str] = field(default_factory=list)  # anything the viewer should know, e.g. a skipped route
+    events: list[RoadEvent] = field(default_factory=list)  # slowdowns Google reported along its suggestions
 
 
 def load_hotspots(settings: Settings) -> CrashHotspots | None:
@@ -55,17 +63,21 @@ def make_turn_context(
     settings: Settings,
     hotspots: CrashHotspots | None,
     country_code: str | None = None,
+    graph: RoadGraph | None = None,
 ) -> TurnContext:
     """Turn-judging context for one trip.
 
     The driving side comes from the trip's country (the frontend gets it from
-    the Places selection), else ROUTES_DEFAULT_COUNTRY, else keep-right.
+    the Places selection), else ROUTES_DEFAULT_COUNTRY, else keep-right. With
+    the road graph, every route's turns, Google's included, are judged by the
+    roads meeting at each junction.
     """
     code = country_code or settings.default_country
     return TurnContext(
         driving_side=driving_side_for_country(code) if code else DrivingSide.RIGHT,
         hotspots=hotspots,
         min_hotspot_crashes=settings.crash_min_count,
+        junctions=graph,
     )
 
 
@@ -77,14 +89,21 @@ def build_candidates(
     context: TurnContext = TurnContext(),
 ) -> list[CandidateRoute]:
     """Fetch Google's candidate routes and compute their features."""
+    return [
+        _candidate(c.id, c.source, c.route, context, live_traffic=options.traffic_aware)
+        for c in _fetch_google(fetcher, origin, destination, options)
+    ]
+
+
+def _fetch_google(
+    fetcher: RouteFetcher, origin: LatLng, destination: LatLng, options: CandidateOptions
+) -> list[RawCandidate]:
     raw = gather_candidates(fetcher, origin, destination, options)
     if not raw:
         raise NoRouteFoundError(
             f"No drivable route from {origin.lat},{origin.lng} to {destination.lat},{destination.lng}"
         )
-    return [
-        _candidate(c.id, c.source, c.route, context, live_traffic=options.traffic_aware) for c in raw
-    ]
+    return raw
 
 
 def build_router_candidates(
@@ -96,24 +115,48 @@ def build_router_candidates(
     *,
     alternatives: int = 3,
     price: bool = True,
+    heading: int | None = None,
+    context: TurnContext | None = None,
+    traffic_on_polyline: bool = False,
 ) -> CandidatePool:
     """Google's suggestions plus our router's designs, all with live traffic when price is True.
 
-    With one profile the router proposes up to `alternatives` routes for it.
-    With several, it proposes each profile's best route, and the pool is
-    shared. Without pricing, our routes keep the graph's no-traffic estimates,
-    Google's suggestions are fetched without traffic, and they're optional:
-    if Google can't be asked (no API key, nothing recorded), our routes still
-    come back, with a note.
+    With one profile the router proposes up to `alternatives` routes for it:
+    its best design, then alternatives that take other corridors than that
+    design and Google's suggestions. With several, it proposes each profile's
+    best route, and the pool is shared. Without pricing, our routes keep the
+    graph's no-traffic estimates, Google's suggestions are fetched without
+    traffic, and they're optional: if Google can't be asked (no API key,
+    nothing recorded), our routes still come back, with a note.
+
+    heading is the direction a moving car is driving (degrees clockwise from
+    north): every route then starts along its road instead of turning around.
+
+    context is the trip's turn context, the router's own by default. Its road
+    events are steered around and counted on every route. With
+    traffic_on_polyline (and price), Google's suggestions also report their
+    slow and jammed stretches: our designs avoid them, and pool.events lists them.
     """
+    context = context or router.context
     pool = CandidatePool([])
-    _add_google_suggestions(pool, fetcher, router.context, origin, destination, price)
+    _add_google_suggestions(pool, fetcher, context, origin, destination, price, heading, traffic_on_polyline and price)
+    on_offer = [decode_polyline(candidate.encoded_polyline) for candidate in pool.candidates]
+    per_profile = alternatives if len(profiles) == 1 else 1
     try:
-        paths = _unique_paths(router, origin, destination, profiles, alternatives if len(profiles) == 1 else 1)
+        paths = _unique_paths(
+            router,
+            origin,
+            destination,
+            profiles,
+            per_profile,
+            avoid=on_offer,
+            heading=heading,
+            events=[*context.events, *pool.events],
+        )
     except OutsideGraphError as exc:
         pool.notes.append(f"Own router skipped: {exc}.")
         paths = []
-    _add_own_routes(pool, fetcher, router, origin, destination, paths, price)
+    _add_own_routes(pool, fetcher, router, context, origin, destination, paths, price, heading)
 
     if not pool.candidates:
         raise NoRouteFoundError(" ".join(pool.notes) or "No route found.")
@@ -127,41 +170,58 @@ def _add_google_suggestions(
     origin: LatLng,
     destination: LatLng,
     price: bool,
+    heading: int | None,
+    traffic_on_polyline: bool,
 ) -> None:
-    options = CandidateOptions(include_avoid_highways=False, via_offset_fractions=(), traffic_aware=price)
+    options = CandidateOptions(
+        include_avoid_highways=False,
+        via_offset_fractions=(),
+        traffic_aware=price,
+        origin_heading=heading,
+        traffic_on_polyline=traffic_on_polyline,
+    )
     try:
-        pool.candidates += build_candidates(fetcher, origin, destination, options, context)
+        raw = _fetch_google(fetcher, origin, destination, options)
     except (RoutesApiError, CacheMiss, NoRouteFoundError) as exc:
         if price:
             raise  # pricing our routes needs Google too, so there would be nothing to show
         pool.notes.append(f"Google's suggestions skipped: {exc}")
+        return
+    pool.candidates += [_candidate(c.id, c.source, c.route, context, live_traffic=price) for c in raw]
+    if traffic_on_polyline:
+        pool.events += jams_on_routes(c.route for c in raw)
 
 
 def _add_own_routes(
     pool: CandidatePool,
     fetcher: RouteFetcher,
     router: Router,
+    context: TurnContext,
     origin: LatLng,
     destination: LatLng,
     paths: Sequence[RoutedPath],
     price: bool,
+    heading: int | None,
 ) -> None:
-    context = router.context
-
     seen = {candidate.encoded_polyline for candidate in pool.candidates}
     for number, path in enumerate(paths, start=1):
         candidate_id = f"own-{number}"
-        design_match = None
+        match = None
         if price:
             try:
-                priced = price_route(fetcher, router, origin, destination, path)
+                priced = price_route(fetcher, router, origin, destination, path, origin_heading=heading)
             except (RoutesApiError, CacheMiss) as exc:
                 pool.notes.append(f"{candidate_id} not priced: {exc}")
                 continue
             if priced is None:
                 pool.notes.append(f"{candidate_id} not priced: Google found no route through its points.")
                 continue
-            route, design_match = priced.route, priced.design_match
+            route, match = priced.route, priced.design_match
+            if priced.attempts > 1:
+                pool.notes.append(
+                    f"{candidate_id}: Google strayed from the design at first; the skipped stretch was pinned "
+                    f"and it was priced again ({priced.design_match:.0%} match)."
+                )
         else:
             route = router.to_route_json(path)
 
@@ -171,14 +231,33 @@ def _add_own_routes(
             continue
         seen.add(polyline)
         pool.candidates.append(
-            _candidate(candidate_id, "own", route, context, live_traffic=price, design_match=design_match)
+            _candidate(candidate_id, "own", route, context, live_traffic=price, design_match=match)
         )
 
 
 def plan_from_candidates(candidates: Sequence[CandidateRoute], profile: ScoringProfile) -> RoutePlan:
-    """Rank already-fetched candidates under one profile."""
+    """Rank already-fetched candidates under one profile, leaving out near-copies of better routes."""
     ranked = rank_candidates(candidates, profile)
-    return RoutePlan(profile=profile, winner=ranked[0], candidates=ranked)
+    points = {route.id: decode_polyline(route.encoded_polyline) for route in ranked}
+    kept: list[ScoredRoute] = []
+    hidden: dict[str, str] = {}
+    for route in ranked:
+        followed = None if not kept or route.is_google_default else _mostly_follows(route, kept, points)
+        if followed is None:
+            kept.append(route)
+        else:
+            hidden[route.id] = followed
+    return RoutePlan(profile=profile, winner=ranked[0], candidates=kept, hidden=hidden)
+
+
+def _mostly_follows(route: ScoredRoute, better: Sequence[ScoredRoute], points: dict[str, list[Point]]) -> str | None:
+    """Id of the first better route that route mostly runs along, or mostly contains (plus a loop), if any."""
+    mine = points[route.id]
+    for other in better:
+        theirs = points[other.id]
+        if max(design_match(theirs, mine), design_match(mine, theirs)) > MAX_SHARED_WITH_BETTER:
+            return other.id
+    return None
 
 
 def plan_route(
@@ -199,10 +278,23 @@ def _unique_paths(
     destination: LatLng,
     profiles: Sequence[ScoringProfile],
     per_profile: int,
+    *,
+    avoid: Sequence[Sequence[Point]],
+    heading: int | None,
+    events: Sequence[RoadEvent],
 ) -> list[RoutedPath]:
     paths: dict[tuple[int, ...], RoutedPath] = {}
     for profile in profiles:
-        for path in router.routes(origin.as_tuple(), destination.as_tuple(), profile, count=per_profile):
+        found = router.routes(
+            origin.as_tuple(),
+            destination.as_tuple(),
+            profile,
+            count=per_profile,
+            avoid=avoid,
+            heading=heading,
+            events=events,
+        )
+        for path in found:
             paths.setdefault(path.edges, path)
     return list(paths.values())
 

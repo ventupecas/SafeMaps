@@ -12,6 +12,8 @@ from dotenv import load_dotenv
 from app.cache import CacheMode
 
 BACKEND_DIR = Path(__file__).resolve().parent.parent
+ROAD_EVENT_SOURCES = ("wzdx", "wi511", "google", "apify")
+WZDX_FEED_URL = "https://511wi.gov/api/wzdx"
 
 
 @dataclass(frozen=True)
@@ -26,6 +28,16 @@ class Settings:
     crash_min_count: float
     graph_path: Path
     traffic_fresh_for: timedelta
+    daily_limit: int  # live Google requests per day; 0 means no cap
+    cors_origins: tuple[str, ...] = ()  # browser origins allowed to call the API besides localhost
+    # Road events (closures, lane closures, jams): sources in order of preference,
+    # the later ones backups; "a+b" uses a and b together. See app.road_events.
+    road_event_sources: tuple[str, ...] = ("wzdx+wi511", "google")
+    wzdx_url: str = WZDX_FEED_URL
+    wzdx_file: Path | None = None  # a saved copy of the feed to read instead, e.g. for an offline demo
+    wi511_api_key: str | None = None
+    apify_token: str | None = None
+    apify_daily_tiles: int = 300  # traffic tiles per day the paid Apify source may fetch
 
     @classmethod
     def from_env(cls) -> Settings:
@@ -43,6 +55,21 @@ class Settings:
         if crash_min_count <= 0:
             raise ValueError("ROUTES_CRASH_MIN_COUNT must be positive")
         crash_data = os.getenv("ROUTES_CRASH_DATA")
+        daily_limit = int(os.getenv("ROUTES_DAILY_LIMIT") or 150)
+        if daily_limit < 0:
+            raise ValueError("ROUTES_DAILY_LIMIT must be 0 (no cap) or more")
+        sources = tuple(
+            "+".join(part.strip() for part in group.split("+") if part.strip())
+            for group in (os.getenv("ROUTES_ROAD_EVENT_SOURCES") or "wzdx+wi511,google").lower().split(",")
+            if group.strip()
+        )
+        unknown = [part for group in sources for part in group.split("+") if part not in ROAD_EVENT_SOURCES]
+        if unknown:
+            raise ValueError(f"ROUTES_ROAD_EVENT_SOURCES may only list {', '.join(ROAD_EVENT_SOURCES)}; got {unknown}")
+        wzdx_file = os.getenv("ROUTES_WZDX_FILE")
+        apify_daily_tiles = int(os.getenv("ROUTES_APIFY_DAILY_TILES") or 300)
+        if apify_daily_tiles < 0:
+            raise ValueError("ROUTES_APIFY_DAILY_TILES must be 0 or more")
 
         return cls(
             google_maps_api_key=os.getenv("GOOGLE_MAPS_API_KEY") or None,
@@ -55,6 +82,14 @@ class Settings:
             crash_min_count=crash_min_count,
             graph_path=_backend_path(os.getenv("ROUTES_GRAPH") or "data/graphs/milwaukee-metro.json.gz"),
             traffic_fresh_for=timedelta(minutes=float(os.getenv("ROUTES_TRAFFIC_FRESH_MINUTES") or 5)),
+            daily_limit=daily_limit,
+            cors_origins=tuple(o.strip() for o in (os.getenv("ROUTES_CORS_ORIGINS") or "").split(",") if o.strip()),
+            road_event_sources=sources,
+            wzdx_url=os.getenv("ROUTES_WZDX_URL") or WZDX_FEED_URL,
+            wzdx_file=_backend_path(wzdx_file) if wzdx_file else None,
+            wi511_api_key=os.getenv("WI511_API_KEY") or None,
+            apify_token=os.getenv("APIFY_TOKEN") or None,
+            apify_daily_tiles=apify_daily_tiles,
         )
 
 

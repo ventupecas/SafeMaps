@@ -61,11 +61,14 @@ def recorded_router_trip(tmp_path, monkeypatch):
     graph = build_graph(grid_city().osm.elements, area="grid")
     graph.save(tmp_path / "grid.json.gz")
     priced_versions = [winding_route(), local_route(), junction_route("TURN_RIGHT")]
+    via_requests = []
 
     def google(request: httpx.Request) -> httpx.Response:
         body = json.loads(request.content)
         if "intermediates" in body:
-            return httpx.Response(200, json={"routes": [priced_versions.pop(0)]})
+            # None of these follow the design, so each route is also re-pinned and asked again.
+            via_requests.append(body)
+            return httpx.Response(200, json={"routes": [priced_versions[len(via_requests) % 3]]})
         return httpx.Response(200, json={"routes": [highway_route()]})
 
     http = httpx.Client(transport=httpx.MockTransport(google))

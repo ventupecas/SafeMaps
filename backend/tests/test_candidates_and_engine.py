@@ -4,7 +4,7 @@ from app.candidates import CandidateOptions, gather_candidates, via_points
 from app.driving_side import DrivingSide
 from app.engine import NoRouteFoundError, plan_route
 from app.features import TurnContext
-from app.geo import haversine_m, initial_bearing_deg, midpoint
+from app.geo import decode_polyline, encode_polyline, haversine_m, initial_bearing_deg, midpoint
 from app.models import LatLng
 from app.profiles import PRESETS
 from app.routes_client import RouteRequest
@@ -85,6 +85,31 @@ def test_plan_route_flags_when_it_overrides_google():
     assert scenic.overrides_google
     assert scenic.winner.encoded_polyline == winding_route()["polyline"]["encodedPolyline"]
     assert len(scenic.candidates) == 3
+
+
+def near_copy(route: dict, **changes) -> dict:
+    """The same route nudged 3 m at one point: a different polyline that looks the same on a map."""
+    points = decode_polyline(route["polyline"]["encodedPolyline"])
+    lat, lng = points[len(points) // 2]
+    points[len(points) // 2] = (lat + 0.00003, lng)
+    return {**route, **changes, "polyline": {"encodedPolyline": encode_polyline(points)}}
+
+
+def test_near_copies_of_better_routes_are_left_out():
+    slower_copy = near_copy(local_route(traffic_delay_s=300))
+    fetcher = FakeFetcher(base=[highway_route(), local_route()], avoid_highways=[slower_copy])
+    plan = plan_route(fetcher, ORIGIN, DESTINATION, PRESETS["fastest"])
+    assert [c.id for c in plan.candidates] == ["google-1", "google-2"]
+    assert plan.hidden == {"avoid-highways-1": "google-2"}
+
+
+def test_googles_default_stays_even_when_it_copies_the_winner():
+    jammed_default = highway_route(traffic_delay_s=600)
+    clear_copy = near_copy(highway_route(), routeLabels=["DEFAULT_ROUTE_ALTERNATE"])
+    plan = plan_route(FakeFetcher(base=[jammed_default, clear_copy]), ORIGIN, DESTINATION, PRESETS["fastest"])
+    assert plan.winner.id == "google-2"
+    assert [c.id for c in plan.candidates] == ["google-2", "google-1"]  # the baseline to compare with
+    assert plan.hidden == {}
 
 
 def test_plan_route_applies_the_trips_driving_side():

@@ -17,6 +17,7 @@ import httpx
 from app.cache import ResponseCache
 from app.config import Settings
 from app.models import LatLng
+from app.usage import DailyUsage
 
 ROUTES_ENDPOINT = "https://routes.googleapis.com/directions/v2:computeRoutes"
 
@@ -36,6 +37,8 @@ FIELD_MASK = ",".join(
         "routes.legs.steps.navigationInstruction.maneuver",
     )
 )
+# With traffic on the polyline: how fast traffic moves along each stretch.
+TRAFFIC_FIELD_MASK = FIELD_MASK + ",routes.travelAdvisory.speedReadingIntervals"
 
 
 @dataclass(frozen=True)
@@ -48,18 +51,31 @@ class RouteRequest:
     # Direction of travel at each via point, degrees clockwise from north. It
     # tells Google which way to pass the point on a two-way road.
     via_headings: tuple[int, ...] = ()
+    # Direction a moving car is driving at the origin, so the route starts that
+    # way instead of with a U-turn.
+    origin_heading: int | None = None
     avoid_highways: bool = False
     # TRAFFIC_AWARE moves the request from the Essentials SKU to the Pro SKU,
     # which has a smaller free allowance. Headings are a Pro feature too.
     traffic_aware: bool = False
+    # Also return traffic speeds along the route (TRAFFIC_ON_POLYLINE): slow
+    # and jammed stretches. Needs traffic_aware, and Google bills it at a
+    # higher rate than a plain traffic-aware request.
+    traffic_on_polyline: bool = False
 
     def __post_init__(self) -> None:
         if self.via_headings and len(self.via_headings) != len(self.via):
             raise ValueError("via_headings must have one heading per via point")
+        if self.traffic_on_polyline and not self.traffic_aware:
+            raise ValueError("traffic_on_polyline needs traffic_aware")
+
+    @property
+    def field_mask(self) -> str:
+        return TRAFFIC_FIELD_MASK if self.traffic_on_polyline else FIELD_MASK
 
     def to_body(self) -> dict[str, Any]:
         body: dict[str, Any] = {
-            "origin": _waypoint(self.origin),
+            "origin": _waypoint(self.origin, heading=self.origin_heading),
             "destination": _waypoint(self.destination),
             "travelMode": "DRIVE",
             "routingPreference": "TRAFFIC_AWARE" if self.traffic_aware else "TRAFFIC_UNAWARE",
@@ -75,6 +91,8 @@ class RouteRequest:
             ]
         if self.avoid_highways:
             body["routeModifiers"] = {"avoidHighways": True}
+        if self.traffic_on_polyline:
+            body["extraComputations"] = ["TRAFFIC_ON_POLYLINE"]
         return body
 
 
@@ -100,6 +118,10 @@ class RoutesApiError(RuntimeError):
         self.status_code = status_code
 
 
+class DailyLimitReached(RoutesApiError):
+    """Today's ROUTES_DAILY_LIMIT of live Google requests is used up."""
+
+
 class RoutesClient:
     def __init__(
         self,
@@ -109,9 +131,11 @@ class RoutesClient:
         http: httpx.Client | None = None,
         timeout_s: float = 10.0,
         traffic_fresh_for: timedelta = timedelta(minutes=5),
+        usage: DailyUsage | None = None,
     ) -> None:
         self._api_key = api_key
         self.cache = cache
+        self.usage = usage  # optional daily cap on live requests
         # Live traffic goes stale fast, so record mode re-fetches traffic-aware
         # answers older than this. Replay mode still serves them.
         self.traffic_fresh_for = traffic_fresh_for
@@ -121,32 +145,49 @@ class RoutesClient:
         self.live_requests = 0
 
     @classmethod
-    def from_settings(cls, settings: Settings) -> RoutesClient:
+    def from_settings(
+        cls,
+        settings: Settings,
+        *,
+        http: httpx.Client | None = None,
+        usage: DailyUsage | None = None,
+    ) -> RoutesClient:
+        """A client per the settings. A server passes one shared http client and usage counter for all requests."""
         cache = ResponseCache(settings.cache_dir, settings.cache_mode, max_age=settings.cache_max_age)
-        return cls(settings.google_maps_api_key, cache, traffic_fresh_for=settings.traffic_fresh_for)
+        usage = usage or daily_usage(settings)
+        return cls(
+            settings.google_maps_api_key, cache, http=http, traffic_fresh_for=settings.traffic_fresh_for, usage=usage
+        )
 
     def compute_routes(self, request: RouteRequest) -> list[dict[str, Any]]:
         """Return the raw `routes` array for a request; empty when Google found no route."""
         body = request.to_body()
         # Everything that changes Google's answer is part of the cache key. The API key is not.
-        cache_request = {"endpoint": ROUTES_ENDPOINT, "fieldMask": FIELD_MASK, "body": body}
+        cache_request = {"endpoint": ROUTES_ENDPOINT, "fieldMask": request.field_mask, "body": body}
         fresh_for = self.traffic_fresh_for if request.traffic_aware else None
-        response = self.cache.get_or_fetch(cache_request, lambda: self._post(body), fresh_for=fresh_for)
+        response = self.cache.get_or_fetch(
+            cache_request, lambda: self._post(body, request.field_mask), fresh_for=fresh_for
+        )
         # When no route exists Google may omit `routes` entirely.
         return response.get("routes", [])
 
-    def _post(self, body: dict[str, Any]) -> dict[str, Any]:
+    def _post(self, body: dict[str, Any], field_mask: str = FIELD_MASK) -> dict[str, Any]:
         if not self._api_key:
             raise RoutesApiError(
                 "GOOGLE_MAPS_API_KEY is not set, so the live Routes API can't be called. "
                 "Set it in backend/.env, or use ROUTES_CACHE_MODE=replay with recorded responses."
+            )
+        if self.usage is not None and not self.usage.take():
+            raise DailyLimitReached(
+                f"Today's limit of {self.usage.limit} live Google requests is used up (ROUTES_DAILY_LIMIT). "
+                "Cached answers still work; raise the limit in backend/.env or wait until tomorrow."
             )
         self.live_requests += 1
         try:
             response = self._http.post(
                 ROUTES_ENDPOINT,
                 json=body,
-                headers={"X-Goog-Api-Key": self._api_key, "X-Goog-FieldMask": FIELD_MASK},
+                headers={"X-Goog-Api-Key": self._api_key, "X-Goog-FieldMask": field_mask},
             )
         except httpx.HTTPError as exc:
             raise RoutesApiError(f"Could not reach the Routes API: {exc}") from exc
@@ -166,6 +207,11 @@ class RoutesClient:
 
     def __exit__(self, *exc_info: object) -> None:
         self.close()
+
+
+def daily_usage(settings: Settings) -> DailyUsage:
+    """The live-request counter for these settings; it lives in the cache folder."""
+    return DailyUsage(settings.cache_dir / "daily-usage.json", settings.daily_limit or None)
 
 
 def _google_error_message(response: httpx.Response) -> str:

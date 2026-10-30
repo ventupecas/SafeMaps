@@ -1,32 +1,39 @@
 # Personalized Routing Engine
 
-Expo prototype. The backend fetches every route Google will offer between two
-points, re-scores each one against a driver profile, and returns the winner's
-polyline. The frontend just draws it.
+Expo prototype. For a trip in the Milwaukee metro area, the backend designs
+its own routes on OpenStreetMap roads, has Google price them with live traffic
+alongside Google's own suggestions, and picks one by **safety first, then fuel,
+then time**. The web map just collects the trip and draws the answer.
 
-**Status:** the backend engine is done: Routes client, cache, candidate generation, scoring, CLI, and the engine's own router on OpenStreetMap roads with Google live-traffic pricing.
-The HTTP API (FastAPI) and the web map frontend come next.
+**Status:** working end to end: Routes client and cache, our own router with live-traffic pricing, priority scoring, the CLI, the HTTP API (FastAPI) and the web map. The web map needs a browser key (see below) before it can show the map.
 
 ```
 backend/
   app/
     routes_client.py  Google Routes API (computeRoutes) over httpx, through the cache
     cache.py          File-backed response cache: record / replay / off
+    usage.py          Local daily cap on live Google requests (ROUTES_DAILY_LIMIT)
     candidates.py     Widens the candidate pool: alternatives, avoid-highways, via-point offsets
     features.py       Raw route JSON -> highway time, winding time, turns, crossing turns, traffic delay
     driving_side.py   Which countries keep left, so "turn across traffic" means the right thing
     hotspots.py       Crash-data index: recorded crashes near a junction
     scoring.py        Pure scoring and ranking; the part you tune
-    profiles.py       Preset personas (fastest, highway-averse, scenic, calm, eco)
+    fuel.py           Rough fuel model: consumption by speed, turns, time in traffic
+    profiles.py       Preset personas (fastest, safe-economy [default], highway-averse, scenic, calm, eco)
     overpass.py       Downloads OpenStreetMap roads for an area (Overpass API)
     roadgraph.py      Turns OSM data into a drivable road graph with turn restrictions
     build_graph.py    Command that downloads and builds the graph
     router.py         Our own router: personalized A* search with turn costs, plus alternatives
+    road_events.py    Closures, lane closures and jams: WZDx work zones, Wisconsin 511, Google traffic speeds, Apify (opt-in)
     pricing.py        Sends our routes to Google for live-traffic times; measures how closely Google followed
     engine.py         The pipeline the API and CLI call
+    main.py           HTTP API (FastAPI); also serves the web map
     cli.py            Run and tune from the terminal
   data/               Downloaded OSM tiles and built graphs (gitignored)
-  tests/              154 tests, no network needed
+  tests/              262 tests, no network needed
+frontend/
+  index.html, app.js, styles.css   The web map: place search, routes drawn and explained
+  config.example.js                Copy to config.js (gitignored) with the browser key
 ```
 
 ## Setup (PowerShell)
@@ -44,14 +51,53 @@ pytest
 
 1. Create a Cloud project and attach a billing account. Google requires one even when usage stays inside the free allowance.
 2. Enable the **Routes API**. The legacy Directions API can't be enabled on new projects, and this backend doesn't use it.
-3. Create an API key for the backend and restrict it to the Routes API. The frontend will get its own browser key, restricted by HTTP referrer.
-4. Cap usage. In **APIs & Services → Routes API → Quotas**, set a daily request limit, and add a budget alert under **Billing → Budgets**. With a cap in place, a demo loop left running all day can't run up a bill.
+3. Create an API key for the backend and restrict it to the Routes API. The web map gets its own browser key (see "Web map and API" below).
+4. Cap usage. Quotas are set per API on the project, not on the key, and the Routes API may only offer per-minute limits. The backend therefore enforces its own cap: `ROUTES_DAILY_LIMIT` (default 150) live Google requests per day, counted in the cache folder. Once that's used up, live calls are refused until local midnight, and cached answers keep working. Also add a budget alert under **Billing → Budgets & alerts**. It only sends email; it doesn't stop charges.
 5. Leave `ROUTES_TRAFFIC_AWARE=false`. Traffic-aware routing bills at the Pro SKU, which has a smaller free allowance. Every other request this backend sends stays on Essentials.
    See Google's [pricing page](https://developers.google.com/maps/billing-and-pricing/pricing) for the current free caps.
 
 Without the router, each new trip costs 2 Essentials requests (plain + avoid-highways), plus up to 2 via-offset requests when Google offers fewer than 3 distinct routes. A repeat of the same trip costs nothing.
 
-With the router (see below), each trip costs 1 live-traffic request for Google's own suggestions plus 1 per route our router designs: up to 4, all at the **Pro** tier. Live-traffic answers are only reused for 5 minutes in record mode, so set the daily quota cap before a demo.
+With the router (see below), each trip costs 1 live-traffic request for Google's own suggestions plus 1 per route our router designs: up to 4, all at the **Pro** tier. Live-traffic answers are only reused for 5 minutes in record mode. Size `ROUTES_DAILY_LIMIT` for the expo: 4 × the number of trips you expect.
+
+## Web map and API
+
+From `backend/`:
+
+```powershell
+.\.venv\Scripts\python.exe -m uvicorn app.main:app --reload --port 3143
+```
+
+Then open **http://127.0.0.1:3143** for the map, or **http://127.0.0.1:3143/docs** to try the API by hand. Keep `--port 3143`: the browser key only works on the addresses it's restricted to.
+
+| Endpoint | What it does |
+|---|---|
+| `GET /health` | What's loaded (road graph, crash data, cache mode) and today's Google usage |
+| `GET /profiles` | The preset profiles, for the profile picker |
+| `POST /route` | Ranks routes for one trip. Body: `origin`, `destination` (`{lat, lng}`), optional `profile`, `weights`, `country_code`, `live_traffic`, `use_router`. Returns the ranked `plan` (the map draws `plan.winner.encoded_polyline`), `notes`, `attribution` and Google usage. |
+
+Errors come back as: 422 bad input, 404 no route, 429 the daily Google limit is used up, 502 Google failed, 503 a replay-mode trip that wasn't recorded.
+
+**The browser key for the map.** The map and the place search run in the browser, so they need a separate key from the backend's:
+1. In the Cloud Console, enable **Maps JavaScript API** and **Places API (New)**.
+2. Create a new API key. Under **Application restrictions**, pick **Websites** and add `http://localhost:3143/*` and `http://127.0.0.1:3143/*`. Under **API restrictions**, pick those two APIs.
+3. Copy `frontend/config.example.js` to `frontend/config.js` and paste the key in. `config.js` is gitignored.
+
+Until then, the page shows these steps in place of the map. On the page:
+- Search for the start and destination, or click the map: the first click sets the start, the next the destination. **Use my location** sets the start from the device.
+- The recommended route is drawn bold green, the standard route (Google's own choice) dashed, and the other options in gray. Red dots mark risky turns on the recommended route.
+- The panel lists every route with its minutes, miles, gallons, risky turns and the reason for its place, plus how the winner compares with the standard route. Alternatives take different roads, even when they're much slower; a route that mostly runs along a better one is left out (`plan.hidden` in the API says which).
+- Pick a route in the list to follow it (the recommended one is picked to start with).
+- The page itself never names Google: routes are labeled "Our safer design", "Standard route" and "Alternative route", and the server's notes and errors are reworded for drivers (the raw notes go to the browser console). Google's logo and terms on the map, and the credit in the place search list, are required by Google's terms and stay.
+- Distances are shown in miles and fuel in gallons. The backend works in km and liters.
+
+**Driving.** After a route is found, **Start driving** follows the device's location:
+- The map follows a blue dot with an arrow for the direction of travel, and a banner shows miles and minutes left. Dragging the map stops the following; **Re-center** resumes it. The screen is kept on where the browser allows it.
+- Drive onto one of the other routes on the map, and the page follows that one instead, with no new request.
+- Leave every route for two GPS fixes in a row (more than 40 m off, with a fix accurate to 60 m or better), and the page asks for a new route from where the car is. It sends the car's heading, so the new routes start the way the car is going instead of with a U-turn. New routes are asked for at most every 20 s.
+- Within 40 m of the destination, it stops and says so.
+- **Cost:** each new route is a full trip request: with Live traffic on, up to 4 Google requests at the Pro tier (a heading also makes Google suggestions Pro). Turn Live traffic off to reroute on our own estimates.
+- **Phones:** browsers only share location with secure pages: `https://`, or `localhost` on the same computer. Opening `http://<this computer's IP>:3143` on a phone won't get a location, and the map key only allows the localhost addresses. A phone needs an https address (a tunnel, for example) added to the key's websites.
 
 ## Running the engine
 
@@ -100,11 +146,13 @@ Entries expire after 30 days (`ROUTES_CACHE_MAX_AGE_DAYS`) because Google's term
    - decision maneuvers: turns, merges, forks and roundabouts
    - crossing turns: turns across oncoming traffic, flagged as busy or crash-prone (see below)
    - congestion delay: only when traffic-aware routing is on
-3. **Score.** Every term is in *perceived minutes*:
+   - fuel (liters): each stretch's distance at its average speed (consumption is highest when crawling, lowest around 60 km/h, and rises again at highway speeds), plus each turn's slow-down and speed-up, plus each traffic signal passed (counted on the road graph, since Google's route data doesn't list them), plus stop-and-go in traffic. The model in `fuel.py` approximates a midsize sedan; tune it for the demo car.
+3. **Rank.** The default profile ranks by priority: safety, then fuel, then time (see "Default priorities" below). The other presets use a weighted score, where every term is in *perceived minutes*:
 
    ```
    cost = time_weight * minutes
         + distance_weight * km
+        + fuel_weight * fuel_liters
         + highway_weight * highway_minutes
         + traffic_weight * delay_minutes
         + maneuver_weight * turns
@@ -123,9 +171,14 @@ Turns across oncoming traffic cost extra where they're risky. These are lefts wh
 
 - **Which turns count.** Normal, sharp and slight turns to the far side, U-turns in either direction, and a far-side ramp taken from a surface street. Roundabouts, forks, merges and ramps that exit a divided highway don't count.
 - **Driving side.** The CLI takes it from `--country` (two-letter ISO code), else `ROUTES_DEFAULT_COUNTRY`, else keep-right. The web frontend will send the country from the user's Places selection, so no extra API call is needed.
-- **Busy junction.** Either road has a no-traffic speed of 50 km/h or more, meaning arterial class or faster. Google's free tier doesn't report traffic volume at each junction, so road class stands in for it.
+- **Busy junction.** Google's free tier doesn't report traffic volume at each junction, so road class stands in for it.
+  - **With the road graph loaded:** each turn on every route, Google's included, is matched to the OSM junction within 30 m. The junction is busy when a tertiary road or bigger meets there (`BUSY_CLASSES` in `roadgraph.py`). This is the same rule the router uses.
+  - **Freeway splits and merges never count:** a junction where only freeways and their ramps meet, or a turn with freeway speed on both sides and no junction nearby, is an interchange with no oncoming traffic.
+  - **One-way streets:** where every road at a junction is one-way, no turn crosses oncoming traffic. Except on a divided road: when the same road runs the other way within 50 m (`DIVIDED_ROAD_M`), its oncoming traffic is just across the median, so turns there count as usual.
+  - **U-turns through a median opening:** OSM draws a median opening as a short link between the two carriageways. The router treats a turn through any segment shorter than 30 m (`CONNECTOR_MAX_M`) as one maneuver, judged from the road before it to the road after it, so coming out pointing back the way the car came is one U-turn across traffic, not a left ramp and a slight left. It's costed like any U-turn (25 s, plus the busy and crash-prone penalties), and the scorer sees the same U-turn on the route.
+  - **Without the graph:** a junction is busy when either road's no-traffic speed is 50 km/h or more.
 - **Crash-prone junction.** At least `ROUTES_CRASH_MIN_COUNT` recorded crashes within 35 m. Point `ROUTES_CRASH_DATA` at a CSV with `lat,lng[,crashes]` columns. Many cities publish this data, for example NYC's "Motor Vehicle Collisions", Chicago's "Traffic Crashes" and the UK's STATS19. Filter it to your demo area first. Without crash data, only the busy rule applies.
-- **Weights.** By default each busy crossing turn costs 0.5 perceived minutes, and a crash-prone one costs 2 more. The `calm` preset raises these to 1.5 and 4. `fastest` sets both to 0 so it stays a pure-time baseline.
+- **Weights.** By default each busy crossing turn costs 3 perceived minutes, and a crash-prone one costs 6 more. The `calm` preset raises these to 4 and 8. `fastest` sets both to 0 so it stays a pure-time baseline.
 
 `--turns` lists every crossing turn with its location, road speed and nearby crash count, which is the quickest way to calibrate:
 
@@ -133,7 +186,51 @@ Turns across oncoming traffic cost extra where they're risky. These are lefts wh
 python -m app.cli --from 51.5007,-0.1246 --to 51.5194,-0.1270 --country GB --profile calm --turns
 ```
 
-The engine only picks among the routes Google returns; it can't make Google build a route made of right turns. The more distinct candidates there are, the more often a safer one is available.
+## Default priorities: safety, then fuel, then time
+
+The default profile, `safe-economy` (used by the CLI and the web map), ranks in strict order:
+
+1. **Safety.** The route with the fewest risky turns and lane closures wins. A risky turn is a turn across traffic at a busy junction, worth 3 points, or at a crash-prone one, worth 6 more. A lane closure (a forced merge in a work zone or past a crash) is worth 3 (`lane_closure_weight`). A route through a closed road can't win at all (see Road events).
+2. **Fuel.** Among equally safe routes, the one using the least fuel wins. Routes within 3% of the lowest count as tied (`fuel_tolerance`), because the fuel model is rough.
+3. **Time.** Among those, the fastest wins.
+
+Routes slower than 1.6× the fastest (`max_detour_ratio`) are shown but can't win, so the order never turns into a long detour. Each route carries a short `reason` for its place, for example "as safe as any, and uses the least fuel" or "more risky turns than the winner". The CLI and the web map both show it.
+
+Our router designs with the same priorities: it weights risky turns 4× and fuel 2.5× more heavily than the profile's own weights when planning (`PRIORITY_*_BOOST` in `router.py`), so the routes it proposes suit this ranking. Left turns at quiet junctions aren't penalized beyond their real time and fuel.
+
+For example, on downtown Milwaukee → Waukesha with live traffic, our route came out about 0.5 minutes slower than Google's choice, with the same fuel and one fewer busy left turn, and was recommended for that reason.
+
+The other presets use the weighted score instead. `fastest` ignores safety and fuel, for comparison.
+
+## Road events: closures, lane closures and jams
+
+Four sources, in the order of preference set by `ROUTES_ROAD_EVENT_SOURCES` (default `wzdx+wi511,google`). A trip uses the first entry that is set up and answers, so the later ones are backups. `a+b` uses both together, when either answers. With the default, a trip gets WZDx work zones plus 511 incidents (once you have the 511 key), and falls back to Google's traffic speeds only if neither answers. The web map's **Closures and slowdowns** picker, or the API's `road_events` field, can also pick one source for a trip, or none. The response says which sources were used (`road_events_source`, joined with `+`) and which were tried but unavailable (`road_events_skipped`).
+
+| Source | What it gives | Needs | Cost and caveats |
+|---|---|---|---|
+| `wzdx` Work Zone Data Exchange | Every work zone in Wisconsin (WZDx 4.2): its stretch of road, direction, dates, and which lanes are closed | Nothing: `https://511wi.gov/api/wzdx` is public | Free, public domain (CC0). About 6 MB, fetched at most every 5 minutes; if a refresh fails, the last copy is used for up to an hour. Work zones only: no crashes or incidents. `ROUTES_WZDX_FILE` reads a saved copy instead, for an offline demo. |
+| `wi511` Wisconsin 511 | Official closures, lane closures, construction and incidents, statewide | `WI511_API_KEY` (free; see below) | Free. The feed allows 10 calls a minute, so it's fetched at most every 5 minutes for all trips. Used with `wzdx`, its own roadwork entries are dropped: they're the same work zones in less detail. |
+| `google` traffic speeds | Slow and jammed stretches along Google's own suggested routes (`TRAFFIC_ON_POLYLINE`) | Live traffic on, our router, the Google key | No new account. Added only to the one suggestions request per trip, but Google bills a traffic-on-polyline request at a higher rate: possibly the Enterprise tier (1,000 free a month) rather than Pro (5,000). Reports no closures. |
+| `apify` traffic tiles | Slowdowns and fully closed roads from Google Maps' traffic tiles, around the trip | Listed in `ROUTES_ROAD_EVENT_SOURCES` and `APIFY_TOKEN` set | Paid per tile ($0.001–$0.01; the actor's page lists both), plus Apify platform fees. Up to 81 tiles a trip, at most `ROUTES_APIFY_DAILY_TILES` (300) a day, cached 10 minutes. **Scraping Google Maps is against Google's terms**, which puts this app's Google keys at risk. A first fetch takes tens of seconds while the actor starts. Off unless both set. |
+
+What each kind of event does:
+- **Closed road:** our router won't use it (except the segment the car is already on). A route through one, by the scorer's reading, can't win, unless every route goes through one, in which case the data is doubted instead.
+- **Lane closure:** the segments cost 1.5× their time, and driving into one costs `lane_closure_weight` once, like a risky turn. It counts toward safety, so in the default ranking a route through a lane closure loses to an equally fuel-efficient one without.
+- **Jam / slow:** the segments cost 3× / 1.5× their time when our router designs routes, so the designs go around them. They aren't scored separately: live travel times already include them.
+- **Matching to the map:** sources often give only the two ends of a stretch. Each end is snapped to the road segment there, running the event's direction, and the event becomes the shortest drive between them along the roads, if that's at most 1.5× the straight distance plus 500 m. Otherwise it stays as given. A stretch affecting both directions becomes one event per direction. A single point matches the nearest road within 30 m. The map draws closed roads in black and lane closures in dashed orange. Each event is matched once and remembered, so only the first trip through an area waits for it (a few seconds for 60 work zones).
+- **Which work zones count:** WZDx entries closing all lanes are closures. "Some lanes closed" (only when a travel lane is closed, not just the shoulder), flagging, alternating one-way traffic and temporary signals are lane closures. Planned work that hasn't started, and suggested detours, are left out.
+- **Ramps and mainlines:** descriptions say which road an event is on ("Ramp Full Closure on I-94 EB at OFF RAMP TO HAWLEY RD", "Mainline Left Lane Closed on ..."). A mainline event never matches a ramp. Ramp closures are placed on the freeway beside the ramp, so they're matched to the ramp itself:
+  - **Exits and entrances:** the junction where an exit leaves the freeway (or an entrance joins it) heading the event's way, whose ramp reaches the named street, within 1.5 km.
+  - **No street named:** the nearest such ramp within 300 m.
+  - **No ramp found:** the event is left out rather than closing the freeway. This happens where the ramp isn't on the map, for example ramps rebuilt in the I-94 East-West project after the map was downloaded.
+
+**Getting the Wisconsin 511 key** (from 511wi.gov's developer pages):
+1. Create a My 511WI account at <https://511wi.gov/my511/register> and confirm it from the email.
+2. Log in at <https://511wi.gov/my511/login>, open <https://511wi.gov/developers/doc>, and under **Developer API Key**, submit the reason you need it (for example: "a safety-first route planner prototype for the Milwaukee area").
+3. The key arrives by email once 511WI approves it. The site gives no wait time.
+4. Put it in `backend/.env` as `WI511_API_KEY=...` and restart the server. `/health` shows `"wi511_key_set": true`.
+
+The access agreement (linked on the doc page) wasn't reviewed here: read it before showing the data publicly.
 
 ## Own router (Milwaukee metro)
 
@@ -160,10 +257,16 @@ Routes built from this data must credit **"© OpenStreetMap contributors"** (ODb
 
 1. Google's own suggestions are fetched with live traffic (1 request).
 2. Our router designs up to 3 routes for the profile. With `--all-profiles` it designs each profile's best route, skipping duplicates. The router works like this:
-   - It snaps each end of the trip to the nearest junction a car can start from (not a freeway or a ramp).
-   - It searches road segments rather than junctions, so every turn has a cost. The cost of each segment and turn uses the same perceived-minutes weights as the scorer. Turns across oncoming traffic at busy or crash-prone junctions cost extra. A turn between two one-way streets doesn't count as crossing, because there's no oncoming traffic.
-   - It obeys turn restrictions, and only allows U-turns at dead ends.
-3. Each design goes to Google as a live-traffic request that must pass through up to 25 points along it: one just after each turn, plus one every 3 km on long straights, each with the direction of travel. Google returns its version of the route with a live-traffic time.
+   - It snaps each end of the trip to the nearest junction a car can start from (not a freeway or a ramp). When rerouting a moving car (the API's `heading`), the trip instead starts on the road segment the car is driving along, freeways included.
+   - The first route is the best design. Each alternative must share at most half its length with every earlier route (either way round) and with Google's suggestions, so it takes a different corridor rather than a block-long detour. Roads already used cost twice as much in the next search, and alternatives may cost up to twice the best design. The alternatives' searches use a 1.5x inflated A* estimate: much faster, at most 1.5x off the best possible alternative.
+   - It searches road segments rather than junctions, so every turn has a cost. The cost of each segment and turn uses the same perceived-minutes weights as the scorer. Turns across oncoming traffic at busy or crash-prone junctions cost extra. At a junction where every road is one-way, no turn counts as crossing, because there's no oncoming traffic; the scorer applies the same rule.
+   - It obeys turn restrictions, and only allows U-turns at dead ends, or through a median opening on a divided road, as a costed U-turn.
+   - It doesn't cut through service roads (alleys, parking-lot connectors) to save a turn. Turning onto one mid-trip costs 10 perceived minutes. A trip that starts or ends on one isn't affected, and pass-through points are never placed on them.
+3. Each design goes to Google as a live-traffic request that must pass through up to 25 points along it, each with the direction of travel:
+   - one just after each turn
+   - one about every 800 m on stretches of city street without turns, and every 3 km on freeways
+
+   Google takes the quickest path between points, and can cut a corner through the very left turns the design avoided. When its version follows less than 99% of the design, the stretch it skipped gets a point and Google is asked once more. That costs one extra request, the better answer is kept, and the CLI notes it.
 4. The scorer ranks everything on Google's numbers. Each of our routes shows `[NN%]`, the share of Google's version that follows our design.
 
 ### CLI flags
@@ -178,5 +281,5 @@ Routes built from this data must credit **"© OpenStreetMap contributors"** (ODb
 
 - **Time estimates without pricing:** these come from posted speeds (or typical values by road type), a factor for junctions, and 12 s per traffic signal. Live times only come from pricing.
 - **Some turn restrictions are skipped.** A restriction that goes through a stretch of road rather than a single junction can't be modeled. These are mostly U-turn bans across medians, and the build summary counts them. The router still only U-turns at dead ends.
-- **Pass-through points and headings are untested against the live API.** Check the `[NN%]` match on your first real trips. If Google often wanders, add points or remove the headings in `pricing.py`.
+- **The start of a planned trip can't be pinned.** Without a heading, Google assumes which way the car faces at the origin, which can add a U-turn at the start of every route, Google's own included. It's the same for all candidates, so it doesn't change the ranking. Reroutes while driving send the car's heading, which removes it.
 - **Trips beyond the map:** a trip starting or ending more than 1 km from the map falls back to Google's routes only, with a note.

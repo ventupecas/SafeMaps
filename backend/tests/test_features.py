@@ -118,3 +118,38 @@ def test_route_without_steps_still_scores():
     assert f.duration_min == 10
     assert f.traffic_delay_min == 0  # missing staticDuration falls back to duration
     assert (f.highway_min, f.winding_min, f.maneuver_count) == (0, 0, 0)
+
+
+class FixedJunctions:
+    """A JunctionLookup that reports the same kind of junction everywhere."""
+
+    def __init__(self, kind):
+        self.kind = kind
+
+    def junction_kind(self, point):
+        return self.kind
+
+
+def test_road_graph_overrides_the_speed_proxy():
+    fast_left = junction_route("TURN_LEFT", speed_in=100, speed_out=100)
+    slow_left = junction_route("TURN_LEFT", speed_in=30, speed_out=30)
+
+    # Freeway-to-freeway splits cross no oncoming traffic.
+    assert crossings(fast_left, TurnContext(junctions=FixedJunctions("interchange"))) == ()
+    # "Busy" follows the roads at the junction, not the speeds.
+    (turn,) = crossings(slow_left, TurnContext(junctions=FixedJunctions("busy")))
+    assert turn.busy
+    (turn,) = crossings(fast_left, TurnContext(junctions=FixedJunctions("quiet")))
+    assert not turn.busy
+    # No junction close enough, freeway speed on both sides: a split inside an interchange.
+    assert crossings(fast_left, TurnContext(junctions=FixedJunctions(None))) == ()
+    # No junction close enough otherwise: fall back to the speed proxy.
+    (turn,) = crossings(junction_route("TURN_LEFT", speed_in=100, speed_out=40), TurnContext(junctions=FixedJunctions(None)))
+    assert turn.busy
+    # Without a road graph the freeway rule doesn't apply: an at-grade turn can't be ruled out.
+    (turn,) = crossings(fast_left)
+    assert turn.busy
+
+
+def test_all_one_way_junction_is_not_a_crossing():
+    assert crossings(junction_route("TURN_LEFT"), TurnContext(junctions=FixedJunctions("one-way"))) == ()

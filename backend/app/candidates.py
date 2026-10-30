@@ -38,6 +38,10 @@ class CandidateOptions:
     # Via requests stop once the pool holds this many distinct routes.
     min_candidates: int = 3
     traffic_aware: bool = False
+    # Direction a moving car is driving at the origin (see RouteRequest).
+    origin_heading: int | None = None
+    # Ask for traffic speeds along Google's own routes (the plain request only; see RouteRequest).
+    traffic_on_polyline: bool = False
 
 
 @dataclass(frozen=True)
@@ -88,8 +92,10 @@ def gather_candidates(
             number = sum(1 for candidate in pool.values() if candidate.source == source) + 1
             pool[polyline] = RawCandidate(id=f"{source}-{number}", source=source, route=route)
 
-    base = RouteRequest(origin=origin, destination=destination, traffic_aware=options.traffic_aware)
-    add("google", fetcher.compute_routes(base))
+    base = RouteRequest(
+        origin=origin, destination=destination, traffic_aware=options.traffic_aware, origin_heading=options.origin_heading
+    )
+    add("google", fetcher.compute_routes(replace(base, traffic_on_polyline=options.traffic_on_polyline)))
     if not pool:
         return []  # No drivable route at all; detours won't find one either.
 

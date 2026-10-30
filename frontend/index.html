@@ -1,0 +1,78 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Safe Route Planner</title>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <main class="layout">
+      <aside class="panel" aria-label="Trip planner">
+        <header class="panel__header">
+          <h1>Safe Route Planner</h1>
+          <p class="tagline">Safety first, then fuel, then time.</p>
+        </header>
+
+        <section class="trip" aria-label="Trip">
+          <div class="field">
+            <span class="field__label">
+              <span class="pin pin--a">A</span> Start
+              <button id="locate" class="link-button" type="button">Use my location</button>
+            </span>
+            <div id="origin-search" class="search"></div>
+            <p id="origin-picked" class="picked"></p>
+          </div>
+          <div class="field">
+            <span class="field__label"><span class="pin pin--b">B</span> Destination</span>
+            <div id="destination-search" class="search"></div>
+            <p id="destination-picked" class="picked"></p>
+          </div>
+          <p class="hint">Search for a place, or click the map: first click sets the start, the next the destination.</p>
+
+          <div class="field">
+            <label class="field__label" for="profile">Driver profile</label>
+            <select id="profile"></select>
+          </div>
+
+          <div class="field">
+            <label class="field__label" for="road-events">Closures and slowdowns</label>
+            <select id="road-events">
+              <option value="auto" selected>Automatic (best available)</option>
+              <option value="wzdx">Wisconsin work zones (WZDx)</option>
+              <option value="wi511">Wisconsin 511 (official)</option>
+              <option value="google">Traffic speeds along routes</option>
+              <option value="apify">Traffic tiles (paid)</option>
+              <option value="off">None</option>
+            </select>
+          </div>
+
+          <div class="toggles">
+            <label><input type="checkbox" id="live-traffic" checked /> Live traffic</label>
+            <label><input type="checkbox" id="use-router" checked /> Our router</label>
+            <label><input type="checkbox" id="traffic-layer" /> Show traffic</label>
+          </div>
+
+          <div class="actions">
+            <button id="find" class="button button--primary" type="button" disabled>Find route</button>
+            <button id="clear" class="button" type="button">Clear</button>
+          </div>
+          <button id="drive" class="button button--drive" type="button" hidden>Start driving</button>
+        </section>
+
+        <section id="results" class="results" aria-live="polite"></section>
+      </aside>
+
+      <section class="map-wrap">
+        <div id="map" class="map" role="application" aria-label="Map"></div>
+        <p id="nav-banner" class="nav-banner" role="status" hidden></p>
+        <button id="recenter" class="button recenter" type="button" hidden>Re-center</button>
+        <div id="setup" class="setup" hidden></div>
+        <p id="osm-credit" class="credit" hidden></p>
+      </section>
+    </main>
+
+    <script src="config.js" onerror="window.ROUTES_CONFIG_MISSING = true"></script>
+    <script src="app.js" type="module"></script>
+  </body>
+</html>

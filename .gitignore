@@ -13,3 +13,6 @@ backend/data/
 # Recorded Google API responses. Google's terms limit storing Maps content,
 # so these stay local and are never committed.
 backend/.cache/
+
+# The browser key for the web map (copy frontend/config.example.js).
+frontend/config.js

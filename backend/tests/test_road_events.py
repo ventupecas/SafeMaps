@@ -1,0 +1,350 @@
+"""Road events: the four sources, choosing between them, and which events a route drives through."""
+
+import json
+from datetime import datetime, timezone
+
+import httpx
+import pytest
+
+from app.geo import destination_point, encode_polyline
+from app.overpass import AREAS, BBox
+from app.road_events import (
+    APIFY_MAX_RADIUS,
+    ApifyTraffic,
+    EventSourceError,
+    RoadEvent,
+    Wi511Feed,
+    WzdxFeed,
+    collect,
+    count_on_route,
+    _ramp_road,
+    _road_kind,
+    jams_on_routes,
+    tiles_for,
+)
+from app.usage import DailyUsage
+
+NOW = 1_800_000_000.0
+METRO = AREAS["milwaukee-metro"]
+DOWNTOWN = (43.0389, -87.9065)
+
+
+class Clock:
+    def __init__(self) -> None:
+        self.now = 0.0
+
+    def __call__(self) -> float:
+        return self.now
+
+
+def wi511_item(**fields) -> dict:
+    item = {
+        "ID": 1,
+        "RoadwayName": "I-94",
+        "DirectionOfTravel": "Westbound",
+        "Description": "Right lane closed for bridge work",
+        "IsFullClosure": False,
+        "LanesAffected": "Right lane closed",
+        "Latitude": 43.033,
+        "Longitude": -87.95,
+        "LatitudeSecondary": 43.033,
+        "LongitudeSecondary": -87.97,
+        "StartDate": NOW - 3600,
+        "PlannedEndDate": NOW + 3600,
+        "EncodedPolyline": None,
+    }
+    return {**item, **fields}
+
+
+def wi511_feed(items, status: int = 200):
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(status, json=items)
+
+    clock = Clock()
+    feed = Wi511Feed("secret-key", httpx.Client(transport=httpx.MockTransport(handler)), clock=clock, now=lambda: NOW)
+    return feed, requests, clock
+
+
+def test_wi511_turns_closures_and_lane_closures_into_events():
+    items = [
+        wi511_item(ID=1, IsFullClosure=True, LanesAffected="All lanes closed", DirectionOfTravel="Eastbound"),
+        wi511_item(ID=2, LatitudeSecondary=None, LongitudeSecondary=None, DirectionOfTravel="Both Directions"),
+        wi511_item(ID=3, LanesAffected="Shoulder closed"),  # no lane taken
+        wi511_item(ID=4, StartDate=NOW + 3600),  # not started yet
+        wi511_item(ID=5, PlannedEndDate=NOW - 60),  # already over
+        wi511_item(ID=6, Latitude=43.07, Longitude=-89.40, LatitudeSecondary=43.07, LongitudeSecondary=-89.41),  # Madison
+    ]
+    feed, requests, _ = wi511_feed(items)
+    closed, lanes = feed.events(METRO)
+
+    assert (closed.kind, closed.direction, len(closed.path)) == ("closed", 90.0, 2)
+    assert (lanes.kind, lanes.direction, len(lanes.path)) == ("lanes", None, 1)
+    assert lanes.description.startswith("I-94: Right lane closed")
+    (sent,) = requests
+    assert sent.url.params["key"] == "secret-key" and sent.url.params["format"] == "json"
+
+
+def test_wi511_prefers_the_encoded_stretch():
+    line = [DOWNTOWN, destination_point(DOWNTOWN, 0, 500), destination_point(DOWNTOWN, 0, 1000)]
+    feed, _, _ = wi511_feed([wi511_item(EncodedPolyline=encode_polyline(line))])
+    (event,) = feed.events(METRO)
+    assert len(event.path) == 3
+
+
+def test_wi511_is_fetched_at_most_every_five_minutes():
+    feed, requests, clock = wi511_feed([wi511_item()])
+    feed.events(METRO)
+    clock.now = 200
+    feed.events(METRO)
+    assert len(requests) == 1
+    clock.now = 400
+    feed.events(METRO)
+    assert len(requests) == 2
+
+
+def test_wi511_errors_never_show_the_key():
+    feed, _, _ = wi511_feed({"error": "nope"}, status=403)
+    with pytest.raises(EventSourceError, match="refused the key") as error:
+        feed.events(METRO)
+    assert "secret-key" not in str(error.value)
+
+
+def test_google_traffic_intervals_become_jams_along_the_route():
+    points = [destination_point(DOWNTOWN, 90, 200 * k) for k in range(5)]
+    route = {
+        "polyline": {"encodedPolyline": encode_polyline(points)},
+        "travelAdvisory": {
+            "speedReadingIntervals": [
+                {"endPolylinePointIndex": 1, "speed": "NORMAL"},
+                {"startPolylinePointIndex": 1, "endPolylinePointIndex": 3, "speed": "TRAFFIC_JAM"},
+                {"startPolylinePointIndex": 3, "endPolylinePointIndex": 4, "speed": "SLOW"},
+            ]
+        },
+    }
+    jam, slow = jams_on_routes([route])
+    assert (jam.kind, len(jam.path), jam.along) == ("jam", 3, True)
+    assert (slow.kind, len(slow.path)) == ("slow", 2)
+
+
+def test_apify_tiles_cover_the_trip_with_the_most_detail_that_fits():
+    zoom, radius, _ = tiles_for(BBox(43.03, -87.92, 43.05, -87.90))  # about 2 km
+    assert zoom == 15 and radius <= 1
+    zoom, radius, _ = tiles_for(METRO)  # about 80 km
+    assert radius <= APIFY_MAX_RADIUS and zoom <= 13
+
+
+def feature(level: int, coordinates) -> dict:
+    geometry = {"type": "LineString", "coordinates": [[lng, lat] for lat, lng in coordinates]}
+    return {"type": "Feature", "geometry": geometry, "properties": {"speed_level": level, "speed_label": f"level {level}"}}
+
+
+def apify(payload, *, daily_tiles: int = 500, tmp_path):
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(200, json=payload)
+
+    usage = DailyUsage(tmp_path / "tiles.json", daily_tiles)
+    source = ApifyTraffic("apify-token", httpx.Client(transport=httpx.MockTransport(handler)), usage, clock=Clock())
+    return source, requests, usage
+
+
+def test_apify_reads_closures_and_jams_and_counts_its_tiles(tmp_path):
+    line = [DOWNTOWN, destination_point(DOWNTOWN, 90, 300)]
+    collection = {"type": "FeatureCollection", "features": [feature(6, line), feature(1, line), feature(4, line)]}
+    source, requests, usage = apify([collection], tmp_path=tmp_path)
+    area = BBox(43.03, -87.92, 43.05, -87.90)
+
+    closed, jam = source.events(area)
+    assert (closed.kind, jam.kind) == ("closed", "jam")
+    assert closed.path[0] == pytest.approx(DOWNTOWN)  # GeoJSON's [lng, lat] read the right way round
+    (sent,) = requests
+    assert sent.headers["Authorization"] == "Bearer apify-token" and "token" not in str(sent.url)
+    body = json.loads(sent.content)
+    assert usage.used_today() == (2 * body["radius"] + 1) ** 2 and body["seconds"] == -1
+
+    source.events(area)
+    assert len(requests) == 1  # cached
+
+
+def test_apify_results_may_arrive_as_a_json_string(tmp_path):
+    collection = {"type": "FeatureCollection", "features": [feature(6, [DOWNTOWN, destination_point(DOWNTOWN, 0, 100)])]}
+    source, _, _ = apify([{"results": json.dumps(collection)}], tmp_path=tmp_path)
+    assert [e.kind for e in source.events(BBox(43.03, -87.92, 43.05, -87.90))] == ["closed"]
+
+
+def test_apify_stops_at_the_daily_tile_limit(tmp_path):
+    source, requests, _ = apify([], daily_tiles=0, tmp_path=tmp_path)
+    with pytest.raises(EventSourceError, match="ROUTES_APIFY_DAILY_TILES"):
+        source.events(METRO)
+    assert requests == []
+
+
+class FixedSource:
+    def __init__(self, events=None, error=None) -> None:
+        self.result, self.error = events or [], error
+
+    def events(self, area):
+        if self.error:
+            raise EventSourceError(self.error)
+        return self.result
+
+
+def test_the_first_source_that_answers_is_used_and_the_rest_are_backups():
+    report = collect(["wi511", "google", "apify"], METRO, wzdx=None, wi511=None, apify=None, google_ready=True)
+    assert (report.source, report.google, report.skipped) == ("google", True, ["wi511"])
+
+    closure = RoadEvent("apify", "closed", (DOWNTOWN,))
+    report = collect(
+        ["wi511", "google", "apify"],
+        METRO,
+        wzdx=None,
+        wi511=FixedSource(error="511WI answered 500"),
+        apify=FixedSource([closure]),
+        google_ready=False,
+    )
+    assert (report.source, report.events, report.skipped) == ("apify", [closure], ["wi511", "google"])
+    assert "511WI answered 500" in report.notes[0]
+
+    report = collect(["wi511"], METRO, wzdx=None, wi511=None, apify=None, google_ready=True)
+    assert (report.source, report.events) == (None, [])
+
+
+def straight_east(length_m: float = 1_000) -> list:
+    return [destination_point(DOWNTOWN, 90, d) for d in range(0, int(length_m) + 1, 50)]
+
+
+def test_a_route_drives_through_a_closure_on_its_road():
+    route = straight_east()
+    closure = RoadEvent("wi511", "closed", (route[6], route[12]))
+    assert count_on_route(route, [closure]) == (1, 0)
+
+
+def test_a_closure_the_other_way_or_across_the_road_does_not_count():
+    route = straight_east()
+    westbound = RoadEvent("wi511", "lanes", (route[12], route[6]), direction=270.0)
+    middle = route[10]
+    cross_street = RoadEvent("wi511", "closed", (destination_point(middle, 0, 150), destination_point(middle, 180, 150)))
+    assert count_on_route(route, [westbound, cross_street]) == (0, 0)
+
+
+def test_a_lane_closure_at_a_spot_on_the_route_counts():
+    route = straight_east()
+    assert count_on_route(route, [RoadEvent("wi511", "lanes", (route[5],))]) == (0, 1)
+
+
+# ---- WZDx
+
+
+def work_zone(impact, *, lanes=(), event_type="work-zone", direction="westbound", start=-3600, end=3600, geometry=None):
+    """A WZDx 4.2 feature shaped like Wisconsin's feed, active from NOW + start to NOW + end (seconds)."""
+    line = geometry or {"type": "LineString", "coordinates": [[-87.95, 43.033], [-87.96, 43.033], [-87.97, 43.033]]}
+    when = lambda offset: datetime.fromtimestamp(NOW + offset, timezone.utc).isoformat()  # noqa: E731
+    return {
+        "type": "Feature",
+        "geometry": line,
+        "properties": {
+            "core_details": {
+                "event_type": event_type,
+                "road_names": ["I-94 WB"],
+                "direction": direction,
+                "description": f"Mainline lanes on I-94 WB: {impact}",
+            },
+            "start_date": when(start),
+            "end_date": when(end),
+            "vehicle_impact": impact,
+            "lanes": [{"order": n, "type": kind, "status": status} for n, (kind, status) in enumerate(lanes, 1)],
+        },
+    }
+
+
+class WzdxServer:
+    """MockTransport handler serving a WZDx feed; set status to make it fail."""
+
+    def __init__(self, features) -> None:
+        self.features, self.status, self.requests = features, 200, []
+
+    def __call__(self, request: httpx.Request) -> httpx.Response:
+        self.requests.append(request)
+        feed = {"feed_info": {"version": "4.2"}, "features": self.features, "type": "FeatureCollection"}
+        return httpx.Response(self.status, json=feed)
+
+
+def wzdx_feed(features):
+    server, clock = WzdxServer(features), Clock()
+    http = httpx.Client(transport=httpx.MockTransport(server))
+    feed = WzdxFeed(http, url="https://511wi.gov/api/wzdx", clock=clock, now=lambda: datetime.fromtimestamp(NOW, timezone.utc))
+    return feed, server, clock
+
+
+def test_wzdx_work_zones_become_closures_and_lane_closures():
+    two_ends = {"type": "MultiPoint", "coordinates": [[-87.95, 43.04], [-87.97, 43.04]]}
+    features = [
+        work_zone("all-lanes-closed"),
+        work_zone("some-lanes-closed", lanes=[("shoulder", "closed"), ("general", "closed"), ("general", "open")]),
+        work_zone("some-lanes-closed", lanes=[("shoulder", "closed"), ("general", "open")]),  # shoulder only
+        work_zone("flagging", direction="unknown", geometry=two_ends),
+        work_zone(None, event_type="detour"),  # a suggested detour, not a closure
+        work_zone("some-lanes-closed", start=3600),  # starts later
+    ]
+    feed, server, _ = wzdx_feed(features)
+    closed, lanes, flagging = feed.events(METRO)
+    assert (closed.kind, closed.direction, closed.category, len(closed.path)) == ("closed", 270.0, "roadwork", 3)
+    assert closed.path[0] == pytest.approx((43.033, -87.95))  # GeoJSON's [lng, lat] read the right way round
+    assert lanes.kind == "lanes" and lanes.description.startswith("Mainline lanes on I-94 WB")
+    assert (flagging.kind, flagging.direction, len(flagging.path)) == ("lanes", None, 2)
+    assert len(server.requests) == 1
+
+
+def test_wzdx_keeps_its_last_copy_for_a_while_when_the_feed_fails():
+    feed, server, clock = wzdx_feed([work_zone("all-lanes-closed")])
+    assert len(feed.events(METRO)) == 1
+    server.status, clock.now = 503, 600  # time to refresh, and the feed fails
+    assert len(feed.events(METRO)) == 1  # the copy from 10 minutes ago
+    clock.now = 4000  # over an hour old: no longer trusted
+    with pytest.raises(EventSourceError, match="503"):
+        feed.events(METRO)
+
+
+def test_wzdx_can_read_a_saved_copy_of_the_feed(tmp_path):
+    saved = tmp_path / "wzdx.json"
+    saved.write_text(json.dumps({"features": [work_zone("all-lanes-closed")]}), encoding="utf-8")
+    feed = WzdxFeed(httpx.Client(), file=saved, now=lambda: datetime.fromtimestamp(NOW, timezone.utc))
+    assert [event.kind for event in feed.events(METRO)] == ["closed"]
+
+
+def test_work_zones_and_511_together_without_counting_a_work_zone_twice():
+    work = RoadEvent("wzdx", "lanes", (DOWNTOWN,), category="roadwork")
+    same_work_from_511 = RoadEvent("wi511", "lanes", (DOWNTOWN,), category="roadwork")
+    crash = RoadEvent("wi511", "lanes", (DOWNTOWN,), category="incident")
+    report = collect(
+        ["wzdx+wi511", "google"],
+        METRO,
+        wzdx=FixedSource([work]),
+        wi511=FixedSource([same_work_from_511, crash]),
+        apify=None,
+        google_ready=True,
+    )
+    assert (report.source, report.events, report.google) == ("wzdx+wi511", [work, crash], False)
+
+    # Without a 511 key the group still answers with work zones alone.
+    report = collect(["wzdx+wi511", "google"], METRO, wzdx=FixedSource([work]), wi511=None, apify=None, google_ready=True)
+    assert (report.source, report.events, report.skipped) == ("wzdx", [work], ["wi511"])
+
+
+@pytest.mark.parametrize(
+    ("description", "road", "ramp_road"),
+    [
+        ("Ramp Full Closure on I-94 EB at OFF RAMP TO HAWLEY RD. Detour: EB I-94", "off-ramp", "hawley"),
+        ("Ramp Full Closure on I-94 EB at ON RAMP FROM S 68TH ST. Detour: EB W.", "on-ramp", "68th"),
+        ("Ramp Full Closure on I-894 EB at OFF RAMP TO COUNTY ES. Detour: Use I-41", "off-ramp", "county es"),
+        ("Mainline Left Lane Closed on I-94 WB from 35TH ST to 27TH ST", "mainline", ""),
+        ("Local Road Full Closure on S. 16th Street NB from Viaduct to ramp", "any", ""),
+    ],
+)
+def test_descriptions_say_which_roads_an_event_is_on(description, road, ramp_road):
+    assert (_road_kind(description), _ramp_road(description)) == (road, ramp_road)

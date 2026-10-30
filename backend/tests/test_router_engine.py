@@ -62,6 +62,13 @@ def test_pool_has_google_plus_priced_own_routes(router):
     assert plan.winner.id.startswith("own-")  # the synthetic Google route is far longer
 
 
+def test_a_moving_cars_heading_reaches_every_google_request(router):
+    google = FakeGoogle(router)
+    expect_designs(google, router, PRESETS["calm"])
+    build_router_candidates(google, router, ORIGIN, DESTINATION, [PRESETS["calm"]], heading=90)
+    assert len(google.requests) > 1 and all(request.origin_heading == 90 for request in google.requests)
+
+
 def test_without_pricing_own_routes_keep_estimates_and_cost_nothing_extra(router):
     google = FakeGoogle(router)
     pool = build_router_candidates(google, router, ORIGIN, DESTINATION, [PRESETS["calm"]], price=False)

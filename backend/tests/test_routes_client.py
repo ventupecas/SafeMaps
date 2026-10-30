@@ -55,6 +55,12 @@ def test_via_and_avoid_highways_body():
     assert body["routingPreference"] == "TRAFFIC_AWARE"
 
 
+def test_a_moving_cars_heading_goes_on_the_origin():
+    body = RouteRequest(ORIGIN, DESTINATION, origin_heading=270, traffic_aware=True).to_body()
+    assert body["origin"]["location"]["heading"] == 270
+    assert "heading" not in body["destination"]["location"]
+
+
 def test_repeat_request_is_served_from_cache_without_storing_the_key(tmp_path):
     handler = Recorder()
     client = make_client(tmp_path, handler)
@@ -104,3 +110,14 @@ def test_network_failure_becomes_routes_api_error(tmp_path):
 def test_no_route_found_returns_empty_list(tmp_path):
     client = make_client(tmp_path, Recorder(payload={}))
     assert client.compute_routes(RouteRequest(ORIGIN, DESTINATION)) == []
+
+
+def test_traffic_on_polyline_asks_for_the_speeds_and_needs_live_traffic(tmp_path):
+    handler = Recorder()
+    request = RouteRequest(ORIGIN, DESTINATION, traffic_aware=True, traffic_on_polyline=True)
+    make_client(tmp_path, handler).compute_routes(request)
+    (sent,) = handler.requests
+    assert json.loads(sent.content)["extraComputations"] == ["TRAFFIC_ON_POLYLINE"]
+    assert sent.headers["X-Goog-FieldMask"].endswith(",routes.travelAdvisory.speedReadingIntervals")
+    with pytest.raises(ValueError, match="traffic_aware"):
+        RouteRequest(ORIGIN, DESTINATION, traffic_on_polyline=True)

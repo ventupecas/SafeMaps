@@ -42,7 +42,7 @@ from app.engine import (
 )
 from app.features import TurnContext
 from app.models import CandidateRoute, LatLng, RoutePlan
-from app.profiles import PRESETS, get_profile
+from app.profiles import DEFAULT_PROFILE, PRESETS, get_profile
 from app.roadgraph import RoadGraph
 from app.router import Router
 from app.routes_client import RoutesApiError, RoutesClient
@@ -65,10 +65,13 @@ def main(argv: Sequence[str] | None = None) -> int:
         if args.cache_mode:
             settings = replace(settings, cache_mode=CacheMode(args.cache_mode))
         profile = get_profile(args.profile, _parse_overrides(args.overrides))
-        context = make_turn_context(settings, load_hotspots(settings), args.country)
-        graph = None if args.no_router else load_graph(settings)
+        # The graph judges junctions on every route, even with --no-router.
+        graph = load_graph(settings)
+        context = make_turn_context(settings, load_hotspots(settings), args.country, graph)
     except (ValueError, OSError) as exc:
         return _fail(exc)
+    if args.no_router:
+        graph = None
 
     profiles = list(PRESETS.values()) if args.all_profiles else [profile]
     notes: list[str] = []
@@ -84,9 +87,11 @@ def main(argv: Sequence[str] | None = None) -> int:
                 candidates = build_candidates(client, args.origin, args.destination, options, context)
         except (RoutesApiError, CacheMiss, NoRouteFoundError) as exc:
             return _fail(exc)
+        cap = f" of {settings.daily_limit}" if settings.daily_limit else ""
         usage = (
             f"Google API: {client.live_requests} live request(s), "
-            f"{client.cache.hits} served from cache ({settings.cache_mode} mode)"
+            f"{client.cache.hits} served from cache ({settings.cache_mode} mode); "
+            f"{client.usage.used_today()}{cap} used today"
         )
 
     plans = [plan_from_candidates(candidates, each) for each in profiles]
@@ -119,7 +124,9 @@ def _parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
     parser.add_argument("--from", dest="origin", type=coordinate, required=True, metavar="LAT,LNG")
     parser.add_argument("--to", dest="destination", type=coordinate, required=True, metavar="LAT,LNG")
     which = parser.add_mutually_exclusive_group()
-    which.add_argument("--profile", choices=PRESETS, default="fastest", help="preset to rank with (default: fastest)")
+    which.add_argument(
+        "--profile", choices=PRESETS, default=DEFAULT_PROFILE, help=f"preset to rank with (default: {DEFAULT_PROFILE})"
+    )
     which.add_argument("--all-profiles", action="store_true", help="show which route every preset picks")
     parser.add_argument(
         "--set",
@@ -168,9 +175,12 @@ def _fail(exc: Exception) -> int:
     return 1
 
 
-FEATURE_HEADER = f"{'km':>6} {'min':>6} {'hwy':>6} {'delay':>6} {'turns':>5} {'x-busy':>6} {'x-hot':>5} {'wind':>6}"
+FEATURE_HEADER = (
+    f"{'km':>6} {'min':>6} {'fuel L':>6} {'hwy':>6} {'delay':>6} {'turns':>5} {'x-busy':>6} {'x-hot':>5} {'wind':>6}"
+)
 LEGEND = (
-    "(G) = Google's default. hwy, delay and wind are minutes; cost is perceived minutes.\n"
+    "(G) = Google's default. hwy, delay and wind are minutes; fuel is a rough estimate in liters;\n"
+    "cost is perceived minutes.\n"
     "x-busy / x-hot = turns across oncoming traffic at busy / crash-prone junctions.\n"
     "own-N = our router's design; [NN%] = how much of Google's priced version follows it;\n"
     "~ = estimated time without live traffic."
@@ -180,7 +190,7 @@ LEGEND = (
 def _feature_cells(route: CandidateRoute) -> str:
     f = route.features
     return (
-        f"{f.distance_km:6.1f} {f.duration_min:6.1f} {f.highway_min:6.1f} {f.traffic_delay_min:6.1f} "
+        f"{f.distance_km:6.1f} {f.duration_min:6.1f} {f.fuel_l:6.2f} {f.highway_min:6.1f} {f.traffic_delay_min:6.1f} "
         f"{f.maneuver_count:5d} {f.busy_crossing_turns:6d} {f.hotspot_crossing_turns:5d} {f.winding_min:6.1f}"
     )
 
@@ -218,7 +228,10 @@ def _describe_context(context: TurnContext, country: str | None) -> str:
 
 def _print_plan(plan: RoutePlan) -> None:
     custom = plan.profile.model_dump(exclude_defaults=True, exclude={"name"})
-    weights = ", ".join(f"{key}={value:g}" for key, value in custom.items()) or "default weights"
+    weights = (
+        ", ".join(f"{key}={value:g}" if isinstance(value, float) else f"{key}={value}" for key, value in custom.items())
+        or "default weights"
+    )
     print(f"Profile: {plan.profile.name} ({weights})\n")
 
     width = max(len(_label(route)) for route in plan.candidates)
@@ -232,6 +245,14 @@ def _print_plan(plan: RoutePlan) -> None:
         )
 
     print(f"\n{LEGEND}")
+    if plan.profile.ranking == "priority":
+        print("\nRanked by safety first, then fuel, then time:")
+        for route in plan.candidates:
+            print(f"  {route.id:<{width}}  {route.reason}")
+        print()
+    if plan.hidden:
+        copies = ", ".join(f"{hidden} (follows {better})" for hidden, better in plan.hidden.items())
+        print(f"Left out as near-copies of better routes: {copies}\n")
     default = next((route.id for route in plan.candidates if route.is_google_default), None)
     if default is None:
         print(f"Winner: {plan.winner.id} (no Google route to compare against).")

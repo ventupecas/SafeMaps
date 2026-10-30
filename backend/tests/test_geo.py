@@ -1,8 +1,10 @@
 import pytest
 
 from app.geo import (
+    angle_between_deg,
     decode_polyline,
     destination_point,
+    distance_to_path_m,
     encode_polyline,
     haversine_m,
     initial_bearing_deg,
@@ -62,3 +64,19 @@ def test_heading_change_ignores_tiny_segments():
     jitter = destination_point(a, 90, 2)  # 2 m sideways: noise, not a turn
     b = destination_point(a, 0, 100)
     assert total_heading_change_deg([a, jitter, b]) == pytest.approx(0, abs=0.5)
+
+
+def test_angle_between_bearings_wraps_around_north():
+    assert angle_between_deg(350, 10) == pytest.approx(20)
+    assert angle_between_deg(90, 270) == pytest.approx(180)
+    assert angle_between_deg(45, 45) == 0
+
+
+def test_distance_to_path_and_its_bearing_there():
+    west, east = (43.0, -88.0), destination_point((43.0, -88.0), 90, 1_000)
+    beside = destination_point(midpoint(west, east), 0, 100)  # 100 m north of the middle
+    distance, bearing = distance_to_path_m(beside, [west, east])
+    assert distance == pytest.approx(100, abs=0.5)
+    assert bearing == pytest.approx(90, abs=0.5)
+    past_the_end = destination_point(east, 90, 50)
+    assert distance_to_path_m(past_the_end, [west, east])[0] == pytest.approx(50, abs=0.5)

@@ -79,6 +79,38 @@ def initial_bearing_deg(a: Point, b: Point) -> float:
     return (math.degrees(math.atan2(x, y)) + 360) % 360
 
 
+def angle_between_deg(a: float, b: float) -> float:
+    """Smallest difference between two compass bearings, 0-180 degrees."""
+    diff = abs(a - b) % 360
+    return min(diff, 360 - diff)
+
+
+def distance_to_path_m(point: Point, path: Sequence[Point]) -> tuple[float, float]:
+    """Distance from point to the nearest spot on path, and the path's bearing there.
+
+    Uses a flat projection around point: accurate to well under a meter at the
+    few hundred meters this is used for.
+    """
+    if len(path) < 2:
+        raise ValueError("A path needs at least two points")
+    m_per_deg = math.radians(1) * EARTH_RADIUS_M
+    m_per_deg_lng = m_per_deg * math.cos(math.radians(point[0]))
+
+    def xy(p: Point) -> tuple[float, float]:
+        return (p[1] - point[1]) * m_per_deg_lng, (p[0] - point[0]) * m_per_deg
+
+    best_m, best_bearing = math.inf, 0.0
+    for a, b in pairwise(path):
+        (ax, ay), (bx, by) = xy(a), xy(b)
+        dx, dy = bx - ax, by - ay
+        length_sq = dx * dx + dy * dy
+        t = 0.0 if length_sq == 0 else max(0.0, min(1.0, -(ax * dx + ay * dy) / length_sq))
+        distance = math.hypot(ax + t * dx, ay + t * dy)
+        if distance < best_m and length_sq > 0:
+            best_m, best_bearing = distance, initial_bearing_deg(a, b)
+    return best_m, best_bearing
+
+
 def destination_point(origin: Point, bearing_deg: float, distance_m: float) -> Point:
     """The point reached by travelling distance_m from origin along bearing_deg."""
     lat1, lng1 = map(math.radians, origin)

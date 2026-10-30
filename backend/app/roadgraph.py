@@ -12,6 +12,7 @@ gzipped JSON and loaded at startup.
 from __future__ import annotations
 
 import gzip
+import heapq
 import json
 import logging
 import math
@@ -19,14 +20,25 @@ import os
 import re
 import tempfile
 from collections import Counter, defaultdict
-from collections.abc import Iterable, Mapping
-from dataclasses import dataclass, field
+from collections.abc import Iterable, Iterator, Mapping, Sequence
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
 from app.features import is_winding
-from app.geo import Point, decode_polyline, encode_polyline, haversine_m, initial_bearing_deg, path_length_m
+from app.geo import (
+    Point,
+    angle_between_deg,
+    decode_polyline,
+    densify,
+    distance_to_path_m,
+    encode_polyline,
+    haversine_m,
+    initial_bearing_deg,
+    path_length_m,
+)
 from app.overpass import ATTRIBUTION, DRIVABLE_HIGHWAYS, BBox
+from app.road_events import EVENT_MATCH_DEG, EVENT_MATCH_M, RAMP_KINDS, RoadEvent, carries, road_words
 
 logger = logging.getLogger(__name__)
 
@@ -58,6 +70,47 @@ SIGNAL_DELAY_S = 12.0
 
 # Classes a trip can't start or end on: you can't park on a freeway or a ramp.
 NO_SNAP_CLASSES = frozenset({"motorway", "motorway_link", "trunk_link"})
+# A junction is busy when one of these roads meets there: arterial or bigger.
+BUSY_CLASSES = frozenset({"motorway", "trunk", "primary", "secondary", "tertiary"})
+# Where only these meet, the junction is an interchange: no oncoming traffic to cross.
+GRADE_SEPARATED_CLASSES = frozenset({"motorway", "motorway_link", "trunk", "trunk_link"})
+# A one-way road with a same-named carriageway running the other way within
+# this distance is half of a divided road, not a one-way street: its oncoming
+# traffic is just across the median.
+DIVIDED_ROAD_M = 50.0
+DIVIDED_ROAD_MIN_DEG = 150.0
+# How far a turn reported by Google may sit from the OSM junction it happens at.
+JUNCTION_MATCH_M = 30.0
+# How close a route must pass a traffic signal to count it.
+SIGNAL_MATCH_M = 20.0
+# How close a route given as points must pass both junctions of a segment to follow it.
+ALONG_MATCH_M = 20.0
+# A moving car is on a segment that passes within VEHICLE_MATCH_M of its
+# position (GPS error) and runs within VEHICLE_MATCH_DEG of its heading there.
+VEHICLE_MATCH_M = 40.0
+VEHICLE_MATCH_DEG = 60.0
+# Segments end at junctions, which can be far apart on a freeway, so the
+# search for a car's segment widens until one passes this close.
+_VEHICLE_SEARCH_M = (300.0, 1_000.0, 2_500.0)
+_VEHICLE_SURE_M = 15.0
+# A road event's stretch is matched to the road it lies on: each end snaps to
+# the segment there, running the event's way, and the stretch is the shortest
+# drive between them, if that's at most STRETCH_DETOUR times the straight
+# distance plus STRETCH_SLACK_M (roads curve; a much longer drive is another
+# road). A single point matches the nearest road within EVENT_MATCH_M.
+STRETCH_DETOUR = 1.5
+STRETCH_SLACK_M = 500.0
+SAME_ROAD_M = 5.0  # roads this much farther from a point than the nearest one are other roads
+# A ramp closure's ramp leaves or joins the freeway within RAMP_NAMED_SEARCH_M of
+# its position when the ramp's street is named and matched, else RAMP_SEARCH_M.
+RAMP_SEARCH_M = 300.0
+RAMP_NAMED_SEARCH_M = 1_500.0
+FREEWAY_CLASSES = frozenset({"motorway", "trunk"})  # the roads ramps leave and join
+_EDGE_CELL_DEG = 0.002  # ~220 m; segments are filed in every cell along their chord
+_EDGE_SAMPLE_M = 100.0
+_SIGNAL_CELL_DEG = 0.0005  # ~55 m: small cells keep the per-point lookup cheap
+_FINE_CELL_DEG = 0.0005  # for node lookups within a few dozen meters
+_FINE_LOOKUP_M = 100.0
 
 _NO_ACCESS = frozenset({"no", "private", "agricultural", "forestry", "emergency", "delivery"})
 _EXCLUDED_SERVICE = frozenset({"parking_aisle", "parking", "driveway", "drive-through", "emergency_access"})
@@ -92,8 +145,14 @@ class RoadGraph:
 
     time_s: list[float] = field(init=False, repr=False)
     out_edges: list[list[int]] = field(init=False, repr=False)
+    in_edges: list[list[int]] = field(init=False, repr=False)
     max_speed_kmh: float = field(init=False)
-    _snap_cells: dict[tuple[int, int], list[int]] | None = field(init=False, default=None, repr=False)
+    _cell_indexes: dict[tuple[bool, float], dict[tuple[int, int], list[int]]] = field(
+        init=False, default_factory=dict, repr=False
+    )
+    _node_kinds: dict[int, str] = field(init=False, default_factory=dict, repr=False)
+    _signal_cells: dict[tuple[int, int], list[int]] | None = field(init=False, default=None, repr=False)
+    _edge_cells: dict[tuple[int, int], list[int]] | None = field(init=False, default=None, repr=False)
 
     def __post_init__(self) -> None:
         self.time_s = [
@@ -101,8 +160,10 @@ class RoadGraph:
             for length, speed, signals in zip(self.length_m, self.speed_kmh, self.signals, strict=True)
         ]
         self.out_edges = [[] for _ in self.lat]
-        for edge, node in enumerate(self.edge_from):
-            self.out_edges[node].append(edge)
+        self.in_edges = [[] for _ in self.lat]
+        for edge, (start, end) in enumerate(zip(self.edge_from, self.edge_to, strict=True)):
+            self.out_edges[start].append(edge)
+            self.in_edges[end].append(edge)
         self.max_speed_kmh = max(self.speed_kmh, default=100.0)
 
     @property
@@ -124,33 +185,352 @@ class RoadGraph:
 
     def nearest_node(self, point: Point, max_distance_m: float = 1_000.0) -> int | None:
         """Closest junction a trip can start or end at, or None if none is within max_distance_m."""
-        cells = self._snap_index()
-        cell_lat, cell_lng = _snap_cell(point)
-        reach_lat = math.ceil(max_distance_m / (_M_PER_DEG_LAT * _SNAP_CELL_DEG))
-        lng_cell_m = _M_PER_DEG_LAT * _SNAP_CELL_DEG * max(math.cos(math.radians(point[0])), 0.01)
-        reach_lng = math.ceil(max_distance_m / lng_cell_m)
+        return self._nearest(point, max_distance_m, snappable_only=True)
 
+    def node_kind(self, node: int) -> str:
+        """What meets at node: 'interchange' or 'one-way' (no oncoming traffic to cross), else 'busy' or 'quiet'."""
+        kind = self._node_kinds.get(node)
+        if kind is None:
+            edges = self.out_edges[node] + self.in_edges[node]
+            kind = classify_junction(self.class_name(edge) for edge in edges)
+            if (
+                kind != "interchange"
+                and edges
+                and all(self.oneway[edge] for edge in edges)
+                and not self._on_divided_road(node)
+            ):
+                kind = "one-way"  # e.g. two one-way streets crossing downtown
+            self._node_kinds[node] = kind
+        return kind
+
+    def _on_divided_road(self, node: int) -> bool:
+        """True when a road through node is one carriageway of a divided road: its name runs the other way close by."""
+        here = self._named_directions(node)
+        if not here:
+            return False
+        point = self.point(node)
+        for other in self._nodes_near(point, DIVIDED_ROAD_M, snappable_only=False):
+            if other == node or haversine_m(point, self.point(other)) > DIVIDED_ROAD_M:
+                continue
+            for name, bearing in self._named_directions(other):
+                if any(
+                    name == mine and angle_between_deg(bearing, my_bearing) >= DIVIDED_ROAD_MIN_DEG
+                    for mine, my_bearing in here
+                ):
+                    return True
+        return False
+
+    def _named_directions(self, node: int) -> list[tuple[int, float]]:
+        """(name, direction of travel) of each named road segment leaving or reaching node."""
+        leaving = [(self.name[edge], self.bearing_start[edge]) for edge in self.out_edges[node] if self.name[edge]]
+        reaching = [(self.name[edge], self.bearing_end[edge]) for edge in self.in_edges[node] if self.name[edge]]
+        return leaving + reaching
+
+    def junction_kind(self, point: Point) -> str | None:
+        """Kind of the junction at point (see node_kind), or None if no junction is that close."""
+        node = self._nearest(point, JUNCTION_MATCH_M, snappable_only=False)
+        return None if node is None else self.node_kind(node)
+
+    def signals_along(self, stretches: Iterable[Sequence[Point]]) -> int:
+        """Distinct traffic signals within SIGNAL_MATCH_M of the given stretches of road.
+
+        A signal sits where the road carrying it ends (its junction), which is
+        where OSM usually tags it. Pass only surface-street stretches: a freeway
+        bridging a signalized street would otherwise pick its signal up.
+        """
+        cells = self._signal_index()
+        reach_lng = 1
+        found: set[int] = set()
+        for stretch in stretches:
+            if not stretch:
+                continue
+            reach_lng = math.ceil(1 / max(math.cos(math.radians(stretch[0][0])), 0.01))
+            for point in densify(stretch, SIGNAL_MATCH_M / 2):
+                ci, cj = _cell(point, _SIGNAL_CELL_DEG)
+                for i in range(ci - 1, ci + 2):
+                    for j in range(cj - reach_lng, cj + reach_lng + 1):
+                        for node in cells.get((i, j), ()):
+                            if node not in found and haversine_m(point, self.point(node)) <= SIGNAL_MATCH_M:
+                                found.add(node)
+        return len(found)
+
+    def _signal_index(self) -> dict[tuple[int, int], list[int]]:
+        if self._signal_cells is None:
+            cells: dict[tuple[int, int], list[int]] = defaultdict(list)
+            for node in {self.edge_to[edge] for edge in range(self.edge_count) if self.signals[edge]}:
+                cells[_cell(self.point(node), _SIGNAL_CELL_DEG)].append(node)
+            self._signal_cells = dict(cells)
+        return self._signal_cells
+
+    def segment_under(self, point: Point, heading: float) -> int | None:
+        """The segment a car at point, driving along heading, is on; None if no segment fits.
+
+        Unlike nearest_node, freeways and ramps count: a moving car may be on one.
+        """
+        candidates = self._segments_under(point, heading)
+        return candidates[0] if candidates else None
+
+    def _segments_under(self, point: Point, heading: float, road: str = "any") -> list[int]:
+        """Segments within VEHICLE_MATCH_M of point running along heading, nearest first: those about as near as the nearest.
+
+        At a junction several touch the point (the one arriving, the ones
+        leaving, a ramp merging), so there's often more than one. road limits
+        them to ramps ("ramp") or to everything else ("mainline").
+        """
+        offsets: dict[int, float] = {}
+        checked: set[int] = set()
+        for radius in _VEHICLE_SEARCH_M:
+            for node in self._nodes_near(point, radius, snappable_only=False):
+                # The car drives toward the end of its segment, so skip junctions behind it.
+                if node in checked or (
+                    haversine_m(point, self.point(node)) > VEHICLE_MATCH_M
+                    and angle_between_deg(initial_bearing_deg(point, self.point(node)), heading) > 90
+                ):
+                    continue
+                checked.add(node)
+                for edge in self.in_edges[node]:
+                    if not self._is_road(edge, road):
+                        continue
+                    offset, bearing = distance_to_path_m(point, self.edge_points(edge))
+                    if offset <= VEHICLE_MATCH_M and angle_between_deg(bearing, heading) <= VEHICLE_MATCH_DEG:
+                        offsets[edge] = offset
+            if offsets and min(offsets.values()) <= _VEHICLE_SURE_M:
+                break  # a wider search could only find roads farther from the car
+        if not offsets:
+            return []
+        nearest = min(offsets.values())
+        return sorted((edge for edge, offset in offsets.items() if offset <= nearest + SAME_ROAD_M), key=offsets.get)
+
+    def _is_road(self, edge: int, road: str) -> bool:
+        """Whether edge is the kind of road an event says it's on (see RoadEvent.road)."""
+        if road == "any":
+            return True
+        return self.class_name(edge).endswith("_link") == (road in RAMP_KINDS)
+
+    def _ramp_near(self, event: RoadEvent) -> int | None:
+        """The ramp a ramp event names: where one leaves (off-ramp) or joins (on-ramp) the freeway.
+
+        Sources place ramp closures on the freeway near the ramp, so this looks
+        for the junction rather than the nearest line: the one whose ramp
+        reaches the street the event names, within RAMP_NAMED_SEARCH_M; else
+        the nearest within RAMP_SEARCH_M. Returns the ramp's segment at that
+        junction: closing it closes the ramp.
+        """
+        point = event.path[len(event.path) // 2]
+        wanted = frozenset(event.ramp_road.split())
+        heading_ok = lambda bearing: event.direction is None or angle_between_deg(bearing, event.direction) <= EVENT_MATCH_DEG  # noqa: E731
+        named: list[tuple[float, int]] = []
+        nearest: list[tuple[float, int]] = []
+        for node in self._nodes_near(point, RAMP_NAMED_SEARCH_M if wanted else RAMP_SEARCH_M, snappable_only=False):
+            distance = haversine_m(point, self.point(node))
+            ramps: list[tuple[int, bool]] = []  # (ramp segment, leaves the freeway)
+            if event.road in ("off-ramp", "ramp") and any(
+                heading_ok(self.bearing_end[e]) for e in self.in_edges[node] if self.class_name(e) in FREEWAY_CLASSES
+            ):
+                ramps += [(e, True) for e in self.out_edges[node] if self._is_link(e)]
+            if event.road in ("on-ramp", "ramp") and any(
+                heading_ok(self.bearing_start[e]) for e in self.out_edges[node] if self.class_name(e) in FREEWAY_CLASSES
+            ):
+                ramps += [(e, False) for e in self.in_edges[node] if self._is_link(e)]
+            for ramp, leaving in ramps:
+                if wanted and wanted <= self._ramp_street_words(ramp, leaving):
+                    named.append((distance, ramp))
+                elif distance <= RAMP_SEARCH_M:
+                    nearest.append((distance, ramp))
+        best = min(named or nearest, default=None)
+        return best[1] if best else None
+
+    def _ramp_street_words(self, ramp: int, leaving: bool) -> frozenset[str]:
+        """Words naming the streets at the far end of a ramp: followed forward from an exit, back from an entrance."""
+        words: set[str] = set()
+        seen: set[int] = set()
+        frontier = [ramp]
+        for _ in range(8):  # ramps run a few segments at most
+            following: list[int] = []
+            for edge in frontier:
+                if edge in seen:
+                    continue
+                seen.add(edge)
+                node = self.edge_to[edge] if leaving else self.edge_from[edge]
+                for other in self.out_edges[node] + self.in_edges[node]:
+                    if not self._is_link(other) and self.class_name(other) not in FREEWAY_CLASSES:
+                        words |= road_words(self.names[self.name[other]])
+                following += self.out_edges[node] if leaving else self.in_edges[node]
+            frontier = [edge for edge in following if self._is_link(edge)]
+        return frozenset(words)
+
+    def _is_link(self, edge: int) -> bool:
+        return self.class_name(edge).endswith("_link")
+
+    def edges_along(self, points: Sequence[Point], within_m: float = ALONG_MATCH_M) -> set[int]:
+        """Segments a route given as points follows: both of their junctions lie on it."""
+        on_route: set[int] = set()
+        for point in densify(points, within_m):
+            for node in self._nodes_near(point, within_m, snappable_only=False):
+                if node not in on_route and haversine_m(point, self.point(node)) <= within_m:
+                    on_route.add(node)
+        return {edge for node in on_route for edge in self.out_edges[node] if self.edge_to[edge] in on_route}
+
+    def event_edges(self, event: RoadEvent) -> set[int]:
+        """The segments a road event (a closure, a jam) lies on, in the directions of traffic it affects."""
+        if event.road in RAMP_KINDS and not event.along:
+            ramp = self._ramp_near(event)
+            return {ramp} if ramp is not None else set()
+        if len(event.path) == 1:
+            return self._roads_at(event.path[0], event.direction, event.road)
+        return {edge for stretch in self._stretches(event) for edge in stretch}
+
+    def snap_events(self, events: Iterable[RoadEvent]) -> list[RoadEvent]:
+        """Road events redrawn along the roads they lie on, one per direction of traffic.
+
+        Sources often give only the two ends of a stretch; scoring and drawing
+        need the road between them. Points, and lines no road matches, stay as
+        they are, except ramp events: where no ramp matches, they're dropped,
+        since their line lies on the freeway, which stays open.
+        """
+        snapped = []
+        for event in events:
+            if event.road in RAMP_KINDS and not event.along:
+                ramp = self._ramp_near(event)
+                if ramp is None:
+                    logger.info("No ramp found for road event %r; left out", event.description[:80])
+                else:
+                    snapped.append(replace(event, path=tuple(self.edge_points(ramp)), direction=None, along=True))
+                continue
+            stretches = self._stretches(event) if len(event.path) > 1 else []
+            if not stretches:
+                snapped.append(event)
+            for stretch in stretches:
+                points: list[Point] = []
+                for edge in stretch:
+                    segment = self.edge_points(edge)
+                    points.extend(segment if not points else segment[1:])
+                snapped.append(replace(event, path=tuple(points), direction=None, along=True))
+        return snapped
+
+    def _stretches(self, event: RoadEvent) -> list[list[int]]:
+        """The drive along the road from the event's first point to its last, and back if both ways are affected."""
+        path = list(event.path)
+        forward = initial_bearing_deg(path[0], path[-1])
+        if event.along or (event.direction is not None and angle_between_deg(forward, event.direction) <= 90):
+            ways = [path]
+        elif event.direction is not None:
+            ways = [path[::-1]]
+        else:
+            ways = [path, path[::-1]]
+        return [stretch for way in ways if (stretch := self._stretch(way, event.road))]
+
+    def _stretch(self, path: Sequence[Point], road: str = "any") -> list[int] | None:
+        """The shortest drive from a segment at the path's first point to one at its last, along their direction."""
+        starts = self._segments_under(path[0], initial_bearing_deg(path[0], path[1]), road)
+        ends = self._segments_under(path[-1], initial_bearing_deg(path[-2], path[-1]), road)
+        both = [edge for edge in starts if edge in ends]
+        if both:
+            return [both[0]]
+        # A segment that only touches the stretch's first point at its end (or
+        # its last point at its start) is the road before (or after) it, not part of it.
+        targets: dict[int, int | None] = {}
+        for edge in ends:
+            touches = haversine_m(path[-1], self.point(self.edge_from[edge])) <= SAME_ROAD_M
+            targets.setdefault(self.edge_from[edge], None if touches else edge)
+        limit = haversine_m(path[0], path[-1]) * STRETCH_DETOUR + STRETCH_SLACK_M
+        best: dict[int, float] = {}
+        first_edge: dict[int, int | None] = {}  # where the drive starts: a node, and the segment that reaches it
+        for edge in starts:
+            node = self.edge_to[edge]
+            touches = haversine_m(path[0], self.point(node)) <= SAME_ROAD_M
+            if node not in best:
+                best[node], first_edge[node] = 0.0, None if touches else edge
+        came_by: dict[int, int] = {}
+        heap = [(0.0, node) for node in best]
+        while heap:
+            distance, node = heapq.heappop(heap)
+            if node in targets:
+                middle: list[int] = []
+                end = targets[node]
+                while node in came_by:
+                    middle.append(came_by[node])
+                    node = self.edge_from[came_by[node]]
+                stretch = [edge for edge in (first_edge[node], *middle[::-1], end) if edge is not None]
+                return stretch or None
+            if distance > best[node]:
+                continue
+            for edge in self.out_edges[node]:
+                reached = distance + self.length_m[edge]
+                nxt = self.edge_to[edge]
+                if reached <= limit and reached < best.get(nxt, math.inf):
+                    best[nxt] = reached
+                    came_by[nxt] = edge
+                    heapq.heappush(heap, (reached, nxt))
+        return None  # only a much longer drive connects the ends: not one road
+
+    def _roads_at(self, point: Point, direction: float | None, road: str = "any") -> set[int]:
+        """Segments of the road nearest point (both ways of it unless direction says), within EVENT_MATCH_M."""
+        cells = self._edge_index()
+        ci, cj = _cell(point, _EDGE_CELL_DEG)
+        offsets: dict[int, float] = {}
+        for edge in {e for i in (ci - 1, ci, ci + 1) for j in (cj - 1, cj, cj + 1) for e in cells.get((i, j), ())}:
+            if not self._is_road(edge, road):
+                continue
+            chord = (self.point(self.edge_from[edge]), self.point(self.edge_to[edge]))
+            if distance_to_path_m(point, chord)[0] > EVENT_MATCH_M + min(self.length_m[edge] / 2, _EDGE_SAMPLE_M):
+                continue  # far even allowing for a curve: skip decoding its shape
+            offset, bearing = distance_to_path_m(point, self.edge_points(edge))
+            if offset <= EVENT_MATCH_M and carries(bearing, None, direction, False):
+                offsets[edge] = offset
+        nearest = min(offsets.values(), default=0.0)
+        return {edge for edge, offset in offsets.items() if offset <= nearest + SAME_ROAD_M}
+
+    def _edge_index(self) -> dict[tuple[int, int], list[int]]:
+        if self._edge_cells is None:
+            cells: dict[tuple[int, int], list[int]] = defaultdict(list)
+            for edge in range(self.edge_count):
+                (lat1, lng1), (lat2, lng2) = self.point(self.edge_from[edge]), self.point(self.edge_to[edge])
+                steps = max(1, math.ceil(self.length_m[edge] / _EDGE_SAMPLE_M))
+                filed = {_cell((lat1 + (lat2 - lat1) * k / steps, lng1 + (lng2 - lng1) * k / steps), _EDGE_CELL_DEG)
+                         for k in range(steps + 1)}  # fmt: skip
+                for cell in filed:
+                    cells[cell].append(edge)
+            self._edge_cells = dict(cells)
+        return self._edge_cells
+
+    def _nearest(self, point: Point, max_distance_m: float, *, snappable_only: bool) -> int | None:
         best, best_m = None, max_distance_m
-        for i in range(cell_lat - reach_lat, cell_lat + reach_lat + 1):
-            for j in range(cell_lng - reach_lng, cell_lng + reach_lng + 1):
-                for node in cells.get((i, j), ()):
-                    distance = haversine_m(point, self.point(node))
-                    if distance <= best_m:
-                        best, best_m = node, distance
+        for node in self._nodes_near(point, max_distance_m, snappable_only=snappable_only):
+            distance = haversine_m(point, self.point(node))
+            if distance <= best_m:
+                best, best_m = node, distance
         return best
 
-    def _snap_index(self) -> dict[tuple[int, int], list[int]]:
-        if self._snap_cells is None:
-            snappable = set()
-            for edge in range(self.edge_count):
-                if self.class_name(edge) not in NO_SNAP_CLASSES:
-                    snappable.add(self.edge_from[edge])
-                    snappable.add(self.edge_to[edge])
+    def _nodes_near(self, point: Point, distance_m: float, *, snappable_only: bool) -> Iterator[int]:
+        """Junctions in the grid cells within distance_m of point: a superset of those within distance_m."""
+        cell_deg = _FINE_CELL_DEG if distance_m <= _FINE_LOOKUP_M else _SNAP_CELL_DEG
+        cells = self._cell_index(snappable_only, cell_deg)
+        cell_lat, cell_lng = _cell(point, cell_deg)
+        reach_lat = math.ceil(distance_m / (_M_PER_DEG_LAT * cell_deg))
+        lng_cell_m = _M_PER_DEG_LAT * cell_deg * max(math.cos(math.radians(point[0])), 0.01)
+        reach_lng = math.ceil(distance_m / lng_cell_m)
+        for i in range(cell_lat - reach_lat, cell_lat + reach_lat + 1):
+            for j in range(cell_lng - reach_lng, cell_lng + reach_lng + 1):
+                yield from cells.get((i, j), ())
+
+    def _cell_index(self, snappable_only: bool, cell_deg: float) -> dict[tuple[int, int], list[int]]:
+        index = self._cell_indexes.get((snappable_only, cell_deg))
+        if index is None:
+            if snappable_only:
+                nodes: Iterable[int] = {
+                    node
+                    for edge in range(self.edge_count)
+                    if self.class_name(edge) not in NO_SNAP_CLASSES
+                    for node in (self.edge_from[edge], self.edge_to[edge])
+                }
+            else:
+                nodes = range(self.node_count)
             cells: dict[tuple[int, int], list[int]] = defaultdict(list)
-            for node in snappable:
-                cells[_snap_cell(self.point(node))].append(node)
-            self._snap_cells = dict(cells)
-        return self._snap_cells
+            for node in nodes:
+                cells[_cell(self.point(node), cell_deg)].append(node)
+            index = self._cell_indexes[snappable_only, cell_deg] = dict(cells)
+        return index
 
     def save(self, path: Path) -> None:
         data = {
@@ -223,6 +603,15 @@ class RoadGraph:
             banned={edge: frozenset(others) for edge, others in banned.items()},
             stats=data.get("stats", {}),
         )
+
+
+def classify_junction(classes: Iterable[str]) -> str:
+    """'interchange' where only freeways and their ramps meet, 'busy' where an arterial or bigger meets, else 'quiet'."""
+    classes = set(classes)
+    # Two trunk roads alone may cross at grade, so a freeway or a ramp must be there too.
+    if classes and classes <= GRADE_SEPARATED_CLASSES and classes & {"motorway", "motorway_link", "trunk_link"}:
+        return "interchange"
+    return "busy" if classes & BUSY_CLASSES else "quiet"
 
 
 def build_graph(elements: Iterable[Mapping[str, Any]], *, area: str = "", bbox: BBox | None = None) -> RoadGraph:
@@ -561,5 +950,5 @@ def _largest_strongly_connected(count: int, sources: list[int], targets: list[in
     return {node for node in range(count) if component[node] == largest}
 
 
-def _snap_cell(point: Point) -> tuple[int, int]:
-    return math.floor(point[0] / _SNAP_CELL_DEG), math.floor(point[1] / _SNAP_CELL_DEG)
+def _cell(point: Point, size_deg: float) -> tuple[int, int]:
+    return math.floor(point[0] / size_deg), math.floor(point[1] / size_deg)

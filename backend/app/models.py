@@ -7,6 +7,8 @@ clean, validated values.
 
 from __future__ import annotations
 
+from typing import Literal
+
 from pydantic import BaseModel, ConfigDict, Field, computed_field, model_validator
 
 
@@ -38,16 +40,20 @@ class ScoringProfile(BaseModel):
     highway_weight=0.5 means a minute at highway speed feels like 1.5 minutes
     to this driver. The eligible route with the lowest total wins.
 
-    By default, turns across oncoming traffic (lefts where traffic keeps right,
-    rights where it keeps left) cost extra at busy and crash-prone junctions,
-    so routes using near-side turns win when times are close.
+    The defaults put the driver's safety and fuel ahead of minutes saved. A
+    turn across oncoming traffic (a left where traffic keeps right, a right
+    where it keeps left) at a busy junction feels like 3 extra minutes; at a
+    crash-prone one, 6 more. Every liter of fuel feels like 8 minutes. So a
+    route a few minutes slower wins when it's safer or uses less fuel, and
+    max_detour_ratio stops that from turning into a long detour.
     """
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
     name: str = "custom"
     time_weight: float = Field(1.0, ge=0, description="Perceived minutes per minute of trip time.")
-    distance_weight: float = Field(0.0, ge=0, description="Perceived minutes per km driven (fuel and wear).")
+    distance_weight: float = Field(0.0, ge=0, description="Perceived minutes per km driven (wear).")
+    fuel_weight: float = Field(8.0, ge=0, description="Perceived minutes per liter of fuel the route burns.")
     highway_weight: float = Field(0.0, ge=0, description="Extra perceived minutes per minute at highway speed.")
     traffic_weight: float = Field(
         0.0,
@@ -57,19 +63,37 @@ class ScoringProfile(BaseModel):
     maneuver_weight: float = Field(0.0, ge=0, description="Perceived minutes per turn, merge, fork or roundabout.")
     scenic_weight: float = Field(0.0, ge=0, description="Perceived minutes refunded per minute on winding roads.")
     busy_crossing_weight: float = Field(
-        0.5,
+        3.0,
         ge=0,
         description="Perceived minutes per turn across oncoming traffic at a busy junction.",
     )
     hotspot_crossing_weight: float = Field(
-        2.0,
+        6.0,
         ge=0,
         description="Extra perceived minutes per turn across oncoming traffic at a crash-prone junction.",
+    )
+    lane_closure_weight: float = Field(
+        3.0,
+        ge=0,
+        description="Perceived minutes per lane closure (a work zone or crash with a forced merge) driven through.",
     )
     max_detour_ratio: float = Field(
         1.6,
         ge=1.0,
         description="Candidates slower than this multiple of the fastest one are not eligible to win.",
+    )
+    ranking: Literal["weighted", "priority"] = Field(
+        "weighted",
+        description=(
+            "weighted: the lowest total perceived cost wins. "
+            "priority: the safest route wins; among equally safe ones the least fuel; then the fastest."
+        ),
+    )
+    fuel_tolerance: float = Field(
+        0.03,
+        ge=0,
+        le=0.5,
+        description="In priority ranking, fuel within this share of the lowest counts as equally efficient.",
     )
 
     @model_validator(mode="after")
@@ -107,7 +131,11 @@ class RouteFeatures(BaseModel):
     traffic_delay_min: float
     maneuver_count: int
     winding_min: float
+    fuel_l: float = Field(0.0, description="Rough fuel estimate in liters (see app.fuel).")
+    signal_count: int = Field(0, description="Traffic signals passed; counted only when the road graph is loaded.")
     crossing_turns: tuple[CrossingTurn, ...] = ()
+    closures: int = Field(0, description="Closed roads the route drives through, per the trip's road event source.")
+    lane_closures: int = Field(0, description="Lane closures the route drives through, per the road event source.")
 
     @computed_field
     @property
@@ -127,11 +155,13 @@ class ScoreBreakdown(BaseModel):
 
     time: float
     distance: float
+    fuel: float
     highway: float
     traffic: float
     maneuvers: float
     busy_crossings: float
     hotspot_crossings: float
+    lane_closures: float = 0.0
     scenic: float = Field(description="Zero or negative: a refund for winding roads.")
     total: float
 
@@ -159,6 +189,7 @@ class ScoredRoute(CandidateRoute):
 
     breakdown: ScoreBreakdown
     eligible: bool = Field(description="False when the route exceeds the profile's max_detour_ratio.")
+    reason: str | None = Field(None, description="Why it ranks where it does (priority ranking).")
 
 
 class RoutePlan(BaseModel):
@@ -169,6 +200,10 @@ class RoutePlan(BaseModel):
     profile: ScoringProfile
     winner: ScoredRoute
     candidates: list[ScoredRoute]
+    hidden: dict[str, str] = Field(
+        default_factory=dict,
+        description="Routes left out because they mostly follow a better one: hidden id -> that route's id.",
+    )
 
     @computed_field
     @property

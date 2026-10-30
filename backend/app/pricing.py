@@ -5,27 +5,42 @@ route that passes through points along it. Google's answer is what gets
 scored and drawn: its live travel time, its turn-by-turn steps and its
 polyline. Nothing from Google is written back into the road graph, and the
 response is only cached briefly (see RoutesClient).
+
+Google takes the quickest path between pins, so it can stray from the design,
+often through the very left turns the design avoided. When it does, the
+stretch it skipped gets a pin and Google is asked once more.
 """
 
 from __future__ import annotations
 
 import math
 from collections import defaultdict
-from collections.abc import Sequence
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
+from functools import partial
 from typing import Any
 
+from app.cache import CacheMiss
 from app.candidates import RouteFetcher
+from app.features import HIGHWAY_SPEED_KMH
 from app.geo import Point, decode_polyline, densify, haversine_m, point_along
 from app.models import LatLng
 from app.roadgraph import RoadGraph
 from app.router import RoutedPath, Router
-from app.routes_client import RouteRequest
+from app.routes_client import RouteRequest, RoutesApiError
 
 MAX_VIA_POINTS = 25  # the Routes API's limit on intermediate waypoints
-FILLER_SPACING_M = 3_000.0  # also pin long stretches without turns
+# Stretches without turns need pins too. On streets a gap of more than a few
+# blocks invites a shortcut; freeways have few alternatives.
+STREET_PIN_SPACING_M = 800.0
+FREEWAY_PIN_SPACING_M = 3_000.0
 MIN_VIA_SEGMENT_M = 40.0  # on shorter segments Google may snap to the cross street
+# Never pin these: Google may not route through alleys and parking-lot
+# connectors, and a pin there makes it loop around the block to pass it.
+UNPINNABLE_CLASSES = frozenset({"service"})
 MATCH_TOLERANCE_M = 30.0
+# Below this match, pin what Google skipped and ask once more (one extra request).
+RETRY_BELOW_MATCH = 0.99
 _M_PER_DEG_LAT = 111_320.0
 
 
@@ -40,25 +55,12 @@ class PricedRoute:
     route: dict[str, Any]  # Google's traffic-aware route through the via points
     design_match: float  # share of it that follows the designed path
     via_count: int
+    attempts: int = 1  # 2 when Google strayed and was asked again
 
 
 def via_points(graph: RoadGraph, path: RoutedPath, limit: int = MAX_VIA_POINTS) -> list[ViaPoint]:
-    """Points that pin Google to the designed path: one just after each turn, plus fillers on long straights."""
-    picks: list[int] = []
-    turn_pending = False
-    since_last_m = 0.0
-    for index, (edge, maneuver) in enumerate(zip(path.edges, path.maneuvers, strict=True)):
-        if index > 0 and maneuver != "STRAIGHT":
-            turn_pending = True
-        since_last_m += graph.length_m[edge]
-        if (turn_pending or since_last_m >= FILLER_SPACING_M) and graph.length_m[edge] >= MIN_VIA_SEGMENT_M:
-            picks.append(edge)
-            turn_pending = False
-            since_last_m = 0.0
-    if len(picks) > limit:
-        # Spread the allowance evenly along the route.
-        picks = [picks[round(k * (len(picks) - 1) / (limit - 1))] for k in range(limit)] if limit > 1 else picks[:limit]
-    return [_midpoint(graph, edge) for edge in picks]
+    """Points that pin Google to the designed path: one just after each turn, plus spacers on straight stretches."""
+    return [_midpoint(graph, path.edges[index]) for index in _pin_indexes(graph, path, limit)]
 
 
 def price_route(
@@ -67,14 +69,61 @@ def price_route(
     origin: LatLng,
     destination: LatLng,
     path: RoutedPath,
+    *,
+    origin_heading: int | None = None,
 ) -> PricedRoute | None:
-    """Ask Google for a live-traffic route along path; None if Google found no route."""
-    vias = via_points(router.graph, path)
+    """Ask Google for a live-traffic route along path; None if Google found no route.
+
+    origin_heading is the direction a moving car is driving (see RouteRequest).
+    """
+    graph = router.graph
+    designed = router.path_points(path)
+    pins = _pin_indexes(graph, path)
+    ask = partial(_ask_google, fetcher, graph, origin, destination, path, designed=designed, origin_heading=origin_heading)
+    priced = ask(pins)
+    if priced is None or priced.design_match >= RETRY_BELOW_MATCH:
+        return priced
+
+    actual = decode_polyline(priced.route.get("polyline", {}).get("encodedPolyline", ""))
+    repinned = _pin_indexes(graph, path, extra=_skipped_stretches(graph, path, actual))
+    if repinned == pins:
+        return priced  # nothing new to pin, so asking again would give the same answer
+    try:
+        retry = ask(repinned)
+    except (RoutesApiError, CacheMiss):
+        return priced  # keep the first answer rather than lose the route
+    if retry is None or retry.design_match <= priced.design_match:
+        return priced
+    return PricedRoute(retry.route, retry.design_match, retry.via_count, attempts=2)
+
+
+def design_match(designed: Sequence[Point], actual: Sequence[Point], tolerance_m: float = MATCH_TOLERANCE_M) -> float:
+    """Share of the actual route lying within tolerance_m of the designed one."""
+    if len(designed) < 2 or len(actual) < 2:
+        return 0.0
+    index = _NearIndex(densify(designed, tolerance_m / 2), tolerance_m)
+    samples = densify(actual, 25.0)
+    return sum(1 for point in samples if index.near(point)) / len(samples)
+
+
+def _ask_google(
+    fetcher: RouteFetcher,
+    graph: RoadGraph,
+    origin: LatLng,
+    destination: LatLng,
+    path: RoutedPath,
+    pins: Sequence[int],
+    *,
+    designed: Sequence[Point],
+    origin_heading: int | None,
+) -> PricedRoute | None:
+    vias = [_midpoint(graph, path.edges[index]) for index in pins]
     request = RouteRequest(
         origin=origin,
         destination=destination,
         via=tuple(via.point for via in vias),
         via_headings=tuple(via.heading for via in vias),
+        origin_heading=origin_heading,
         traffic_aware=True,
     )
     routes = fetcher.compute_routes(request)
@@ -82,39 +131,100 @@ def price_route(
         return None
     route = routes[0]
     actual = decode_polyline(route.get("polyline", {}).get("encodedPolyline", ""))
-    return PricedRoute(route=route, design_match=design_match(router.path_points(path), actual), via_count=len(vias))
+    return PricedRoute(route=route, design_match=design_match(designed, actual), via_count=len(vias))
 
 
-def design_match(designed: Sequence[Point], actual: Sequence[Point], tolerance_m: float = MATCH_TOLERANCE_M) -> float:
-    """Share of the actual route lying within tolerance_m of the designed one."""
-    if len(designed) < 2 or len(actual) < 2:
-        return 0.0
-    cell_deg = tolerance_m / _M_PER_DEG_LAT
+def _pin_indexes(graph: RoadGraph, path: RoutedPath, limit: int = MAX_VIA_POINTS, extra: Iterable[int] = ()) -> list[int]:
+    """Path indexes to pin, by priority: extra pins, then just after each turn, then spacers."""
+    after_turns: list[int] = []
+    spacers: list[int] = []
+    turn_pending = False
+    since_last_m = 0.0
+    for index, (edge, maneuver) in enumerate(zip(path.edges, path.maneuvers, strict=True)):
+        if index > 0 and maneuver != "STRAIGHT":
+            turn_pending = True
+        since_last_m += graph.length_m[edge]
+        if not _pinnable(graph, edge):
+            continue
+        freeway = graph.speed_kmh[edge] >= HIGHWAY_SPEED_KMH
+        if turn_pending:
+            after_turns.append(index)
+        elif since_last_m >= (FREEWAY_PIN_SPACING_M if freeway else STREET_PIN_SPACING_M):
+            spacers.append(index)
+        else:
+            continue
+        turn_pending = False
+        since_last_m = 0.0
 
-    def cell(point: Point) -> tuple[int, int]:
-        return math.floor(point[0] / cell_deg), math.floor(point[1] / cell_deg)
+    picks: list[int] = []
+    for group in (sorted(set(extra)), after_turns, spacers):
+        candidates = [index for index in group if index not in picks]
+        picks += _spread(candidates, limit - len(picks))
+    return sorted(picks)
 
-    index: dict[tuple[int, int], list[Point]] = defaultdict(list)
-    for point in densify(designed, tolerance_m / 2):
-        index[cell(point)].append(point)
-    # Longitude cells are narrower than tolerance_m away from the equator.
-    reach_lng = math.ceil(1 / max(math.cos(math.radians(designed[0][0])), 0.01))
 
-    samples = densify(actual, 25.0)
-    hits = 0
-    for point in samples:
-        ci, cj = cell(point)
-        near = (
-            other
-            for i in range(ci - 1, ci + 2)
-            for j in range(cj - reach_lng, cj + reach_lng + 1)
-            for other in index.get((i, j), ())
-        )
-        if any(haversine_m(point, other) <= tolerance_m for other in near):
-            hits += 1
-    return hits / len(samples)
+def _skipped_stretches(graph: RoadGraph, path: RoutedPath, actual: Sequence[Point]) -> list[int]:
+    """One path index in the middle of each stretch of the design that the actual route doesn't follow."""
+    if len(actual) < 2:
+        return []
+    near = _NearIndex(densify(actual, MATCH_TOLERANCE_M / 2), MATCH_TOLERANCE_M)
+    runs: list[list[int]] = []
+    previous_off = False
+    for index, edge in enumerate(path.edges):
+        off = not near.near(_midpoint(graph, edge).point.as_tuple())
+        if off and not previous_off:
+            runs.append([])
+        if off:
+            runs[-1].append(index)
+        previous_off = off
+
+    pins = []
+    for run in runs:
+        usable = [index for index in run if _pinnable(graph, path.edges[index])]
+        if usable:
+            pins.append(usable[len(usable) // 2])
+    return pins
+
+
+def _pinnable(graph: RoadGraph, edge: int) -> bool:
+    return graph.length_m[edge] >= MIN_VIA_SEGMENT_M and graph.class_name(edge) not in UNPINNABLE_CLASSES
+
+
+def _spread(items: list[int], count: int) -> list[int]:
+    """count items spaced evenly through items, keeping the first and last."""
+    if len(items) <= count:
+        return list(items)
+    if count <= 1:
+        return items[: max(count, 0)]
+    return [items[round(k * (len(items) - 1) / (count - 1))] for k in range(count)]
 
 
 def _midpoint(graph: RoadGraph, edge: int) -> ViaPoint:
     (lat, lng), bearing = point_along(graph.edge_points(edge), graph.length_m[edge] / 2)
     return ViaPoint(point=LatLng(lat=lat, lng=lng), heading=round(bearing) % 360)
+
+
+class _NearIndex:
+    """Answers "is any indexed point within tolerance_m of this one?" with a grid lookup."""
+
+    def __init__(self, points: Sequence[Point], tolerance_m: float) -> None:
+        self.tolerance_m = tolerance_m
+        self.cell_deg = tolerance_m / _M_PER_DEG_LAT
+        self.cells: dict[tuple[int, int], list[Point]] = defaultdict(list)
+        for point in points:
+            self.cells[self._cell(point)].append(point)
+        # Longitude cells are narrower than tolerance_m away from the equator.
+        latitude = points[0][0] if points else 0.0
+        self.reach_lng = math.ceil(1 / max(math.cos(math.radians(latitude)), 0.01))
+
+    def near(self, point: Point) -> bool:
+        ci, cj = self._cell(point)
+        return any(
+            haversine_m(point, other) <= self.tolerance_m
+            for i in range(ci - 1, ci + 2)
+            for j in range(cj - self.reach_lng, cj + self.reach_lng + 1)
+            for other in self.cells.get((i, j), ())
+        )
+
+    def _cell(self, point: Point) -> tuple[int, int]:
+        return math.floor(point[0] / self.cell_deg), math.floor(point[1] / self.cell_deg)
