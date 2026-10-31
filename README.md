@@ -30,10 +30,13 @@ backend/
     engine.py         The pipeline the API and CLI call
     main.py           HTTP API (FastAPI); also serves the web map
     cli.py            Run and tune from the terminal
-    crash_data.py     Downloads fatal crashes (NHTSA FARS) for the crash-prone junction rule
+    crash_data.py     Downloads fatal crashes (NHTSA FARS), or imports an export of all crashes, for the crash-prone junction rule
+    sun.py            Where the sun is, and when a route drives into its glare
+    weather.py        National Weather Service alerts, and what they change
+    feedback.py       Visitors' "Would you take this route?" answers
     evaluate.py       Runs 20 Milwaukee trips and writes RESULTS.md: what the engine changes
   data/               Downloaded OSM tiles and built graphs (gitignored)
-  tests/              307 tests, no network needed; GitHub runs them on every push (.github/workflows/tests.yml)
+  tests/              331 tests, no network needed; GitHub runs them on every push (.github/workflows/tests.yml)
 frontend/
   index.html, app.js, styles.css   The web map: place search, routes drawn and explained, driving mode
   maps.js                          The map underneath: Google's or OpenStreetMap's (ROUTES_MAP)
@@ -78,7 +81,9 @@ Then open **http://127.0.0.1:3143** for the map, or **http://127.0.0.1:3143/docs
 |---|---|
 | `GET /health` | What's loaded (road graph, crash data, cache mode) and today's Google usage |
 | `GET /profiles` | The preset profiles, for the profile picker |
-| `POST /route` | Ranks routes for one trip. Body: `origin`, `destination` (`{lat, lng}`), optional `profile`, `weights`, `country_code`, `live_traffic`, `use_router`, `max_extra_min` (the most extra minutes a safer route may take). Returns the ranked `plan` (the map draws `plan.winner.encoded_polyline`; each route's `via` names its main road), `notes`, `attribution` and Google usage. |
+| `POST /route` | Ranks routes for one trip. Body: `origin`, `destination` (`{lat, lng}`), optional `stops` (up to 3, in order), `profile`, `weights`, `country_code`, `live_traffic`, `use_router`, `max_extra_min` (the most extra minutes a safer route may take), `departure_offset_min` (leave this many minutes from now). Returns the ranked `plan` (the map draws `plan.winner.encoded_polyline`; each route has a `safety_score` and its `via`, the main road), `notes`, `attribution`, `weather_alerts`, `low_sun` and Google usage. |
+| `POST /leave-times` | The same trip leaving now, in 15 or 30 minutes and in an hour: the recommended route's safety score, minutes, sun glare and school zones for each, and the safest time. Our router designs the routes once (no Google) and judges them at each time. |
+| `POST /feedback`, `GET /feedback-summary` | A visitor's answer to "Would you take this route?" (`choice`: yes or no, how much safer and slower the route was; no places), and the totals. Kept in `.cache/routes/feedback.jsonl`. |
 
 Errors come back as: 422 bad input, 404 no route, 429 the daily Google limit is used up, 502 Google failed, 503 a replay-mode trip that wasn't recorded.
 
@@ -93,6 +98,13 @@ Until then, the page shows these steps in place of the map. On the page:
 - Closed roads are black and lane closures dashed orange. Tap a closure's marker (or a risky turn's) for the details. On the OpenStreetMap map, closure markers close together merge into a numbered circle that splits apart as you zoom in. **Show closures** hides them all.
 - Routes are named by their main road, "Via W Wisconsin Ave", from our road map: each route's longest road that no better route already goes by. Below the name: what it is ("Our safer design 2", "Standard route") and the reason for its place.
 - **Extra time you'd accept for a safer route:** no fixed limit (a route up to 1.6× the fastest can win), or at most 5, 10 or 15 minutes more. The reasons say which limit applied.
+- **Safety score:** every route gets one, 0 to 100, higher is safer: a ring on the recommendation and a pill on each route. It weighs the same risks for every profile (the default's weights: a busy risky turn 3 points, a crash-prone one 9, a lane closure 3, a school zone 3, a rail crossing 1, a weather hazard 3, a minute of sun glare 1, a closed road 30), and 10 points halve it: score = 100 / (1 + points / 10).
+- **Cost and emissions:** fuel shows in gallons and dollars (`ROUTES_FUEL_PRICE`, default $3.25 a gallon) and CO₂ (8.9 kg a gallon, the EPA's figure).
+- **Stops:** **Add a stop** (up to 3). The trip is planned leg by leg, and the plan joins each leg's recommended route, and each leg's standard route; the directions say "Arrive at stop N". While driving, a stop reached is left out of new routes.
+- **Leave:** now, or in 15, 30 or 60 minutes: school zones and sun glare are judged at that time (traffic and closures stay as they are now). **Best time to leave?** under the routes compares the four and marks the safest; pick one to plan it.
+- **Would you take this route?** Yes or No under the recommendation. The answers are counted (`/feedback-summary`) with how much safer and slower the route was, and no places.
+- **Demo mode** (under Advanced, or `?demo=1` in the address): after 45 seconds with no one touching the page, it plans four sample trips in turn, 20 seconds each, with a banner. Any touch stops it. Sample trips are planned without live traffic, so they cost no paid requests.
+- **New driver** profile: keeps off freeways (a freeway minute feels like three), weighs risky turns, closures, school zones and crossings about twice the default, and accepts up to 1.8× the fastest time.
 - The panel lists every route with its minutes, miles, gallons, risky turns and the reason for its place, plus how the winner compares with the standard route. Alternatives take different roads, even when they're much slower; a route that mostly runs along a better one is left out (`plan.hidden` in the API says which).
 - Pick a route in the list to follow it (the recommended one is picked to start with).
 - **Advanced** (folded) holds the controls visitors don't need: where closures come from, Live traffic, and Our router.
@@ -204,6 +216,7 @@ Turns across oncoming traffic cost extra where they're risky. These are lefts wh
   - **Without the graph:** a junction is busy when either road's no-traffic speed is 50 km/h or more.
 - **Crash-prone junction.** At least `ROUTES_CRASH_MIN_COUNT` recorded crashes within 35 m. Point `ROUTES_CRASH_DATA` at a CSV with `lat,lng[,crashes]` columns. Without crash data, only the busy rule applies.
   - **For Milwaukee:** `python -m app.crash_data milwaukee-metro` downloads NHTSA's Fatality Analysis Reporting System (FARS, public, no key) for 2020–2024 (`--years` to change). It keeps the area's fatal crashes (612 for 2020–2024) and writes `data/crashes/milwaukee-metro.csv`. These are fatal crashes only, so a single one marks a junction: set `ROUTES_CRASH_MIN_COUNT=1`. About 1,000 busy junctions in the road map are within 35 m of one.
+  - **All reported crashes (optional):** Wisconsin's Community Maps (UW-Madison TOPS Lab, <https://transportal.cee.wisc.edu/partners/community-maps/crash/>) has every police-reported crash with its location, and a CSV download. Its terms allow research and traffic-safety use, forbid automated or bulk extraction, and ask users to protect personal information, so export the Milwaukee-area crashes from the website by hand, then run `python -m app.crash_data import <the file>.csv`. It finds the latitude, longitude, severity and date columns by name, weighs crashes by severity (fatal 3, serious injury 2, other injury 1; property damage only is left out unless `--include-property-damage`), writes `data/crashes/milwaukee-metro-all.csv`, and prints the `ROUTES_CRASH_DATA` and `ROUTES_CRASH_MIN_COUNT` lines to use (about two injury crashes a year at a junction). For questions about the data: community-maps@topslab.wisc.edu. (Milwaukee's own open crash dataset has no coordinates, so it can't be used.)
   - **Elsewhere:** many cities publish all crashes, for example NYC's "Motor Vehicle Collisions", Chicago's "Traffic Crashes" and the UK's STATS19. Filter to your area first.
 - **Weights.** By default each busy crossing turn costs 3 perceived minutes, and a crash-prone one costs 6 more. The `calm` preset raises these to 4 and 8. `fastest` sets both to 0 so it stays a pure-time baseline.
 
@@ -287,6 +300,14 @@ Read TomTom's terms before showing its data publicly.
 4. Put it in `backend/.env` as `WI511_API_KEY=...` and restart the server. `/health` shows `"wi511_key_set": true`.
 
 The access agreement (linked on the doc page) wasn't reviewed here: read it before showing the data publicly.
+
+## Sun glare and weather
+
+**Sun glare.** Driving toward a low sun, around sunrise and sunset, is a known crash factor: the glare hides signals, brake lights and people crossing. `app/sun.py` works out the sun's position from the time and place (NOAA's formulas, no service needed). While it's up but lower than 25°, every minute a route drives within 25° of its direction counts as a minute of sun glare: 1 risk point a minute (`sun_glare_weight`). Our router's designs steer away from it too. Clouds aren't known, so a cloudy evening still counts.
+
+**Weather.**
+- **On the roads:** TomTom's fog, ice, rain, wind and flooding reports become weather hazards on their stretches (OpenStreetMap map). Our router drives them 1.3× slower, entering one costs `weather_hazard_weight` (3), and the map draws them in purple.
+- **Alerts:** the National Weather Service's alerts where the trip starts (api.weather.gov: free, no key; cached 10 minutes; `ROUTES_WEATHER_ALERTS=off` turns them off) show above the recommendation. Winter ones (snow, ice, freezing rain) make turns across oncoming traffic count 1.5× as risky: stopping takes longer on ice.
 
 ## School zones and railroad crossings
 

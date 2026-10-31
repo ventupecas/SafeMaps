@@ -39,6 +39,20 @@ const COLORS = {
   lanes: "#e37400",
   slow: "#f2a600",
   jam: "#d93025",
+  hazard: "#7b4fd6",
+};
+const CO2_KG_PER_GALLON = 8.887; // burning a gallon of gasoline (US EPA)
+const MAX_STOPS = 3;
+// Demo mode: after DEMO.idleMs with no one touching the page, it plans these trips in turn.
+const DEMO = {
+  idleMs: 45000,
+  showMs: 20000,
+  trips: [
+    { from: { label: "Fiserv Forum", lat: 43.0451, lng: -87.9172 }, to: { label: "Bay View", lat: 42.9978, lng: -87.8954 } },
+    { from: { label: "Milwaukee Public Market", lat: 43.035, lng: -87.9086 }, to: { label: "Wauwatosa Village", lat: 43.0494, lng: -88.0076 } },
+    { from: { label: "UW-Milwaukee", lat: 43.0766, lng: -87.8814 }, to: { label: "Mitchell Airport", lat: 42.9476, lng: -87.8966 } },
+    { from: { label: "Marquette University", lat: 43.0383, lng: -87.9286 }, to: { label: "Milwaukee County Zoo", lat: 43.032, lng: -88.0405 } },
+  ],
 };
 // Where closures and slowdowns came from, by the server's source names.
 const EVENT_SOURCES = {
@@ -57,6 +71,7 @@ const PROFILE_LABELS = {
   scenic: "Scenic",
   calm: "Calm: extra wary of risky turns",
   eco: "Eco: least fuel",
+  "new-driver": "New driver: avoids freeways and risky turns",
 };
 
 const state = {
@@ -65,6 +80,10 @@ const state = {
   origin: null, // { lat, lng, label, countryCode }
   destination: null,
   pins: { origin: null, destination: null },
+  stops: [], // places to stop at on the way: { id, point, pin }, in order
+  nextStopId: 1,
+  fuelPrice: 3.25, // US dollars a gallon (the server's ROUTES_FUEL_PRICE)
+  demo: { on: false, running: false, index: 0, idleTimer: null, stepTimer: null },
   routeLines: [], // { id, lines: [line handle] }
   turnMarkers: [],
   closures: [], // closures and lane closures from the last trip
@@ -89,6 +108,7 @@ const state = {
     lastRerouteAt: 0,
     wakeLock: null,
     spoken: new Set(), // directions already announced, so each is said once (far and near)
+    stopsLeft: [], // the trip's stops not reached yet, while driving
   },
 };
 
@@ -105,6 +125,7 @@ async function boot() {
     const appConfig = await (await fetch("/app-config")).json();
     state.mapKind = appConfig.map;
     trafficTiles = Boolean(appConfig.traffic_tiles);
+    if (Number.isFinite(appConfig.fuel_price)) state.fuelPrice = appConfig.fuel_price;
   } catch {
     state.mapKind = "google"; // an older server: it only knew Google's map
   }
@@ -130,6 +151,7 @@ async function boot() {
     return;
   }
   await initMap();
+  setUpDemo();
 }
 
 // The OpenStreetMap map has no Google behind it: no Google live traffic or traffic
@@ -155,6 +177,7 @@ async function initMap() {
     zoom: 11,
     onClick: (point) => {
       if (state.nav.active) return; // no accidental trip changes while driving
+      if (Date.now() - (state.demo.stoppedAt || 0) < 800) return; // that touch was to stop the demo
       // First click sets the start; after that, clicks move the destination.
       const kind = state.origin ? "destination" : "origin";
       setPoint(kind, { ...point, label: null, countryCode: null });
@@ -168,7 +191,7 @@ async function initMap() {
   await Promise.all(
     ["origin", "destination"].map((kind) =>
       state.view.search($(`${kind}-search`), kind === "origin" ? "Where from?" : "Where to?", (place) =>
-        setPoint(kind, place),
+        setPoint(kind, place, { fromSearch: true }),
       ),
     ),
   );
@@ -177,9 +200,13 @@ async function initMap() {
 
 // ---- Trip input
 
-async function setPoint(kind, point) {
+// fromSearch: picked in the search box, which already shows its name. A map click or a
+// location is spelled out under the box instead, and clears the box (on the OpenStreetMap map).
+async function setPoint(kind, point, { fromSearch = false } = {}) {
   state[kind] = point;
-  $(`${kind}-picked`).textContent = point.label || `${point.lat.toFixed(5)}, ${point.lng.toFixed(5)}`;
+  $(`${kind}-picked`).textContent = fromSearch ? "" : point.label || `${point.lat.toFixed(5)}, ${point.lng.toFixed(5)}`;
+  const box = $(`${kind}-search`).querySelector("input");
+  if (box && !fromSearch) box.value = "";
   placePin(kind, point);
   updateFindButton();
 }
@@ -204,6 +231,7 @@ function wireControls() {
   $("closures-layer").addEventListener("change", drawClosures);
   $("about-open").addEventListener("click", showAbout);
   $("phone-open").addEventListener("click", showPhoneLink);
+  $("add-stop").addEventListener("click", () => addStop());
   // The map key starts folded on a phone, where it would cover much of the map.
   if (window.matchMedia(NARROW).matches) $("legend").open = false;
   // A screen wake lock is dropped whenever the page is hidden; take it again on return.
@@ -238,7 +266,10 @@ function clearAll() {
     if (state.pins[kind]) state.pins[kind].remove();
     state.pins[kind] = null;
     $(`${kind}-picked`).textContent = "";
+    const box = $(`${kind}-search`).querySelector("input");
+    if (box) box.value = "";
   }
+  for (const stop of [...state.stops]) removeStop(stop.id);
   clearRoutes();
   state.trafficEvents = [];
   drawTraffic();
@@ -256,6 +287,7 @@ async function findRoute() {
   if (!state.origin || !state.destination) return;
   const button = $("find");
   button.disabled = true;
+  button.classList.add("is-busy");
   button.textContent = "Finding…";
   showStatus("Comparing routes for safety, fuel and time…");
   try {
@@ -263,30 +295,43 @@ async function findRoute() {
   } catch (error) {
     showStatus(error.message, true);
   } finally {
+    button.classList.remove("is-busy");
     button.textContent = "Find route";
     updateFindButton();
   }
 }
 
-// heading: the direction a moving car is driving, so new routes start that way.
-async function requestTrip(origin, destination, heading = null) {
+// The trip as the server takes it. heading: the direction a moving car is driving, so new
+// routes start that way. stops: places still to stop at (the chosen ones by default).
+// demo: a sample trip, planned without live traffic so it costs no paid requests.
+function tripPayload(origin, destination, { heading = null, stops = chosenStops(), demo = false } = {}) {
   const payload = {
     origin: { lat: origin.lat, lng: origin.lng },
     destination: { lat: destination.lat, lng: destination.lng },
+    stops: stops.map((point) => ({ lat: point.lat, lng: point.lng })),
     profile: $("profile").value,
     country_code: origin.countryCode || destination.countryCode || null,
-    live_traffic: $("live-traffic").checked,
+    live_traffic: $("live-traffic").checked && !demo,
     use_router: $("use-router").checked,
     road_events: $("road-events").value,
+    departure_offset_min: Number($("leave").value) || 0,
   };
   if ($("extra-time").value) payload.max_extra_min = Number($("extra-time").value);
   if (heading !== null) payload.heading = Math.round(heading * 10) / 10;
+  return payload;
+}
+
+async function requestTrip(origin, destination, options = {}) {
+  return postJson("/route", tripPayload(origin, destination, options));
+}
+
+async function postJson(path, payload) {
   const headers = { "Content-Type": "application/json" };
   const code = accessCode();
   if (code) headers["X-Access-Code"] = code;
   let response;
   try {
-    response = await fetch("/route", { method: "POST", headers, body: JSON.stringify(payload) });
+    response = await fetch(path, { method: "POST", headers, body: JSON.stringify(payload) });
   } catch {
     throw new Error("Can't reach the routing server. Open this page from it, e.g. http://127.0.0.1:3143");
   }
@@ -362,13 +407,17 @@ function showTrip(trip, { fit = true } = {}) {
   const standard = plan.candidates.find(isStandard);
   const notes = driverNotes(trip.notes);
   const usage = trip.google; // the server's count of route data requests
+  const when = trip.leaving_at && Number($("leave").value) ? `at ${clockTime(trip.leaving_at)}` : "now";
   $("results").replaceChildren(
+    ...(trip.weather_alerts || []).map(weatherAlert),
     winnerCard(plan, standard),
     element("h2", { className: "results__heading" }, "All routes, best first · pick one to follow it"),
     routeList(plan),
+    leaveTimesBlock(),
     ...(notes.length ? [element("ul", { className: "notes" }, ...notes.map((note) => element("li", {}, note)))] : []),
     element("p", { className: "usage" }, roadEventsLine(trip)),
-    ...(trip.school_hours ? [element("p", { className: "usage" }, "School zones count now: it's a school drop-off or pickup time.")] : []),
+    ...(trip.school_hours ? [element("p", { className: "usage" }, `School zones count: leaving ${when} is a school drop-off or pickup time.`)] : []),
+    ...(trip.low_sun ? [element("p", { className: "usage" }, `The sun is low leaving ${when}: roads heading into it count as riskier.`)] : []),
     // Route data requests are paid ones; the OpenStreetMap map never makes any.
     ...(state.mapKind === "osm"
       ? []
@@ -418,7 +467,7 @@ function roadEventsLine(trip) {
   // Sources used together arrive joined with "+".
   const used = trip.road_events_source.split("+").map((name) => EVENT_SOURCES[name] || name).join(" and ");
   // A closure of both directions of a divided road arrives once per carriageway.
-  const closures = trip.road_events.filter((event) => !isTraffic(event));
+  const closures = trip.road_events.filter((event) => event.kind === "closed" || event.kind === "lanes");
   const shown = new Set(closures.map((event) => `${event.kind}|${event.description}`)).size;
   const counted = shown ? `; ${shown} closure${shown === 1 ? "" : "s"} nearby` : "";
   return `Closures and slowdowns from ${used}${unavailable}${counted}.`;
@@ -455,10 +504,12 @@ function drawClosures() {
       state.closureLines.push(
         event.kind === "closed"
           ? state.view.line(path, { color: COLORS.closed, weight: 7, zIndex: 25 })
-          : state.view.line(path, { color: COLORS.lanes, dashed: true, zIndex: 25 }),
+          : event.kind === "hazard"
+            ? state.view.line(path, { color: COLORS.hazard, weight: 6, opacity: 0.75, zIndex: 24 })
+            : state.view.line(path, { color: COLORS.lanes, dashed: true, zIndex: 25 }),
       );
     }
-    const heading = event.kind === "closed" ? "Road closed" : "Lane closure";
+    const heading = { closed: "Road closed", lanes: "Lane closure", hazard: "Weather hazard" }[event.kind] || "Road event";
     const dot = element("div", { className: `event-dot event-dot--${event.kind}` });
     const title = event.description ? `${heading}: ${event.description}` : heading;
     state.closureMarkers.add(path[0], dot, { title, zIndex: 26, popup: { heading, text: event.description } });
@@ -523,15 +574,63 @@ function winnerCard(plan, standard) {
   const card = element(
     "section",
     { className: "winner" },
-    element("h2", { className: "winner__title" }, `Recommended: ${winner.via ? `via ${winner.via}` : routeKind(winner, plan)}`),
+    element(
+      "div",
+      { className: "winner__head" },
+      element(
+        "div",
+        {},
+        element("span", { className: "winner__badge" }, "Recommended"),
+        element("h2", { className: "winner__title" }, routeLabel(winner, plan)),
+        ...(winner.via ? [element("p", { className: "winner__kind" }, routeKind(winner, plan))] : []),
+      ),
+      scoreRing(winner.safety_score),
+    ),
   );
-  if (winner.via) card.append(element("p", { className: "winner__kind" }, routeKind(winner, plan)));
   if (winner.reason) card.append(element("p", { className: "winner__reason" }, capitalize(winner.reason)));
   if (standard && standard.id !== winner.id) {
     card.append(element("p", { className: "override" }, comparedWithStandard(winner, standard)));
   }
-  card.append(stats(winner));
+  card.append(stats(winner), feedbackBlock(winner, standard));
   return card;
+}
+
+// The safety score as a ring that fills to it: green when high, amber, then red.
+function scoreRing(score) {
+  const band = score >= 80 ? "high" : score >= 50 ? "mid" : "low";
+  return element(
+    "div",
+    { className: `score score--${band}`, style: `--score:${score}`, title: "Safety score: 0 to 100, higher is safer" },
+    element("strong", {}, String(score)),
+    element("span", {}, "safety"),
+  );
+}
+
+function scorePill(score) {
+  const band = score >= 80 ? "high" : score >= 50 ? "mid" : "low";
+  return element("span", { className: `score-pill score-pill--${band}`, title: "Safety score: 0 to 100, higher is safer" }, `${score}`);
+}
+
+function weatherAlert(alert) {
+  const until = alert.ends ? ` until ${clockTime(alert.ends)}` : "";
+  return element(
+    "div",
+    { className: "alert" },
+    element("strong", {}, `${alert.event}${until}`),
+    element(
+      "p",
+      {},
+      alert.slippery
+        ? "Slippery roads: turns across oncoming traffic count as riskier, so routes avoid more of them."
+        : "Drive with care: the routes account for hazards reported on the roads.",
+    ),
+  );
+}
+
+// "3:45 PM" from an ISO time.
+function clockTime(iso) {
+  const moment = new Date(iso);
+  return Number.isNaN(moment.getTime()) ? "" : moment.toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit" });
 }
 
 function stats(route) {
@@ -539,21 +638,35 @@ function stats(route) {
   const items = [
     ["Time", `${Math.round(f.duration_min)} min${route.live_traffic ? "" : " (est.)"}`],
     ["Distance", `${(f.distance_km * KM_TO_MI).toFixed(1)} mi`],
-    ["Fuel", `${(f.fuel_l / LITERS_PER_GALLON).toFixed(2)} gal`],
+    ["Fuel", `${gallons(route).toFixed(2)} gal · ${dollars(gallons(route) * state.fuelPrice)}`],
+    ["CO₂", `${(gallons(route) * CO2_KG_PER_GALLON).toFixed(1)} kg`],
     ["Risky turns", String(riskyTurns(route))],
   ];
-  for (const [label, value] of hazards(f)) items.push([label, String(value)]);
+  for (const [label, value] of hazards(f)) items.push([label, value]);
   return element("dl", { className: "stats" }, ...items.map(([label, value]) => element("div", {}, element("dt", {}, label), element("dd", {}, value))));
 }
 
-// The hazards a route has besides risky turns, as [label, count], for the ones it has.
+function gallons(route) {
+  return route.features.fuel_l / LITERS_PER_GALLON;
+}
+
+// "$1.40", or "35¢" under a dollar.
+function dollars(amount) {
+  return amount < 1 ? `${Math.round(amount * 100)}¢` : `$${amount.toFixed(2)}`;
+}
+
+// The hazards a route has besides risky turns, as [label, shown value], for the ones it has.
 function hazards(f) {
   return [
     ["Lane closures", f.lane_closures],
     ["Closed roads", f.closures],
     ["School zones", f.school_zones],
     ["Rail crossings", f.rail_crossings],
-  ].filter(([, count]) => count > 0);
+    ["Weather hazards", f.weather_hazards || 0],
+  ]
+    .filter(([, count]) => count > 0)
+    .map(([label, count]) => [label, String(count)])
+    .concat((f.sun_glare_min || 0) >= 0.5 ? [["Sun glare", `${Math.round(f.sun_glare_min)} min`]] : []);
 }
 
 function routeList(plan) {
@@ -571,7 +684,7 @@ function routeList(plan) {
         element(
           "div",
           {},
-          element("div", { className: "route__name" }, routeLabel(route, plan)),
+          element("div", { className: "route__name" }, routeLabel(route, plan), " ", scorePill(route.safety_score)),
           element(
             "div",
             { className: "route__reason" },
@@ -590,10 +703,10 @@ function routeList(plan) {
           element(
             "div",
             {},
-            `${(f.fuel_l / LITERS_PER_GALLON).toFixed(2)} gal · `,
+            `${dollars(gallons(route) * state.fuelPrice)} gas · `,
             element("span", { className: risky ? "risky" : "" }, `${risky} risky`),
           ),
-          ...hazards(f).map(([label, count]) => element("div", { className: "risky" }, `${count} ${label.toLowerCase()}`)),
+          ...hazards(f).map(([label, value]) => element("div", { className: "risky" }, `${value} ${label.toLowerCase()}`)),
         ),
       );
       item.addEventListener("click", () => selectRoute(route.id));
@@ -607,15 +720,24 @@ function routeList(plan) {
 
 function comparedWithStandard(winner, standard) {
   const parts = [];
+  if (winner.safety_score !== standard.safety_score) parts.push(`safety score ${standard.safety_score} → ${winner.safety_score}`);
   const fewer = riskyTurns(standard) - riskyTurns(winner);
   if (fewer > 0) parts.push(`${fewer} fewer risky turn${fewer === 1 ? "" : "s"}`);
-  for (const [field, name] of [["lane_closures", "lane closure"], ["school_zones", "school zone"], ["rail_crossings", "rail crossing"]]) {
-    const fewerOf = standard.features[field] - winner.features[field];
+  for (const [field, name] of [
+    ["lane_closures", "lane closure"],
+    ["school_zones", "school zone"],
+    ["rail_crossings", "rail crossing"],
+    ["weather_hazards", "weather hazard"],
+  ]) {
+    const fewerOf = (standard.features[field] || 0) - (winner.features[field] || 0);
     if (fewerOf > 0) parts.push(`${fewerOf} fewer ${name}${fewerOf === 1 ? "" : "s"}`);
   }
+  const glare = (standard.features.sun_glare_min || 0) - (winner.features.sun_glare_min || 0);
+  if (glare >= 0.5) parts.push(`${Math.round(glare)} min less sun glare`);
   if (standard.features.closures && !winner.features.closures) parts.push("avoids a closed road");
-  const gallons = (standard.features.fuel_l - winner.features.fuel_l) / LITERS_PER_GALLON;
-  if (gallons >= 0.01) parts.push(`${gallons.toFixed(2)} gal less fuel`);
+  const cost = (gallons(winner) - gallons(standard)) * state.fuelPrice;
+  if (cost <= -0.01) parts.push(`${dollars(-cost)} less gas`);
+  else if (cost >= 0.01) parts.push(`${dollars(cost)} more gas`);
   const minutes = winner.features.duration_min - standard.features.duration_min;
   if (minutes >= 0.5) parts.push(`${minutes.toFixed(1)} min longer`);
   else if (minutes <= -0.5) parts.push(`${(-minutes).toFixed(1)} min faster`);
@@ -695,7 +817,9 @@ async function startDriving() {
   if (!state.plan || !state.destination) return;
   const nav = state.nav;
   Object.assign(nav, { active: true, following: true, fix: null, anchor: null, heading: null, offRoute: 0, lastRerouteAt: 0 });
+  nav.stopsLeft = chosenStops();
   nav.spoken.clear();
+  stopDemo();
   nav.watchId = navigator.geolocation.watchPosition(onFix, onFixError, {
     enableHighAccuracy: true,
     maximumAge: 2000,
@@ -746,6 +870,12 @@ function onFix(position) {
     speak("You have arrived.");
     return stopDriving("You've arrived.");
   }
+  // A stop reached: new routes from here on leave it out.
+  if (nav.stopsLeft.length && distanceM(here, nav.stopsLeft[0]) <= NAV.arrivedM) {
+    nav.stopsLeft.shift();
+    const left = nav.stopsLeft.length;
+    speak(left ? "You've reached your stop." : "You've reached your last stop.");
+  }
   if (accuracy > NAV.worstAccuracyM) return setNavStatus("Weak GPS signal…");
   checkRoute(here);
 }
@@ -788,7 +918,7 @@ async function reroute(here) {
   const countryCode = (state.origin && state.origin.countryCode) || null;
   const origin = { ...here, label: "Current location", countryCode };
   try {
-    const trip = await requestTrip(origin, state.destination, nav.heading);
+    const trip = await requestTrip(origin, state.destination, { heading: nav.heading, stops: nav.stopsLeft });
     if (!nav.active) return;
     state.origin = origin; // its pin returns when driving stops
     $("origin-picked").textContent = origin.label;
@@ -896,6 +1026,212 @@ function nearestOnPath(point, path) {
 }
 
 
+// ---- Stops on the way (up to MAX_STOPS, in order)
+
+async function addStop() {
+  if (state.stops.length >= MAX_STOPS || !state.view) return;
+  const id = state.nextStopId++;
+  const searchBox = element("div", { id: `stop-${id}-search`, className: "search" });
+  const remove = element("button", { className: "link-button link-button--remove", type: "button" }, "Remove");
+  const pin = element("span", { className: "pin pin--via" });
+  pin.setAttribute("aria-hidden", "true");
+  const row = element(
+    "div",
+    { className: "stop stop--via" },
+    pin,
+    element(
+      "div",
+      { className: "stop__body" },
+      element("div", { className: "stop__head" }, element("span", { className: "stop__label" }), remove),
+      searchBox,
+      element("p", { id: `stop-${id}-picked`, className: "picked" }),
+    ),
+  );
+  remove.addEventListener("click", () => removeStop(id));
+  $("stops").append(row);
+  state.stops.push({ id, point: null, pin: null, row });
+  renumberStops();
+  $("add-stop").hidden = state.stops.length >= MAX_STOPS;
+  await state.view.search(searchBox, "Add a stop", (place) => setStop(id, place));
+  const input = searchBox.querySelector("input");
+  if (input) input.focus();
+}
+
+function setStop(id, place) {
+  const stop = state.stops.find((candidate) => candidate.id === id);
+  if (!stop) return;
+  stop.point = place;
+  renumberStops();
+}
+
+function removeStop(id) {
+  const index = state.stops.findIndex((stop) => stop.id === id);
+  if (index < 0) return;
+  const [stop] = state.stops.splice(index, 1);
+  stop.row.remove();
+  if (stop.pin) stop.pin.remove();
+  renumberStops();
+  $("add-stop").hidden = false;
+}
+
+// Stops are numbered in order, in the panel and on their map pins.
+function renumberStops() {
+  state.stops.forEach((stop, i) => {
+    const number = String(i + 1);
+    stop.row.querySelector(".pin").textContent = number;
+    stop.row.querySelector(".stop__label").textContent = `Stop ${number}`;
+    if (stop.pin) stop.pin.remove();
+    stop.pin = stop.point
+      ? state.view.marker(stop.point, element("div", { className: "map-pin map-pin--stop" }, element("span", {}, number)), { title: `Stop ${number}` })
+      : null;
+  });
+}
+
+function chosenStops() {
+  return state.stops.filter((stop) => stop.point).map((stop) => stop.point);
+}
+
+// ---- Visitors' answers, and the best time to leave
+
+// "Would you take this route?": answers are counted on the server, with no places kept.
+function feedbackBlock(winner, standard) {
+  const block = element("div", { className: "feedback" }, element("span", { className: "feedback__question" }, "Would you take this route?"));
+  const answer = async (choice) => {
+    block.replaceChildren(element("span", { className: "feedback__thanks" }, "Thanks for your answer!"));
+    try {
+      await postJson("/feedback", {
+        choice,
+        safety_gain: standard ? winner.safety_score - standard.safety_score : 0,
+        extra_min: standard ? Math.round((winner.features.duration_min - standard.features.duration_min) * 10) / 10 : 0,
+        profile: $("profile").value,
+      });
+    } catch (error) {
+      console.warn("The answer wasn't saved:", error);
+    }
+  };
+  for (const [choice, label] of [["yes", "Yes"], ["no", "No"]]) {
+    const button = element("button", { className: `chip chip--${choice}`, type: "button" }, label);
+    button.addEventListener("click", () => answer(choice));
+    block.append(button);
+  }
+  return block;
+}
+
+// "Best time to leave?": the recommended route's safety and time leaving now, in 15 or 30 minutes, or in an hour.
+function leaveTimesBlock() {
+  const block = element("div", { className: "leave-times" });
+  const button = element("button", { className: "chip chip--clock", type: "button" }, "Best time to leave?");
+  button.addEventListener("click", async () => {
+    button.disabled = true;
+    button.textContent = "Comparing…";
+    try {
+      block.replaceChildren(leaveTimesList(await postJson("/leave-times", tripPayload(state.origin, state.destination))));
+    } catch (error) {
+      block.replaceChildren(element("p", { className: "status status--error" }, error.message));
+    }
+  });
+  block.append(button);
+  return block;
+}
+
+function leaveTimesList({ times, best_offset_min: best }) {
+  const rows = times.map((time) => {
+    const when = time.offset_min === 0 ? "Now" : time.offset_min === 60 ? "In 1 hour" : `In ${time.offset_min} min`;
+    const why = [
+      time.sun_glare_min >= 0.5 ? `${Math.round(time.sun_glare_min)} min sun glare` : "",
+      time.school_zones ? `${time.school_zones} school zone${time.school_zones === 1 ? "" : "s"}` : "",
+    ].filter(Boolean);
+    const row = element(
+      "button",
+      { className: `leave-time${time.offset_min === best ? " leave-time--best" : ""}`, type: "button", title: "Plan the trip for this time" },
+      element("span", { className: "leave-time__when" }, `${when} · ${clockTime(time.leaving_at)}`),
+      element("span", { className: "leave-time__why" }, why.join(" · ") || "No sun glare or school zones"),
+      element("span", { className: "leave-time__numbers" }, scorePill(time.safety_score), ` ${Math.round(time.duration_min)} min`),
+    );
+    row.addEventListener("click", () => {
+      $("leave").value = String(time.offset_min);
+      findRoute();
+    });
+    return row;
+  });
+  return element("div", { className: "leave-times__list" }, element("p", { className: "results__heading" }, "Best time to leave · pick one to plan it"), ...rows);
+}
+
+// ---- Demo mode: sample trips for an expo screen while no one's using it
+
+function setUpDemo() {
+  const fromLink = new URLSearchParams(window.location.search).get("demo");
+  let on = fromLink === "1";
+  try {
+    if (fromLink !== null) localStorage.setItem("routes-demo", on ? "on" : "off");
+    else on = localStorage.getItem("routes-demo") === "on";
+  } catch {
+    // Storage blocked: the link's ?demo=1 still works for this visit.
+  }
+  state.demo.on = on;
+  $("demo-mode").checked = on;
+  $("demo-mode").addEventListener("change", (event) => {
+    state.demo.on = event.target.checked;
+    try {
+      localStorage.setItem("routes-demo", state.demo.on ? "on" : "off");
+    } catch {
+      // Remembered for this visit only.
+    }
+    if (!state.demo.on) stopDemo();
+    restartIdleTimer();
+  });
+  // Anyone touching the page ends the demo, and the idle countdown starts over.
+  for (const type of ["pointerdown", "keydown", "wheel", "touchstart"]) {
+    document.addEventListener(type, (event) => event.isTrusted && userIsHere(), { capture: true, passive: true });
+  }
+  restartIdleTimer();
+}
+
+function userIsHere() {
+  if (state.demo.running) stopDemo();
+  restartIdleTimer();
+}
+
+function restartIdleTimer() {
+  clearTimeout(state.demo.idleTimer);
+  if (state.demo.on && !state.nav.active) state.demo.idleTimer = setTimeout(startDemo, DEMO.idleMs);
+}
+
+function startDemo() {
+  if (!state.demo.on || state.nav.active || document.querySelector("dialog[open]")) return restartIdleTimer();
+  state.demo.running = true;
+  demoStep();
+}
+
+async function demoStep() {
+  if (!state.demo.running) return;
+  const trip = DEMO.trips[state.demo.index % DEMO.trips.length];
+  state.demo.index += 1;
+  for (const stop of [...state.stops]) removeStop(stop.id);
+  setPoint("origin", { ...trip.from, countryCode: "US" });
+  setPoint("destination", { ...trip.to, countryCode: "US" });
+  const banner = $("demo-banner");
+  banner.replaceChildren(
+    element("strong", {}, `Sample trip: ${trip.from.label} → ${trip.to.label}`),
+    element("span", {}, "Touch anywhere to plan your own"),
+  );
+  banner.hidden = false;
+  try {
+    const result = await requestTrip(state.origin, state.destination, { stops: [], demo: true });
+    if (state.demo.running) showTrip(result);
+  } catch (error) {
+    console.warn("A sample trip failed:", error);
+  }
+  if (state.demo.running) state.demo.stepTimer = setTimeout(demoStep, DEMO.showMs);
+}
+
+function stopDemo() {
+  if (state.demo.running) state.demo.stoppedAt = Date.now();
+  state.demo.running = false;
+  clearTimeout(state.demo.stepTimer);
+  $("demo-banner").hidden = true;
+}
+
 // ---- About this app, and the link for phones
 
 // "How it works", with the headline numbers of the latest results summary (python -m app.evaluate).
@@ -923,6 +1259,9 @@ function resultLines(r) {
   const avoided = r.risky_turns_standard - r.risky_turns_ours;
   const lines = [
     `${r.different} of ${r.trips} trips got a different route than the standard one.`,
+    ...(r.safety_score_ours !== undefined
+      ? [`Average safety score: ${count(r.safety_score_standard / r.trips)} for the standard routes, ${count(r.safety_score_ours / r.trips)} for ours.`]
+      : []),
     `${count(avoided)} risky turns avoided: ${count(r.risky_turns_standard)} on the standard routes, ${count(r.risky_turns_ours)} on ours.`,
   ];
   for (const [key, name] of [["closures", "Closed roads"], ["lane_closures", "Lane closures"], ["school_zones", "School zones"], ["rail_crossings", "Railroad crossings"]]) {
