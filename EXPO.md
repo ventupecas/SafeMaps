@@ -52,6 +52,16 @@ It takes a while.
 - **If the server is busy:** add `--endpoint https://overpass.kumi.systems/api/interpreter`.
 - **Afterwards:** restart the server so it loads the new map. `curl.exe http://127.0.0.1:3143/health` should then show `rail_crossings` and `schools` above 0 under `hazards`.
 
+### Optional: all reported crashes, not only fatal ones
+
+The crash-prone junction rule uses fatal crashes (NHTSA). Wisconsin's Community Maps has every reported crash: export the Milwaukee-area crashes as CSV from <https://transportal.cee.wisc.edu/partners/community-maps/crash/> (by hand: its terms forbid automated downloading), then:
+
+```powershell
+.\.venv\Scripts\python.exe -m app.crash_data import C:\path\to\the-export.csv
+```
+
+It prints the two lines to put in `backend\.env` (`ROUTES_CRASH_DATA=...` and `ROUTES_CRASH_MIN_COUNT=...`). Restart the server and check `/health`: `crash_locations` under `hazards` shows how many spots count. If it can't tell which columns hold the coordinates, it stops and lists the columns the file has.
+
 ### Make the results summary
 
 Runs 20 Milwaukee trips and writes `RESULTS.md` at the repo root: risky turns avoided, closures, fuel and minutes, compared with the standard route. It's a good thing to print for the table. It also writes `frontend\results.json`, the numbers the page's **How it works** shows visitors. With `ROUTES_MAP=osm` it costs nothing from Google; on Google's map each new trip costs one cheap Google request, and reruns use saved answers. Rerun it after the road map rebuild so school zones and rail crossings show up, and the day before the expo so the numbers reflect that week's closures.
@@ -74,6 +84,7 @@ All tests should pass. They don't call Google or cost anything. Run them after a
 |---|---|---|
 | `WI511_API_KEY` | the key 511WI emails you | Adds crashes and incidents to the work zones. See the README's "Getting the Wisconsin 511 key". |
 | `TOMTOM_API_KEY` | your key from developer.tomtom.com | Live traffic on every street (jams, closures, lane closures, crashes) and the traffic map under **Show traffic**, on the OpenStreetMap map. Free plan; the server keeps each day under 80 requests and 6,000 map tiles (`ROUTES_TOMTOM_DAILY_REQUESTS`, `ROUTES_TOMTOM_DAILY_TILES`). |
+| `ROUTES_FUEL_PRICE` | today's price of a gallon, e.g. `3.19` | Each route's fuel cost on the page. Default $3.25. |
 | `ROUTES_DAILY_LIMIT` | 7 × the trips you expect, e.g. `700` for 100 trips | Each trip with Live traffic on costs about 4–7 Google requests. Google's free allowance for these is 5,000 a month. |
 | `ROUTES_CACHE_MODE` | `record` (leave as is) | Live answers, saved as they come. |
 | `ROUTES_MAP` | `google` or `osm` | `osm` shows an OpenStreetMap map with no Google logo and no Google calls at all, so no Google costs. Live traffic then comes from TomTom (every street) and Wisconsin 511, and **Show traffic** shows TomTom's traffic map. `google` keeps Google's map with Google's live traffic, and TomTom isn't used. Restart the server after changing it. |
@@ -118,15 +129,24 @@ Look for:
 - `matched_ahead: true`: the closures and jams across the metro are matched to the road map, so trips don't wait for it. It takes about a minute after the server starts; check again if it's still `false`.
 - `google_requests_today` well under your daily limit, and `tomtom_requests_today` under 80
 
+### Turn on demo mode on the booth screen
+
+Open **http://127.0.0.1:3143/?demo=1** on the screen visitors see. After 45 seconds with no one touching it, the page plans sample trips by itself (Fiserv Forum to Bay View, and three more), one every 20 seconds, with a "Sample trip" banner. Any touch stops it, so visitors can plan their own; it starts again once they leave. The browser remembers the setting; turn it off under **Advanced**. Sample trips cost no paid requests.
+
 ### Rehearse the showcase trips
 
 Open **http://127.0.0.1:3143** and run the 2–3 trips you plan to show.
 
 - **Pick places with the search boxes, not map clicks,** so the trips repeat exactly.
 - **Try "Extra time you'd accept for a safer route":** "Up to 10 minutes" stops a much slower route from winning on a long trip. Visitors can pick their own.
+- **Good things to show:** the safety score ring; **Best time to leave?** near sunset (waiting until the sun is down often scores higher); a trip with a stop; the **New driver** profile.
 - **This also saves Google's answers** for those trips, which the zero-cost fallback below relies on.
 
 ## 4. During the expo
+
+### Visitors' answers
+
+Under each recommendation the page asks "Would you take this route?". See the count at any time at **http://127.0.0.1:3143/feedback-summary**: yes and no, and how much safer and longer the routes were for each. No places are kept.
 
 ### Watch usage
 
@@ -213,4 +233,5 @@ git commit -m "Expo version"
 ## 6. After the expo
 
 - **Stop the server:** press Ctrl+C in its window.
+- **Keep the visitors' answers:** copy `backend\.cache\routes\feedback.jsonl` somewhere safe (one answer a line), and save the `/feedback-summary` numbers for your write-up.
 - **Replace any key that was ever shared** (pasted into a chat, an email or a screenshot): create a new one under **APIs & Services → Credentials** in the Cloud Console, put it in `backend\.env` or `frontend\config.js`, and delete the old one.

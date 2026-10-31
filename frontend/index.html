@@ -4,55 +4,97 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Safe Route Planner</title>
+    <meta name="theme-color" content="#0b7a53" />
+    <link
+      rel="icon"
+      href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='9' fill='%230b7a53'/%3E%3Cpath d='M10.5 22.5c0-4.2 3.2-5.3 5.5-6s5.5-1.8 5.5-6' fill='none' stroke='white' stroke-width='2.4' stroke-linecap='round'/%3E%3Ccircle cx='10.5' cy='22.5' r='2.7' fill='white'/%3E%3Ccircle cx='21.5' cy='10.5' r='2.7' fill='white'/%3E%3C/svg%3E"
+    />
     <link rel="stylesheet" href="styles.css" />
   </head>
   <body>
     <main class="layout">
       <aside class="panel" aria-label="Trip planner">
         <header class="panel__header">
-          <h1>Safe Route Planner</h1>
-          <p class="tagline">Safety first, then fuel, then time.</p>
+          <div class="brand">
+            <svg class="brand__mark" viewBox="0 0 32 32" aria-hidden="true">
+              <rect width="32" height="32" rx="9" fill="currentColor" />
+              <path d="M10.5 22.5c0-4.2 3.2-5.3 5.5-6s5.5-1.8 5.5-6" fill="none" stroke="#fff" stroke-width="2.4" stroke-linecap="round" />
+              <circle cx="10.5" cy="22.5" r="2.7" fill="#fff" />
+              <circle cx="21.5" cy="10.5" r="2.7" fill="#fff" />
+            </svg>
+            <div>
+              <h1>Safe Route Planner</h1>
+              <p class="tagline">Safety first, then fuel, then time.</p>
+            </div>
+          </div>
           <nav class="header-links" aria-label="About this app">
-            <button id="about-open" class="link-button" type="button" aria-haspopup="dialog">How it works</button>
-            <button id="phone-open" class="link-button" type="button" aria-haspopup="dialog">Open on your phone</button>
+            <button id="about-open" class="chip chip--info" type="button" aria-haspopup="dialog">How it works</button>
+            <button id="phone-open" class="chip chip--phone" type="button" aria-haspopup="dialog">Open on your phone</button>
           </nav>
         </header>
 
         <section class="trip" aria-label="Trip">
-          <div class="field">
-            <span class="field__label">
-              <span class="pin pin--a">A</span> Start
-              <button id="locate" class="link-button" type="button">Use my location</button>
-            </span>
-            <div id="origin-search" class="search"></div>
-            <p id="origin-picked" class="picked"></p>
+          <div class="trip-card">
+            <div class="stop stop--a">
+              <span class="pin pin--a" aria-hidden="true">A</span>
+              <div class="stop__body">
+                <div class="stop__head">
+                  <span class="stop__label" id="origin-label">Start</span>
+                  <button id="locate" class="link-button" type="button">Use my location</button>
+                </div>
+                <div id="origin-search" class="search"></div>
+                <p id="origin-picked" class="picked"></p>
+              </div>
+            </div>
+            <div id="stops" class="stops"></div>
+            <div class="stop stop--b">
+              <span class="pin pin--b" aria-hidden="true">B</span>
+              <div class="stop__body">
+                <div class="stop__head"><span class="stop__label" id="destination-label">Destination</span></div>
+                <div id="destination-search" class="search"></div>
+                <p id="destination-picked" class="picked"></p>
+              </div>
+            </div>
+            <button id="add-stop" class="link-button add-stop" type="button">Add a stop</button>
           </div>
-          <div class="field">
-            <span class="field__label"><span class="pin pin--b">B</span> Destination</span>
-            <div id="destination-search" class="search"></div>
-            <p id="destination-picked" class="picked"></p>
-          </div>
-          <p class="hint">Search for a place, or click the map: first click sets the start, the next the destination.</p>
+          <p class="hint">Search for a place, or click the map: the first click sets the start, the next the destination.</p>
 
-          <div class="field">
-            <label class="field__label" for="profile">Driver profile</label>
-            <select id="profile"></select>
-          </div>
-
-          <div class="field">
-            <label class="field__label" for="extra-time">Extra time you'd accept for a safer route</label>
-            <select id="extra-time">
-              <option value="" selected>No fixed limit</option>
-              <option value="5">Up to 5 minutes</option>
-              <option value="10">Up to 10 minutes</option>
-              <option value="15">Up to 15 minutes</option>
-            </select>
+          <div class="prefs">
+            <div class="field">
+              <label class="field__label" for="profile">Driver profile</label>
+              <select id="profile"></select>
+            </div>
+            <div class="field">
+              <label class="field__label" for="extra-time">Extra time you'd accept for a safer route</label>
+              <select id="extra-time">
+                <option value="" selected>No fixed limit</option>
+                <option value="5">Up to 5 minutes</option>
+                <option value="10">Up to 10 minutes</option>
+                <option value="15">Up to 15 minutes</option>
+              </select>
+            </div>
+            <div class="field">
+              <label class="field__label" for="leave">Leave</label>
+              <select id="leave">
+                <option value="0" selected>Now</option>
+                <option value="15">In 15 minutes</option>
+                <option value="30">In 30 minutes</option>
+                <option value="60">In 1 hour</option>
+              </select>
+            </div>
           </div>
 
           <div class="toggles">
-            <label><input type="checkbox" id="traffic-layer" /> Show traffic</label>
-            <label><input type="checkbox" id="closures-layer" checked /> Show closures</label>
+            <label class="switch"><input type="checkbox" id="traffic-layer" /><span class="switch__track"></span>Show traffic</label>
+            <label class="switch"><input type="checkbox" id="closures-layer" checked /><span class="switch__track"></span>Show closures</label>
           </div>
+
+          <div class="actions">
+            <button id="find" class="button button--primary" type="button" disabled>Find route</button>
+            <button id="clear" class="button button--ghost" type="button">Clear</button>
+          </div>
+          <button id="drive" class="button button--drive" type="button" hidden>Start driving</button>
+          <label class="switch voice"><input type="checkbox" id="voice" checked /><span class="switch__track"></span>Spoken directions while driving</label>
 
           <details class="advanced">
             <summary>Advanced</summary>
@@ -69,17 +111,13 @@
               </select>
             </div>
             <div class="toggles">
-              <label><input type="checkbox" id="live-traffic" checked /> Live traffic</label>
-              <label><input type="checkbox" id="use-router" checked /> Our router</label>
+              <label class="switch"><input type="checkbox" id="live-traffic" checked /><span class="switch__track"></span>Live traffic</label>
+              <label class="switch"><input type="checkbox" id="use-router" checked /><span class="switch__track"></span>Our router</label>
             </div>
+            <label class="switch demo-switch">
+              <input type="checkbox" id="demo-mode" /><span class="switch__track"></span>Demo mode: show sample trips when no one's using it
+            </label>
           </details>
-
-          <div class="actions">
-            <button id="find" class="button button--primary" type="button" disabled>Find route</button>
-            <button id="clear" class="button" type="button">Clear</button>
-          </div>
-          <button id="drive" class="button button--drive" type="button" hidden>Start driving</button>
-          <label class="voice"><input type="checkbox" id="voice" checked /> Spoken directions while driving</label>
         </section>
 
         <section id="results" class="results" aria-live="polite"></section>
@@ -88,6 +126,7 @@
       <section class="map-wrap">
         <div id="map" class="map" role="application" aria-label="Map"></div>
         <p id="nav-banner" class="nav-banner" role="status" hidden></p>
+        <p id="demo-banner" class="demo-banner" role="status" hidden></p>
         <button id="recenter" class="button recenter" type="button" hidden>Re-center</button>
         <details id="legend" class="legend" open>
           <summary>Map key</summary>
@@ -97,6 +136,7 @@
             <li><span class="key key--alternative"></span>Other routes</li>
             <li><span class="key key--closed"></span>Road closed</li>
             <li><span class="key key--lanes"></span>Lane closure</li>
+            <li class="osm-only"><span class="key key--hazard"></span>Weather hazard: fog, ice, flooding</li>
             <li class="osm-only"><span class="key key--cluster">3</span>Several closures: zoom in</li>
             <li><span class="key key--turn"></span>Risky turn across traffic</li>
             <li id="legend-traffic" hidden><span class="key key--traffic"></span>Traffic: flowing → jammed</li>
@@ -116,17 +156,30 @@
       </p>
       <h3>What makes a route risky</h3>
       <ul>
-        <li><strong>Turns across oncoming traffic</strong> at busy junctions, more so where fatal crashes have happened.</li>
+        <li><strong>Turns across oncoming traffic</strong> at busy junctions, more so where crashes have happened.</li>
         <li>
           <strong>Closed roads and lane closures</strong>, live from Wisconsin's work zones and 511<span class="osm-only">,
           and TomTom traffic</span>.
         </li>
         <li><strong>School zones</strong> at drop-off and pickup times, and <strong>railroad crossings</strong>.</li>
+        <li>
+          <strong>Sun glare:</strong> driving toward a low sun around sunrise and sunset, worked out from where the sun
+          is when you leave.
+        </li>
+        <li>
+          <strong>Weather:</strong> National Weather Service alerts<span class="osm-only">, and fog, ice or flooding
+          reported on the roads</span>. On snow and ice, turns across traffic count as riskier.
+        </li>
       </ul>
+      <p>
+        Each route gets a <strong>safety score</strong> from 0 to 100 that adds these up the same way for everyone:
+        higher is safer.
+      </p>
       <h3>How the routes are found</h3>
       <p>
         Our own router searches Milwaukee's streets for routes that avoid those risks, then compares each with the
-        standard, fastest route. You choose how much extra time a safer route may take.
+        standard, fastest route. You choose how much extra time a safer route may take, and when you leave: school
+        zones and the sun change with the time.
       </p>
       <section id="about-results" hidden>
         <h3 id="about-results-title">Across Milwaukee test trips</h3>
