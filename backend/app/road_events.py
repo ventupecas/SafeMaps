@@ -71,7 +71,8 @@ from app.usage import DailyUsage
 
 logger = logging.getLogger(__name__)
 
-EventKind = Literal["closed", "lanes", "jam", "slow"]
+# hazard: a weather hazard on the road (fog, ice, flooding, high wind), as TomTom reports them.
+EventKind = Literal["closed", "lanes", "jam", "slow", "hazard"]
 
 # Matching events to roads on the map: within EVENT_MATCH_M of a point (GPS-
 # grade positions from the sources).
@@ -125,8 +126,10 @@ _TOMTOM_FIELDS = (
     "{incidents{type,geometry{type,coordinates},properties{id,iconCategory,magnitudeOfDelay,"
     "events{description,code,iconCategory},from,to,length,delay,roadNumbers}}}"
 )
-# TomTom's incident categories (iconCategory) that matter here; the rest are weather and the like.
+# TomTom's incident categories (iconCategory) that matter here.
 _TT_ACCIDENT, _TT_JAM, _TT_LANE_CLOSED, _TT_ROAD_CLOSED, _TT_ROADWORKS = 1, 6, 7, 8, 9
+# Weather on the road: fog, dangerous conditions, rain, ice, wind, flooding.
+_TT_WEATHER = frozenset({2, 3, 4, 5, 10, 11})
 # A TomTom closure with this share of its stretch on official ones (WZDx, 511) is one they already report.
 REPEAT_SHARE = 0.75
 OFFICIAL_SOURCES = frozenset({"wzdx", "wi511"})
@@ -171,10 +174,10 @@ class EventSourceError(RuntimeError):
     """A road event source couldn't answer."""
 
 
-def trip_area(origin: LatLng, destination: LatLng, margin_m: float = TRIP_MARGIN_M) -> BBox:
-    """The box around a trip, widened by margin_m, where its road events matter."""
-    south, north = sorted((origin.lat, destination.lat))
-    west, east = sorted((origin.lng, destination.lng))
+def trip_area(*points: LatLng, margin_m: float = TRIP_MARGIN_M) -> BBox:
+    """The box around a trip's places (start, stops, destination), widened by margin_m, where its road events matter."""
+    south, north = min(p.lat for p in points), max(p.lat for p in points)
+    west, east = min(p.lng for p in points), max(p.lng for p in points)
     middle = (south + north) / 2
     return BBox(
         destination_point((south, west), 180, margin_m)[0],
@@ -716,6 +719,8 @@ def _tomtom_event(incident: Mapping[str, Any]) -> tuple[RoadEvent, Mapping[str, 
     categories = _tomtom_categories(properties)
     if kind in ("jam", "slow"):
         category = "traffic"
+    elif kind == "hazard":
+        category = "weather"
     elif _TT_ACCIDENT in categories:
         category = "incident"
     else:
@@ -759,7 +764,9 @@ def _tomtom_kind(properties: Mapping[str, Any]) -> EventKind | None:
         return "lanes"  # a crash scene takes lanes for a while, and invites another crash
     if _TT_JAM in categories:
         return "slow" if properties.get("magnitudeOfDelay") == 1 else "jam"
-    return None  # roadwork beside the road, a car on the shoulder, weather: no lane taken
+    if categories & _TT_WEATHER:
+        return "hazard"  # fog, ice, flooding: every lane open, but harder to drive
+    return None  # roadwork beside the road, a car on the shoulder: no lane taken
 
 
 def _tomtom_description(properties: Mapping[str, Any], *, both_ways: bool = False) -> str:
@@ -1003,6 +1010,17 @@ def count_on_route(points: Sequence[Point], events: Iterable[RoadEvent]) -> tupl
                 lane_closures += 1
                 with_workers += event.workers
     return closures, lane_closures, with_workers
+
+
+def weather_on_route(points: Sequence[Point], events: Iterable[RoadEvent]) -> int:
+    """Weather hazards (fog, ice, flooding) a route drives through, the way their traffic goes."""
+    if len(points) < 2:
+        return 0
+    relevant = _near(points, [event for event in events if event.kind == "hazard"])
+    if not relevant:
+        return 0
+    route = _RouteIndex(points)
+    return sum(route.runs_along(event) for event in relevant)
 
 
 def delay_on_route(points: Sequence[Point], events: Iterable[RoadEvent]) -> float:

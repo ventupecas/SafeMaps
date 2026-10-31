@@ -31,10 +31,19 @@ from typing import Any, Protocol
 
 from app.driving_side import DrivingSide
 from app.fuel import CONGESTION_L_PER_HOUR, SIGNAL_L, TURN_L, cruise_liters
-from app.geo import Point, decode_polyline, path_length_m, point_along, total_heading_change_deg
+from app.geo import (
+    Point,
+    decode_polyline,
+    haversine_m,
+    initial_bearing_deg,
+    path_length_m,
+    point_along,
+    total_heading_change_deg,
+)
 from app.hotspots import CrashHotspots
 from app.models import CrossingTurn, LatLng, Maneuver, RouteFeatures
-from app.road_events import RoadEvent, count_on_route
+from app.road_events import RoadEvent, count_on_route, weather_on_route
+from app.sun import Sun, glare, low_sun
 
 # Calibration knobs. Tune them against routes you have recorded in the cache.
 HIGHWAY_SPEED_KMH = 80.0
@@ -118,6 +127,8 @@ class TurnContext:
     events: tuple[RoadEvent, ...] = ()
     # School zones count only while schools are in session (see engine.school_in_session).
     school_hours: bool = False
+    # The sun's (azimuth, elevation) at departure, for sun glare (see app.sun); None: not known.
+    sun: Sun | None = None
 
     def __post_init__(self) -> None:
         if self.min_hotspot_crashes <= 0:
@@ -159,7 +170,7 @@ def extract_features(route: Mapping[str, Any], context: TurnContext = TurnContex
     # Fall back to duration so a missing baseline reads as zero delay, not negative.
     static_s = parse_duration_s(route.get("staticDuration")) or duration_s
 
-    highway_s = highway_m = winding_s = 0.0
+    highway_s = highway_m = winding_s = glare_s = 0.0
     cruise_l = covered_m = 0.0
     maneuvers = 0
     crossing_turns: list[CrossingTurn] = []
@@ -184,6 +195,8 @@ def extract_features(route: Mapping[str, Any], context: TurnContext = TurnContex
         if speed is not None:
             cruise_l += cruise_liters(step_m, speed)
             covered_m += step_m
+        if low_sun(context.sun) and step_s > 0:
+            glare_s += step_s * _share_into_sun(points, context.sun)
         if speed is not None and speed >= HIGHWAY_SPEED_KMH:
             highway_s += step_s
             highway_m += step_m
@@ -207,11 +220,9 @@ def extract_features(route: Mapping[str, Any], context: TurnContext = TurnContex
     rail_crossings = along("rail_crossings_along")
     school_zones = along("schools_along") if context.school_hours else 0
     fuel_l = cruise_l + maneuvers * TURN_L + signals * SIGNAL_L + delay_s / 3600 * CONGESTION_L_PER_HOUR
-    closures, lane_closures, with_workers = (
-        count_on_route(decode_polyline(route.get("polyline", {}).get("encodedPolyline", "")), context.events)
-        if context.events
-        else (0, 0, 0)
-    )
+    route_points = decode_polyline(route.get("polyline", {}).get("encodedPolyline", "")) if context.events else []
+    closures, lane_closures, with_workers = count_on_route(route_points, context.events) if context.events else (0, 0, 0)
+    weather_hazards = weather_on_route(route_points, context.events) if context.events else 0
 
     return RouteFeatures(
         distance_km=distance_m / 1000,
@@ -230,7 +241,20 @@ def extract_features(route: Mapping[str, Any], context: TurnContext = TurnContex
         lane_closures_with_workers=with_workers,
         school_zones=school_zones,
         rail_crossings=rail_crossings,
+        weather_hazards=weather_hazards,
+        sun_glare_min=glare_s / 60,
     )
+
+
+def _share_into_sun(points: Sequence[Point], sun: Sun | None) -> float:
+    """The share of a stretch's length driven toward a low sun."""
+    total = into = 0.0
+    for a, b in zip(points, points[1:]):
+        length = haversine_m(a, b)
+        total += length
+        if length > 1 and glare(initial_bearing_deg(a, b), sun):
+            into += length
+    return into / total if total else 0.0
 
 
 # Turn-by-turn wording per maneuver; "onto <road>" follows when the road has a name.

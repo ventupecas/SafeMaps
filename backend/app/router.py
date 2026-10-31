@@ -36,10 +36,11 @@ from app.features import (
     crosses_traffic,
 )
 from app.fuel import MIN_L_PER_KM, SIGNAL_L, TURN_L, cruise_liters
-from app.geo import Point, angle_between_deg, encode_polyline, haversine_m
+from app.geo import Point, angle_between_deg, encode_polyline, haversine_m, initial_bearing_deg
 from app.models import ScoringProfile
 from app.road_events import MAX_SLOWDOWN, WORKERS_PRESENT_FACTOR, RoadEvent
 from app.roadgraph import DEFAULT_SPEED_FACTOR, RoadGraph
+from app.sun import GLARE_ANGLE_DEG, Sun, low_sun
 
 LINK_CLASSES = frozenset({"motorway_link", "trunk_link", "primary_link", "secondary_link", "tertiary_link"})
 FREEWAY_CLASSES = frozenset({"motorway", "trunk"})
@@ -85,6 +86,7 @@ UTURN_MIN_DEG = 150.0
 JAM_FACTOR = 3.0
 SLOW_FACTOR = 1.5
 LANE_CLOSURE_FACTOR = 1.5
+WEATHER_FACTOR = 1.3  # a stretch with fog, ice or flooding reported is driven this much slower
 # OSM hazards: a railroad crossing at grade adds RAIL_CROSSING_S (slowing down,
 # and now and then a train) plus rail_crossing_weight. During school hours a
 # school zone is driven at SCHOOL_ZONE_KMH (20 mph), and entering one costs
@@ -141,6 +143,8 @@ def design_profile(profile: ScoringProfile) -> ScoringProfile:
             "lane_closure_weight": profile.lane_closure_weight * PRIORITY_SAFETY_BOOST,
             "school_zone_weight": profile.school_zone_weight * PRIORITY_SAFETY_BOOST,
             "rail_crossing_weight": profile.rail_crossing_weight * PRIORITY_SAFETY_BOOST,
+            "weather_hazard_weight": profile.weather_hazard_weight * PRIORITY_SAFETY_BOOST,
+            "sun_glare_weight": profile.sun_glare_weight * PRIORITY_SAFETY_BOOST,
             "fuel_weight": profile.fuel_weight * PRIORITY_FUEL_BOOST,
         }
     )
@@ -176,6 +180,7 @@ class Router:
         self._steps: dict[int, list[Step]] = {}
         self._crashes: dict[int, float] = {}
         self._event_edges: dict[tuple[Any, ...], frozenset[int]] = {}
+        self._bearings: list[float] | None = None
 
     def routes(
         self,
@@ -188,6 +193,7 @@ class Router:
         heading: float | None = None,
         events: Sequence[RoadEvent] = (),
         school_hours: bool = False,
+        sun: Sun | None = None,
     ) -> list[RoutedPath]:
         """Up to count distinct routes for this profile, best first.
 
@@ -199,7 +205,8 @@ class Router:
         road it's on, without turning around. events are closures, lane
         closures and jams on the roads now: closed roads are left out (except
         under the car), and the rest cost more (see JAM_FACTOR and below).
-        During school_hours, school zones cost more too (see SCHOOL_ZONE_KMH).
+        During school_hours, school zones cost more too (see SCHOOL_ZONE_KMH),
+        and with sun (its azimuth and elevation) low, so do roads heading into it.
         """
         g = self.graph
         departures = self._departures(origin, heading)
@@ -210,7 +217,7 @@ class Router:
         if heading is None and g.edge_from[departures[0]] == end:
             return []
 
-        costs = self._costs(design_profile(profile), events, keep=departures, school_hours=school_hours)
+        costs = self._costs(design_profile(profile), events, keep=departures, school_hours=school_hours, sun=sun)
         on_offer = [edges for edges in (g.edges_along(points) for points in avoid) if edges]
         penalties: dict[int, float] = {}
         found: list[RoutedPath] = []
@@ -406,11 +413,18 @@ class Router:
         return edges
 
     def _costs(
-        self, profile: ScoringProfile, events: Sequence[RoadEvent], *, keep: Iterable[int], school_hours: bool = False
+        self,
+        profile: ScoringProfile,
+        events: Sequence[RoadEvent],
+        *,
+        keep: Iterable[int],
+        school_hours: bool = False,
+        sun: Sun | None = None,
     ) -> _Costs:
         """What every segment and turn costs this trip, with its road events (and school zones, in school hours) applied.
 
         Segments in keep (where the car is) are never closed off: it's already there.
+        With the sun low, segments heading toward it cost sun_glare_weight per minute more.
         """
         g = self.graph
         edge_costs = self._edge_costs(profile)
@@ -422,6 +436,12 @@ class Router:
                 if g.school_zone[edge]:
                     edge_costs[edge] *= max(1.0, g.speed_kmh[edge] / SCHOOL_ZONE_KMH)
                     zones[edge] = {SCHOOL_ZONE}
+        if low_sun(sun) and profile.sun_glare_weight:
+            # app.sun.glare, inlined: it runs for every segment of the map.
+            azimuth, per_s = sun[0], profile.sun_glare_weight / 60
+            for edge, bearing in enumerate(self._edge_bearings()):
+                if abs((bearing - azimuth + 180) % 360 - 180) <= GLARE_ANGLE_DEG:
+                    edge_costs[edge] += per_s * g.time_s[edge]
         keep = set(keep)
         for number, event in enumerate(events):
             edges = self.event_edges(event)
@@ -441,6 +461,11 @@ class Router:
                     zone_costs[number] = profile.lane_closure_weight * (
                         WORKERS_PRESENT_FACTOR if event.workers else 1.0
                     )
+                elif event.kind == "hazard":
+                    # Fog, ice, flooding: driven slower, and entering it costs weather_hazard_weight once.
+                    edge_costs[edge] *= WEATHER_FACTOR
+                    zones.setdefault(edge, set()).add(number)
+                    zone_costs[number] = profile.weather_hazard_weight
                 else:
                     edge_costs[edge] *= slowdown
         return _Costs(
@@ -450,6 +475,15 @@ class Router:
             zones={edge: frozenset(numbers) for edge, numbers in zones.items()},
             zone_costs=zone_costs,
         )
+
+    def _edge_bearings(self) -> list[float]:
+        """Each segment's compass direction, end to end, worked out once."""
+        if self._bearings is None:
+            g = self.graph
+            self._bearings = [
+                initial_bearing_deg(g.point(g.edge_from[edge]), g.point(g.edge_to[edge])) for edge in range(g.edge_count)
+            ]
+        return self._bearings
 
     def _slowdown(self, event: RoadEvent, edges: Iterable[int]) -> float:
         """How many times its usual time a slow or jammed stretch takes.

@@ -93,6 +93,7 @@ class Outcome:
 
 
 MEASURES = (
+    ("safety_score", "Safety score"),
     ("risky_turns", "Risky turns"),
     ("closures", "Closed roads"),
     ("lane_closures", "Lane closures"),
@@ -107,6 +108,7 @@ MEASURES = (
 def measure(route: dict[str, Any]) -> dict[str, float]:
     f = route["features"]
     return {
+        "safety_score": route.get("safety_score", 100),
         "risky_turns": f["busy_crossing_turns"] + f["hotspot_crossing_turns"],
         "closures": f["closures"],
         "lane_closures": f["lane_closures"],
@@ -193,6 +195,8 @@ def report(outcomes: Sequence[Outcome], failures: Sequence[str], live_traffic: b
             "## Headline",
             "",
             f"- **{len(differs)} of {len(compared)} trips** got a different route than the standard one.",
+            f"- **Safety score** (0-100, higher is safer): {total('safety_score', 0) / len(compared):.0f} on average"
+            f" for the standard routes, **{total('safety_score', 1) / len(compared):.0f}** for ours.",
             f"- **{risky_avoided:g} risky turns avoided** in all ({risky_avoided / len(compared):.1f} per trip):"
             f" {total('risky_turns', 0):g} on the standard routes, {total('risky_turns', 1):g} on ours.",
             f"- **Closed roads driven through:** {total('closures', 0):g} standard, {total('closures', 1):g} ours."

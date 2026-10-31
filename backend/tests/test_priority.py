@@ -129,6 +129,14 @@ def test_a_winner_that_wins_only_because_safer_routes_are_too_slow_says_so():
     assert ranked[0].reason == "safest within 1.6x the fastest time; safer routes take longer"
 
 
+def test_the_safety_score_reads_the_same_whatever_the_profile():
+    calm = route("calm", minutes=20, fuel=2.0)
+    risky = route("risky", minutes=18, fuel=1.9, busy_lefts=1, crash_lefts=1)  # risk points: 3 + (3 + 6)
+    for profile in (PRIORITY, PRESETS["fastest"]):
+        scores = {r.id: r.safety_score for r in rank_candidates([calm, risky], profile)}
+        assert scores == {"calm": 100, "risky": round(100 / (1 + 12 / 10))}
+
+
 def test_a_driver_can_cap_the_extra_minutes_a_safer_route_may_take():
     quick = route("quick", minutes=30, fuel=2.0, busy_lefts=2)
     careful = route("careful", minutes=42, fuel=2.2)  # 12 min more: within 1.6x

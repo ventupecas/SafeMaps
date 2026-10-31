@@ -24,16 +24,26 @@ from app.candidates import CandidateOptions, RawCandidate, RouteFetcher, gather_
 from app.config import Settings
 from app.driving_side import DrivingSide, driving_side_for_country
 from app.features import TurnContext, directions, extract_features
-from app.geo import Point, decode_polyline, densify, haversine_m, initial_bearing_deg, midpoint
+from app.geo import Point, decode_polyline, densify, encode_polyline, haversine_m, initial_bearing_deg, midpoint
 from app.hotspots import CrashHotspots
-from app.models import CandidateRoute, LatLng, RoutePlan, ScoredRoute, ScoringProfile
+from app.models import (
+    CandidateRoute,
+    LatLng,
+    Maneuver,
+    RouteFeatures,
+    RoutePlan,
+    ScoreBreakdown,
+    ScoredRoute,
+    ScoringProfile,
+)
 from app.pricing import design_match, price_route
 from app.fuel import CONGESTION_L_PER_HOUR
 from app.road_events import RoadEvent, delay_on_route, jams_on_routes
 from app.roadgraph import RoadGraph
 from app.router import OutsideGraphError, RoutedPath, Router
 from app.routes_client import RoutesApiError
-from app.scoring import rank_candidates
+from app.scoring import rank_candidates, safety_score
+from app.sun import Sun, sun_position
 
 # A route is left out of the plan when more than this share of it runs along a
 # better-ranked one: on the map it would look like the same route. The winner
@@ -51,6 +61,7 @@ class CandidatePool:
     candidates: list[CandidateRoute]
     notes: list[str] = field(default_factory=list)  # anything the viewer should know, e.g. a skipped route
     events: list[RoadEvent] = field(default_factory=list)  # slowdowns Google reported along its suggestions
+    routes: dict[str, dict[str, Any]] = field(default_factory=dict)  # each candidate's route, to judge again (rejudge)
 
 
 def load_hotspots(settings: Settings) -> CrashHotspots | None:
@@ -70,21 +81,25 @@ def make_turn_context(
     graph: RoadGraph | None = None,
     *,
     now: datetime | None = None,
+    where: LatLng | None = None,
 ) -> TurnContext:
-    """Turn-judging context for one trip, leaving now (local time; the clock's by default).
+    """Turn-judging context for one trip, leaving now (local time; the clock's by default) from where.
 
     The driving side comes from the trip's country (the frontend gets it from
     the Places selection), else ROUTES_DEFAULT_COUNTRY, else keep-right. With
     the road graph, every route's turns, Google's included, are judged by the
     roads meeting at each junction, and its school zones count during school hours.
+    With where, the sun's position at departure gives each route's sun glare.
     """
     code = country_code or settings.default_country
+    moment = now or datetime.now()
     return TurnContext(
         driving_side=driving_side_for_country(code) if code else DrivingSide.RIGHT,
         hotspots=hotspots,
         min_hotspot_crashes=settings.crash_min_count,
         junctions=graph,
-        school_hours=school_in_session(now or datetime.now(), settings.school_hours),
+        school_hours=school_in_session(moment, settings.school_hours),
+        sun=sun_position(moment, where.lat, where.lng) if where is not None else None,
     )
 
 
@@ -179,6 +194,7 @@ def build_router_candidates(
             heading=heading,
             events=[*context.events, *pool.events],
             school_hours=context.school_hours,
+            sun=context.sun,
         )
     except OutsideGraphError as exc:
         pool.notes.append(f"Own router skipped: {exc}.")
@@ -209,6 +225,7 @@ def _add_baseline(
             heading=heading,
             events=context.events,
             school_hours=context.school_hours,
+            sun=context.sun,
         )
     except OutsideGraphError as exc:
         pool.notes.append(f"Standard route skipped: {exc}.")
@@ -216,6 +233,7 @@ def _add_baseline(
     if found:
         route = router.to_route_json(found[0])
         pool.candidates.append(_candidate("standard", "baseline", route, context, live_traffic=False, standard=True))
+        pool.routes["standard"] = route
 
 
 def _add_google_suggestions(
@@ -243,6 +261,7 @@ def _add_google_suggestions(
         pool.notes.append(f"Google's suggestions skipped: {exc}")
         return
     pool.candidates += [_candidate(c.id, c.source, c.route, context, live_traffic=price) for c in raw]
+    pool.routes.update((c.id, c.route) for c in raw)
     if traffic_on_polyline:
         pool.events += jams_on_routes(c.route for c in raw)
 
@@ -285,6 +304,7 @@ def _add_own_routes(
             pool.notes.append(f"{candidate_id} came back identical to another candidate.")
             continue
         seen.add(polyline)
+        pool.routes[candidate_id] = route
         pool.candidates.append(
             _candidate(candidate_id, "own", route, context, live_traffic=price, design_match=match)
         )
@@ -303,6 +323,80 @@ def plan_from_candidates(candidates: Sequence[CandidateRoute], profile: ScoringP
         else:
             hidden[route.id] = followed
     return RoutePlan(profile=profile, winner=ranked[0], candidates=kept, hidden=hidden)
+
+
+def rejudge(pool: CandidatePool, context: TurnContext) -> list[CandidateRoute]:
+    """The pool's routes judged again in another context, such as a later departure (school zones, the sun)."""
+    return [
+        _candidate(
+            candidate.id,
+            candidate.source,
+            pool.routes[candidate.id],
+            context,
+            live_traffic=candidate.live_traffic,
+            design_match=candidate.design_match,
+            standard=candidate.is_standard,
+        )
+        for candidate in pool.candidates
+        if candidate.id in pool.routes
+    ]
+
+
+def combine_legs(plans: Sequence[RoutePlan], stops: Sequence[LatLng]) -> RoutePlan:
+    """One plan for a trip with stops, from each leg's plan (stops[i] ends leg i).
+
+    The recommended route is each leg's recommendation in turn, and the
+    standard route each leg's standard route; when those are the same on every
+    leg, there's one route. Numbers add up over the legs, and the directions
+    say "Arrive at stop N" between them.
+    """
+    standards = [next((route for route in plan.candidates if route.is_standard), None) for plan in plans]
+    same = all(standard is not None and standard.id == plan.winner.id for standard, plan in zip(standards, plans))
+    recommended = _joined(
+        [plan.winner for plan in plans], stops, "trip-recommended", standard=same, reason="the recommended route on every leg"
+    )
+    candidates = [recommended]
+    if not same and all(standards):
+        legs = [standard for standard in standards if standard is not None]
+        candidates.append(_joined(legs, stops, "trip-standard", standard=True, reason="the standard route on every leg"))
+    return RoutePlan(profile=plans[0].profile, winner=recommended, candidates=candidates)
+
+
+def _joined(legs: Sequence[ScoredRoute], stops: Sequence[LatLng], route_id: str, *, standard: bool, reason: str) -> ScoredRoute:
+    points: list[Point] = []
+    maneuvers: list[Maneuver] = []
+    for number, leg in enumerate(legs):
+        leg_points = decode_polyline(leg.encoded_polyline)
+        points += leg_points if not points else leg_points[1:]
+        if number:
+            maneuvers.append(Maneuver(maneuver="WAYPOINT", instruction=f"Arrive at stop {number}", location=stops[number - 1]))
+        maneuvers += leg.maneuvers
+    features = RouteFeatures(
+        **{
+            name: tuple(turn for leg in legs for turn in leg.features.crossing_turns)
+            if name == "crossing_turns"
+            else sum(getattr(leg.features, name) for leg in legs)
+            for name in RouteFeatures.model_fields
+        }
+    )
+    vias = list(dict.fromkeys(leg.via for leg in legs if leg.via))
+    return ScoredRoute(
+        id=route_id,
+        source="own" if any(leg.source == "own" for leg in legs) else legs[0].source,
+        via=", then ".join(vias[:3]),
+        encoded_polyline=encode_polyline(points),
+        is_google_default=all(leg.is_google_default for leg in legs),
+        is_standard=standard,
+        live_traffic=all(leg.live_traffic for leg in legs),
+        features=features,
+        maneuvers=tuple(maneuvers),
+        breakdown=ScoreBreakdown(
+            **{name: sum(getattr(leg.breakdown, name) for leg in legs) for name in ScoreBreakdown.model_fields}
+        ),
+        eligible=all(leg.eligible for leg in legs),
+        reason=reason,
+        safety_score=safety_score(features),
+    )
 
 
 def name_routes(plan: RoutePlan, graph: RoadGraph | None) -> RoutePlan:
@@ -387,6 +481,7 @@ def _unique_paths(
     heading: int | None,
     events: Sequence[RoadEvent],
     school_hours: bool,
+    sun: Sun | None = None,
 ) -> list[RoutedPath]:
     paths: dict[tuple[int, ...], RoutedPath] = {}
     for profile in profiles:
@@ -399,6 +494,7 @@ def _unique_paths(
             heading=heading,
             events=events,
             school_hours=school_hours,
+            sun=sun,
         )
         for path in found:
             paths.setdefault(path.edges, path)

@@ -20,6 +20,8 @@ PRESETS: dict[str, ScoringProfile] = {
             lane_closure_weight=0.0,
             school_zone_weight=0.0,
             rail_crossing_weight=0.0,
+            weather_hazard_weight=0.0,
+            sun_glare_weight=0.0,
             fuel_weight=0.0,
         ),
         # The default: safety first, then fuel, then time. The safest route wins;
@@ -45,6 +47,22 @@ PRESETS: dict[str, ScoringProfile] = {
         ),
         # Fuel first: a liter feels like 15 minutes and time counts half.
         ScoringProfile(name="eco", time_weight=0.5, fuel_weight=15.0),
+        # A new driver: keeps off freeways (a freeway minute feels like three),
+        # and turning across traffic, closures, school zones and crossings weigh
+        # about twice the default. Simple routes are worth some extra minutes.
+        ScoringProfile(
+            name="new-driver",
+            highway_weight=2.0,
+            maneuver_weight=0.25,
+            busy_crossing_weight=6.0,
+            hotspot_crossing_weight=10.0,
+            lane_closure_weight=6.0,
+            school_zone_weight=5.0,
+            rail_crossing_weight=2.0,
+            weather_hazard_weight=6.0,
+            sun_glare_weight=2.0,
+            max_detour_ratio=1.8,
+        ),
     )
 }
 

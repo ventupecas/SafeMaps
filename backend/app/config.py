@@ -51,6 +51,10 @@ class Settings:
     map: str = "google"
     # When school zones count: these local times on weekdays, outside July and August.
     school_hours: tuple[tuple[time, time], ...] = ((time(7, 0), time(9, 0)), (time(14, 0), time(16, 30)))
+    # What a gallon of gas costs, in US dollars, for each route's fuel cost on the page.
+    fuel_price: float = 3.25
+    # Ask the National Weather Service for alerts where each trip starts (free, no key).
+    weather_alerts: bool = True
 
     @classmethod
     def from_env(cls) -> Settings:
@@ -91,6 +95,9 @@ class Settings:
         tomtom_daily_tiles = int(os.getenv("ROUTES_TOMTOM_DAILY_TILES") or 6_000)
         if tomtom_daily_requests < 0 or tomtom_daily_tiles < 0:
             raise ValueError("ROUTES_TOMTOM_DAILY_REQUESTS and ROUTES_TOMTOM_DAILY_TILES must be 0 or more")
+        fuel_price = float(os.getenv("ROUTES_FUEL_PRICE") or 3.25)
+        if fuel_price < 0:
+            raise ValueError("ROUTES_FUEL_PRICE must be 0 or more (US dollars a gallon)")
 
         return cls(
             google_maps_api_key=os.getenv("GOOGLE_MAPS_API_KEY") or None,
@@ -117,6 +124,8 @@ class Settings:
             access_code=os.getenv("ROUTES_ACCESS_CODE") or None,
             map=map_kind,
             school_hours=school_hours,
+            fuel_price=fuel_price,
+            weather_alerts=(os.getenv("ROUTES_WEATHER_ALERTS") or "on").strip().lower() not in {"0", "false", "no", "off"},
         )
 
 

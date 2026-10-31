@@ -237,6 +237,16 @@ def test_a_jam_given_as_minutes_of_delay_slows_its_stretch_by_that_much():
     assert router._slowdown(replace(jam, delay_min=0), edges) == JAM_FACTOR  # no measure: the typical jam
 
 
+def test_a_weather_hazard_slows_its_stretch_and_costs_once_to_enter():
+    graph = build_graph(grid_city().osm.elements)
+    router = Router(graph)
+    fog = RoadEvent("tomtom", "hazard", (point(1, 2), point(2, 2)), along=True)  # 2 Ave northbound
+    path = router.routes(point(1, 0), point(2, 2), FASTEST)[0]
+    plain = router._path_cost(list(path.edges), router._costs(FASTEST, [], keep=()))
+    foggy = router._path_cost(list(path.edges), router._costs(FASTEST, [fog], keep=()))
+    assert foggy >= plain + FASTEST.weather_hazard_weight
+
+
 def test_a_railroad_crossing_is_driven_around_when_there_is_a_fair_alternative():
     from tests.test_roadgraph import city_with_hazards
 

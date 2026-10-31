@@ -87,6 +87,16 @@ class ScoringProfile(BaseModel):
         ge=0,
         description="Perceived minutes per railroad crossing at grade: rare but severe crashes, and trains block them.",
     )
+    weather_hazard_weight: float = Field(
+        3.0,
+        ge=0,
+        description="Perceived minutes per stretch with a reported weather hazard (fog, ice, flooding) driven through.",
+    )
+    sun_glare_weight: float = Field(
+        1.0,
+        ge=0,
+        description="Perceived minutes per minute driven toward a low sun (see app.sun).",
+    )
     max_detour_ratio: float = Field(
         1.6,
         ge=1.0,
@@ -155,6 +165,8 @@ class RouteFeatures(BaseModel):
     lane_closures_with_workers: int = Field(0, description="Of those, how many have workers on site now.")
     school_zones: int = Field(0, description="Schools the route passes within their school zone, during school hours.")
     rail_crossings: int = Field(0, description="Railroad crossings at grade the route drives over.")
+    weather_hazards: int = Field(0, description="Stretches with a reported weather hazard (fog, ice, flooding) driven through.")
+    sun_glare_min: float = Field(0.0, description="Minutes driven toward a low sun, at the trip's departure time.")
 
     @computed_field
     @property
@@ -183,6 +195,8 @@ class ScoreBreakdown(BaseModel):
     lane_closures: float = 0.0
     school_zones: float = 0.0
     rail_crossings: float = 0.0
+    weather_hazards: float = 0.0
+    sun_glare: float = 0.0
     scenic: float = Field(description="Zero or negative: a refund for winding roads.")
     total: float
 
@@ -232,6 +246,13 @@ class ScoredRoute(CandidateRoute):
     breakdown: ScoreBreakdown
     eligible: bool = Field(description="False when the route exceeds the profile's max_detour_ratio.")
     reason: str | None = Field(None, description="Why it ranks where it does (priority ranking).")
+    safety_score: int = Field(
+        100,
+        ge=0,
+        le=100,
+        description="0-100, higher is safer: the route's risks (risky turns, closures, lane closures, school zones, "
+        "railroad crossings, weather hazards, sun glare) weighed the same way whatever the profile.",
+    )
 
 
 class RoutePlan(BaseModel):

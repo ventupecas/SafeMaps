@@ -29,6 +29,7 @@ from app.road_events import (
     split_box,
     tiles_for,
     tomtom_events,
+    weather_on_route,
     without_repeats,
 )
 from app.usage import DailyUsage
@@ -482,7 +483,8 @@ def test_tomtom_incidents_become_closures_lane_closures_and_jams():
         tomtom_incident(6, line, magnitude=1, delay=45, events=[detail("Slow traffic", 6)]),
         tomtom_incident(2, line),  # fog
     ]
-    closed, lanes, crash, jam, slow = tomtom_events(incidents)
+    closed, lanes, crash, jam, slow, fog = tomtom_events(incidents)
+    assert (fog.kind, fog.category, fog.description) == ("hazard", "weather", "Fog (W Wells St to W Michigan St)")
     assert (closed.kind, closed.category, closed.along, closed.source) == ("closed", "closure", True, "tomtom")
     assert closed.path[0] == pytest.approx(DOWNTOWN)  # GeoJSON's [lng, lat] read the right way round
     assert closed.description == "Closed, Parade (W Wells St to W Michigan St)"
@@ -606,6 +608,13 @@ def test_closures_an_official_feed_reports_are_not_counted_again_from_tomtom():
     closed_there = RoadEvent("tomtom", "closed", north_of, along=True)  # more than the official lane closure says
     kept = without_repeats([official, same, lanes_in_it, other_way, official_lanes, closed_there])
     assert kept == [official, other_way, official_lanes, closed_there]
+
+
+def test_a_route_through_fog_counts_one_weather_hazard_the_way_it_drives():
+    route = straight_east(1_000)
+    fog = RoadEvent("tomtom", "hazard", tuple(route[4:12]), along=True, category="weather")
+    assert weather_on_route(route, [fog]) == 1
+    assert weather_on_route(list(reversed(route)), [fog]) == 0  # the other carriageway
 
 
 def test_closures_are_drawn_when_they_are_near_a_route():

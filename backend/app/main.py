@@ -28,6 +28,7 @@ import time
 from collections.abc import AsyncIterator, Sequence
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field, replace
+from datetime import datetime, timedelta
 from threading import Lock, Thread
 from typing import Any, Literal
 
@@ -45,20 +46,24 @@ from app.engine import (
     NoRouteFoundError,
     build_candidates,
     build_router_candidates,
+    combine_legs,
     load_graph,
     load_hotspots,
     make_turn_context,
     name_routes,
     plan_from_candidates,
+    rejudge,
 )
 from app.features import TurnContext
+from app.feedback import FeedbackLog
 from app.geo import decode_polyline, encode_polyline
 from app.hotspots import CrashHotspots
-from app.models import LatLng, RoutePlan
+from app.models import LatLng, RoutePlan, ScoringProfile
 from app.overpass import ATTRIBUTION
 from app.profiles import DEFAULT_PROFILE, PRESETS, get_profile
 from app.road_events import (
     ApifyTraffic,
+    EventReport,
     RoadEvent,
     TomTomFeed,
     Wi511Feed,
@@ -71,8 +76,10 @@ from app.road_events import collect as collect_road_events
 from app.roadgraph import RoadGraph
 from app.router import Router
 from app.routes_client import DailyLimitReached, RoutesApiError, RoutesClient, daily_usage
+from app.sun import low_sun
 from app.traffic_tiles import TILE_REFRESH, TileError, TrafficTiles
 from app.usage import DailyUsage
+from app.weather import WeatherAlert, WeatherAlerts, for_the_weather
 
 logger = logging.getLogger(__name__)
 
@@ -80,6 +87,8 @@ logger = logging.getLogger(__name__)
 LOCALHOST_ORIGINS = r"https?://(localhost|127\.0\.0\.1)(:\d+)?"
 FRONTEND_DIR = BACKEND_DIR.parent / "frontend"
 MAX_EVENTS_SHOWN = 200
+MAX_STOPS = 3
+LEAVE_OFFSETS_MIN = (0, 15, 30, 60)  # the departures "Best time to leave" compares
 # Closures are drawn when they're about this close to a route shown: the rest of
 # the trip's area (5 km around it) would bury the routes under a city's closures.
 SHOWN_NEAR_ROUTES_M = 300.0
@@ -90,7 +99,20 @@ class TripRequest(BaseModel):
 
     origin: LatLng
     destination: LatLng
+    stops: list[LatLng] = Field(
+        default_factory=list,
+        max_length=MAX_STOPS,
+        description="Places to stop at on the way, in order. The trip is planned leg by leg, and the plan joins "
+        "each leg's recommended route (and each leg's standard route).",
+    )
     profile: str = Field(DEFAULT_PROFILE, description="A preset name from GET /profiles.")
+    departure_offset_min: int = Field(
+        0,
+        ge=0,
+        le=24 * 60,
+        description="Leave this many minutes from now. School zones and sun glare are judged at that time; "
+        "traffic and closures are today's as they are now.",
+    )
     weights: dict[str, float] = Field(
         default_factory=dict, description='Overrides for the preset\'s weights, e.g. {"busy_crossing_weight": 4}.'
     )
@@ -130,9 +152,16 @@ class GoogleUsage(BaseModel):
     daily_limit: int | None
 
 
+class WeatherAlertOut(BaseModel):
+    event: str = Field(description='e.g. "Winter Weather Advisory".')
+    headline: str
+    ends: str = Field(description="When it ends, ISO 8601; empty if not given.")
+    slippery: bool = Field(description="Snow or ice: turning across traffic counts as riskier while it lasts.")
+
+
 class RoadEventOut(BaseModel):
-    kind: Literal["closed", "lanes", "slow", "jam"] = Field(
-        description="slow and jam: measured traffic (511 travel times, TomTom's jams)."
+    kind: Literal["closed", "lanes", "slow", "jam", "hazard"] = Field(
+        description="slow and jam: measured traffic (511 travel times, TomTom's jams). hazard: fog, ice, flooding."
     )
     source: str
     description: str
@@ -150,6 +179,49 @@ class TripResponse(BaseModel):
     road_events_skipped: list[str] = Field(description="Sources tried first that weren't set up or didn't answer.")
     road_events: list[RoadEventOut] = Field(description="Closures and lane closures around the trip, to draw.")
     school_hours: bool = Field(description="School zones count on this trip: it's a school-day drop-off or pickup time.")
+    low_sun: bool = Field(False, description="The sun is low at departure: routes heading into it count sun glare.")
+    leaving_at: str = Field("", description="The departure time the trip was judged at, local, ISO 8601.")
+    weather_alerts: list[WeatherAlertOut] = Field(
+        default_factory=list, description="National Weather Service alerts in force where the trip starts."
+    )
+
+
+class LeaveTime(BaseModel):
+    offset_min: int
+    leaving_at: str = Field(description="Local, ISO 8601.")
+    safety_score: int
+    duration_min: float
+    sun_glare_min: float
+    school_zones: int
+
+
+class LeaveTimesResponse(BaseModel):
+    times: list[LeaveTime] = Field(description="The recommended route's numbers for each departure time, soonest first.")
+    best_offset_min: int = Field(description="The safest departure; the soonest among equally safe ones.")
+
+
+class Feedback(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    choice: Literal["yes", "no"] = Field(description="Would the visitor take the recommended route?")
+    safety_gain: int = Field(0, ge=-100, le=100, description="Recommended route's safety score minus the standard's.")
+    extra_min: float = Field(0.0, ge=-600, le=600, description="Its minutes over the standard route's.")
+    profile: str = Field("", max_length=60)
+
+
+@dataclass
+class PreparedTrip:
+    """A trip's request with what doesn't depend on its route: profile, context, road events, weather."""
+
+    trip: TripRequest
+    profile: ScoringProfile
+    context: TurnContext  # with the road events, at the departure time
+    report: EventReport
+    events: list[RoadEvent]
+    alerts: list[WeatherAlert]
+    departure: datetime
+    use_router: bool
+    notes: list[str]
 
 
 @dataclass
@@ -166,6 +238,8 @@ class Engine:
     tomtom: TomTomFeed | None = None
     apify: ApifyTraffic | None = None
     tiles: TrafficTiles | None = None  # TomTom's traffic map, on the OpenStreetMap page only
+    weather: WeatherAlerts | None = None  # the National Weather Service's alerts (ROUTES_WEATHER_ALERTS)
+    feedback: FeedbackLog | None = None  # visitors' "Would you take this route?" answers
     warmed_up: bool = False  # the road events across the map are matched to it (warm_up)
     _routers: dict[DrivingSide, Router] = field(default_factory=dict)
     _snapped: dict[tuple[Any, ...], list[RoadEvent]] = field(default_factory=dict)
@@ -263,7 +337,9 @@ def shown_events(events: Sequence[RoadEvent], plan: RoutePlan) -> list[RoadEvent
     per direction, each the other reversed: drawn once.
     """
     routes = [decode_polyline(route.encoded_polyline) for route in plan.candidates]
-    closures = near_routes([event for event in events if event.kind in ("closed", "lanes")], routes, SHOWN_NEAR_ROUTES_M)
+    closures = near_routes(
+        [event for event in events if event.kind in ("closed", "lanes", "hazard")], routes, SHOWN_NEAR_ROUTES_M
+    )
     traffic = [event for event in events if event.category == "traffic"]
     shown: list[RoadEventOut] = []
     drawn: set[tuple[str, tuple[Any, ...]]] = set()
@@ -333,6 +409,8 @@ def create_app(settings: Settings | None = None, *, http: httpx.Client | None = 
             )
             if settings.apify_token and "apify" in settings.road_event_sources
             else None,
+            weather=WeatherAlerts(client) if settings.weather_alerts else None,
+            feedback=FeedbackLog(settings.cache_dir / "feedback.jsonl"),
         )
         app.state.engine = engine
         Thread(target=engine.warm_up, name="road-events-warm-up", daemon=True).start()
@@ -392,6 +470,8 @@ def create_app(settings: Settings | None = None, *, http: httpx.Client | None = 
                 "apify_enabled": engine.apify is not None,
                 "apify_tiles_today": engine.apify.usage.used_today() if engine.apify else 0,
             },
+            "weather_alerts": engine.weather is not None,
+            "feedback": {key: engine.feedback.summary()[key] for key in ("yes", "no")} if engine.feedback else None,
         }
 
     @app.get("/profiles")
@@ -400,9 +480,13 @@ def create_app(settings: Settings | None = None, *, http: httpx.Client | None = 
 
     @app.get("/app-config")
     def app_config(request: Request) -> dict[str, Any]:
-        """What the web map needs before it loads: which map to show (ROUTES_MAP), and whether
-        /traffic-tiles serves a traffic layer for it."""
-        return {"map": settings.map, "traffic_tiles": request.app.state.engine.tiles is not None}
+        """What the web map needs before it loads: which map to show (ROUTES_MAP), whether
+        /traffic-tiles serves a traffic layer for it, and the price of gas (ROUTES_FUEL_PRICE)."""
+        return {
+            "map": settings.map,
+            "traffic_tiles": request.app.state.engine.tiles is not None,
+            "fuel_price": settings.fuel_price,
+        }
 
     @app.get("/traffic-tiles/{z}/{x}/{y}.png", include_in_schema=False)
     def traffic_tile(z: int, x: int, y: int, request: Request, code: str | None = None) -> Response:
@@ -419,42 +503,40 @@ def create_app(settings: Settings | None = None, *, http: httpx.Client | None = 
         # Browsers keep it as long as the server does, so panning back doesn't fetch it again.
         return Response(png, media_type="image/png", headers={"Cache-Control": f"max-age={int(TILE_REFRESH.total_seconds())}"})
 
-    @app.post("/route", response_model=TripResponse)
-    def route(
-        trip: TripRequest, request: Request, x_access_code: str | None = Header(None, include_in_schema=False)
-    ) -> TripResponse:
-        engine: Engine = request.app.state.engine
+    def check_access(code: str | None) -> None:
         # A demo shared over a public link: only people given the code can spend its Google requests.
-        if settings.access_code and not hmac.compare_digest(x_access_code or "", settings.access_code):
+        if settings.access_code and not hmac.compare_digest(code or "", settings.access_code):
             raise HTTPException(status_code=401, detail="This demo needs its access code.")
+
+    def prepare(engine: Engine, trip: TripRequest) -> PreparedTrip:
+        """Everything about a trip that doesn't depend on the route: profile, weather, time, road events."""
+        departure = datetime.now() + timedelta(minutes=trip.departure_offset_min)
+        alerts = engine.weather.at(trip.origin) if engine.weather else []
         try:
             limit = {} if trip.max_extra_min is None else {"max_extra_min": trip.max_extra_min}
-            profile = get_profile(trip.profile, {**trip.weights, **limit})
-            context = make_turn_context(settings, engine.hotspots, trip.country_code, engine.graph)
+            profile = for_the_weather(get_profile(trip.profile, {**trip.weights, **limit}), alerts)
+            context = make_turn_context(
+                settings, engine.hotspots, trip.country_code, engine.graph, now=departure, where=trip.origin
+            )
         except ValueError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from None
 
         # The OpenStreetMap map never asks Google: Google's terms don't allow its
         # results on another map. Our router designs every route, the fastest
         # one standing in for Google's, and live traffic comes from 511 and TomTom.
-        google = settings.map == "google"
-        if not google:
+        if settings.map != "google":
             if engine.graph is None:
                 raise HTTPException(status_code=503, detail="The OpenStreetMap map needs the road map: build it first.")
             trip = trip.model_copy(update={"use_router": True, "live_traffic": False})
 
         use_router = trip.use_router and engine.graph is not None
-        heading = None if trip.heading is None else round(trip.heading) % 360
         notes: list[str] = []
         if trip.use_router and engine.graph is None:
             notes.append("Own router unavailable: no road graph is loaded.")
-
         order = {"auto": settings.road_event_sources, "off": ()}.get(trip.road_events, (trip.road_events,))
-        order = sources_for_map(order, settings.map)
-        area = trip_area(trip.origin, trip.destination)
         report = collect_road_events(
-            order,
-            area,
+            sources_for_map(order, settings.map),
+            trip_area(trip.origin, *trip.stops, trip.destination),
             wzdx=engine.wzdx,
             wi511=engine.wi511,
             tomtom=engine.tomtom,
@@ -465,36 +547,72 @@ def create_app(settings: Settings | None = None, *, http: httpx.Client | None = 
         # Redrawn along the roads they lie on, for routing, scoring and the map alike,
         # less TomTom's reports of closures an official feed already gives.
         events = without_repeats(engine.snap(report.events))
-        context = replace(context, events=tuple(events))
+        return PreparedTrip(
+            trip=trip,
+            profile=profile,
+            context=replace(context, events=tuple(events)),
+            report=report,
+            events=events,
+            alerts=alerts,
+            departure=departure,
+            use_router=use_router,
+            notes=notes,
+        )
 
+    def legs(trip: TripRequest) -> list[tuple[LatLng, LatLng, int | None]]:
+        """The trip's legs through its stops: (start, end, the car's heading at the start, if moving)."""
+        places = [trip.origin, *trip.stops, trip.destination]
+        heading = None if trip.heading is None else round(trip.heading) % 360
+        return [(start, end, heading if number == 0 else None) for number, (start, end) in enumerate(zip(places, places[1:]))]
+
+    def plan_leg(
+        engine: Engine, client: RoutesClient, prepared: PreparedTrip, origin: LatLng, destination: LatLng, heading: int | None
+    ) -> RoutePlan:
+        """One leg's ranked routes."""
+        trip, context = prepared.trip, prepared.context
+        try:
+            if prepared.use_router:
+                pool = build_router_candidates(
+                    client,
+                    engine.router(context),
+                    origin,
+                    destination,
+                    [prepared.profile],
+                    price=trip.live_traffic,
+                    heading=heading,
+                    context=context,
+                    traffic_on_polyline=prepared.report.google,
+                    baseline=None if settings.map == "google" else PRESETS["fastest"],
+                )
+                candidates = pool.candidates
+                prepared.notes.extend(pool.notes)
+            else:
+                options = CandidateOptions(traffic_aware=trip.live_traffic, origin_heading=heading)
+                candidates = build_candidates(client, origin, destination, options, context)
+        except NoRouteFoundError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from None
+        except CacheMiss as exc:
+            raise HTTPException(status_code=503, detail=str(exc)) from None
+        except DailyLimitReached as exc:
+            raise HTTPException(status_code=429, detail=str(exc)) from None
+        except RoutesApiError as exc:
+            raise HTTPException(status_code=502, detail=str(exc)) from None
+        return name_routes(plan_from_candidates(candidates, prepared.profile), engine.graph)
+
+    def plan_trip(engine: Engine, client: RoutesClient, prepared: PreparedTrip) -> RoutePlan:
+        """The whole trip: leg by leg through its stops, joined into one plan."""
+        plans = [plan_leg(engine, client, prepared, *leg) for leg in legs(prepared.trip)]
+        return plans[0] if len(plans) == 1 else combine_legs(plans, prepared.trip.stops)
+
+    @app.post("/route", response_model=TripResponse)
+    def route(
+        trip: TripRequest, request: Request, x_access_code: str | None = Header(None, include_in_schema=False)
+    ) -> TripResponse:
+        engine: Engine = request.app.state.engine
+        check_access(x_access_code)
+        prepared = prepare(engine, trip)
         with engine.routes_client() as client:
-            try:
-                if use_router:
-                    pool = build_router_candidates(
-                        client,
-                        engine.router(context),
-                        trip.origin,
-                        trip.destination,
-                        [profile],
-                        price=trip.live_traffic,
-                        heading=heading,
-                        context=context,
-                        traffic_on_polyline=report.google,
-                        baseline=None if google else PRESETS["fastest"],
-                    )
-                    candidates = pool.candidates
-                    notes += pool.notes
-                else:
-                    options = CandidateOptions(traffic_aware=trip.live_traffic, origin_heading=heading)
-                    candidates = build_candidates(client, trip.origin, trip.destination, options, context)
-            except NoRouteFoundError as exc:
-                raise HTTPException(status_code=404, detail=str(exc)) from None
-            except CacheMiss as exc:
-                raise HTTPException(status_code=503, detail=str(exc)) from None
-            except DailyLimitReached as exc:
-                raise HTTPException(status_code=429, detail=str(exc)) from None
-            except RoutesApiError as exc:
-                raise HTTPException(status_code=502, detail=str(exc)) from None
+            plan = plan_trip(engine, client, prepared)
             google = GoogleUsage(
                 live_requests=client.live_requests,
                 served_from_cache=client.cache.hits,
@@ -502,20 +620,92 @@ def create_app(settings: Settings | None = None, *, http: httpx.Client | None = 
                 daily_limit=engine.usage.limit,
             )
 
-        own_used = any(candidate.source == "own" for candidate in candidates)
-        plan = name_routes(plan_from_candidates(candidates, profile), engine.graph)
+        context = prepared.context
+        own_used = any(candidate.source == "own" for candidate in plan.candidates)
         return TripResponse(
             plan=plan,
-            notes=notes,
+            notes=prepared.notes,
             driving_side=context.driving_side,
             own_router_used=own_used,
             attribution=[f"Route design: map data {ATTRIBUTION}"] if own_used else [],
             google=google,
             school_hours=context.school_hours,
-            road_events_source=report.source,
-            road_events_skipped=report.skipped,
-            road_events=shown_events(events, plan),
+            low_sun=low_sun(context.sun),
+            leaving_at=prepared.departure.isoformat(timespec="minutes"),
+            weather_alerts=[
+                WeatherAlertOut(event=a.event, headline=a.headline, ends=a.ends, slippery=a.slippery) for a in prepared.alerts
+            ],
+            road_events_source=prepared.report.source,
+            road_events_skipped=prepared.report.skipped,
+            road_events=shown_events(prepared.events, plan),
         )
+
+    @app.post("/leave-times", response_model=LeaveTimesResponse)
+    def leave_times(
+        trip: TripRequest, request: Request, x_access_code: str | None = Header(None, include_in_schema=False)
+    ) -> LeaveTimesResponse:
+        """The recommended route if leaving now, in 15 or 30 minutes, or in an hour.
+
+        School zones and sun glare depend on the time; traffic and closures are
+        as they are now. Our router designs each leg's routes once, as on the
+        OpenStreetMap map (no Google), and they're judged again at each time.
+        """
+        engine: Engine = request.app.state.engine
+        check_access(x_access_code)
+        if engine.graph is None:
+            raise HTTPException(status_code=503, detail="Comparing departure times needs the road map: build it first.")
+        prepared = prepare(engine, trip.model_copy(update={"departure_offset_min": 0}))
+        pools = []
+        for start, end, heading in legs(trip):
+            try:
+                pools.append(
+                    build_router_candidates(
+                        None,
+                        engine.router(prepared.context),
+                        start,
+                        end,
+                        [prepared.profile],
+                        price=False,
+                        heading=heading,
+                        context=prepared.context,
+                        baseline=PRESETS["fastest"],
+                    )
+                )
+            except NoRouteFoundError as exc:
+                raise HTTPException(status_code=404, detail=str(exc)) from None
+        times = []
+        for offset in LEAVE_OFFSETS_MIN:
+            moment = prepared.departure + timedelta(minutes=offset)
+            then = make_turn_context(settings, engine.hotspots, trip.country_code, engine.graph, now=moment, where=trip.origin)
+            context = replace(prepared.context, school_hours=then.school_hours, sun=then.sun)
+            plans = [plan_from_candidates(rejudge(pool, context), prepared.profile) for pool in pools]
+            winner = (plans[0] if len(plans) == 1 else combine_legs(plans, trip.stops)).winner
+            times.append(
+                LeaveTime(
+                    offset_min=offset,
+                    leaving_at=moment.isoformat(timespec="minutes"),
+                    safety_score=winner.safety_score,
+                    duration_min=round(winner.features.duration_min, 1),
+                    sun_glare_min=round(winner.features.sun_glare_min, 1),
+                    school_zones=winner.features.school_zones,
+                )
+            )
+        best = max(times, key=lambda t: (t.safety_score, -t.offset_min))
+        return LeaveTimesResponse(times=times, best_offset_min=best.offset_min)
+
+    @app.post("/feedback", status_code=204)
+    def feedback(
+        answer: Feedback, request: Request, x_access_code: str | None = Header(None, include_in_schema=False)
+    ) -> Response:
+        """A visitor's answer to "Would you take this route?" (no places are kept)."""
+        check_access(x_access_code)
+        request.app.state.engine.feedback.add(answer.model_dump())
+        return Response(status_code=204)
+
+    @app.get("/feedback-summary")
+    def feedback_summary(request: Request) -> dict[str, Any]:
+        """How visitors answered "Would you take this route?"."""
+        return request.app.state.engine.feedback.summary()
 
     # Mounted last, so the API routes above take precedence over file names.
     if FRONTEND_DIR.is_dir():

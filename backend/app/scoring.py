@@ -10,7 +10,7 @@ Two ways to rank (ScoringProfile.ranking):
   lowest total wins.
 * priority: safety first, then fuel, then time. The route with the fewest
   risk points (risky turns, lane closures, school zones during school hours,
-  railroad crossings) wins; among equally safe routes, the one
+  railroad crossings, weather hazards, driving into a low sun) wins; among equally safe routes, the one
   using the least fuel (within fuel_tolerance, since the fuel model is
   rough); among those, the fastest. Each route gets a short reason for its
   place.
@@ -47,15 +47,39 @@ def score_route(features: RouteFeatures, profile: ScoringProfile) -> ScoreBreakd
         * (features.lane_closures + (WORKERS_PRESENT_FACTOR - 1) * features.lane_closures_with_workers),
         "school_zones": profile.school_zone_weight * features.school_zones,
         "rail_crossings": profile.rail_crossing_weight * features.rail_crossings,
+        "weather_hazards": profile.weather_hazard_weight * features.weather_hazards,
+        "sun_glare": profile.sun_glare_weight * features.sun_glare_min,
         "scenic": -profile.scenic_weight * features.winding_min,
     }
     return ScoreBreakdown(**terms, total=sum(terms.values()))
 
 
 def risk(route: ScoredRoute) -> float:
-    """Safety cost: risky turns (busy and crash-prone junctions), lane closures, school zones and railroad crossings."""
-    b = route.breakdown
-    return b.busy_crossings + b.hotspot_crossings + b.lane_closures + b.school_zones + b.rail_crossings
+    """Safety cost: risky turns (busy and crash-prone junctions), lane closures, school zones, railroad
+    crossings, weather hazards and sun glare."""
+    return _risk_terms(route.breakdown)
+
+
+def _risk_terms(b: ScoreBreakdown) -> float:
+    return (
+        b.busy_crossings + b.hotspot_crossings + b.lane_closures + b.school_zones + b.rail_crossings
+        + b.weather_hazards + b.sun_glare
+    )  # fmt: skip
+
+
+# The safety score weighs risks the same way for every profile (the default's
+# weights), so "92" means the same on the fastest profile as on the calm one. A
+# route with no risks scores 100; SAFETY_SCALE risk points halve it; a closed
+# road on the way counts as CLOSURE_RISK more.
+SAFETY_REFERENCE = ScoringProfile()
+SAFETY_SCALE = 10.0
+CLOSURE_RISK = 30.0
+
+
+def safety_score(features: RouteFeatures) -> int:
+    """0-100, higher is safer: one number for a route's risks, comparable across routes and trips."""
+    points = _risk_terms(score_route(features, SAFETY_REFERENCE)) + CLOSURE_RISK * features.closures
+    return round(100 / (1 + points / SAFETY_SCALE))
 
 
 # How reasons name the risks, for the kinds any candidate has.
@@ -63,6 +87,8 @@ _RISK_NAMES = (
     ("lane_closures", "lane closures"),
     ("school_zones", "school zones"),
     ("rail_crossings", "railroad crossings"),
+    ("weather_hazards", "weather hazards"),
+    ("sun_glare_min", "sun glare"),
 )
 
 
@@ -90,6 +116,7 @@ def rank_candidates(candidates: Sequence[CandidateRoute], profile: ScoringProfil
             **candidate.model_dump(),
             breakdown=score_route(candidate.features, profile),
             eligible=candidate in open_routes and candidate.features.duration_min <= ceiling,
+            safety_score=safety_score(candidate.features),
         )
         for candidate in candidates
     ]
