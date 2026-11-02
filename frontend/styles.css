@@ -1842,6 +1842,123 @@ body:not(.map-osm) .osm-only {
   background: var(--accent-soft);
 }
 
+/* ---- The expo's stats screen (stats.html): big numbers for across the booth */
+
+.stats-page {
+  min-height: 100vh;
+  background: var(--bg);
+}
+
+.board {
+  display: grid;
+  gap: 28px;
+  max-width: 1400px;
+  margin: 0 auto;
+  padding: 36px 40px;
+}
+
+.board__header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.board .brand__mark {
+  width: 56px;
+  height: 56px;
+}
+
+.board h1 {
+  font-size: 2.2rem;
+}
+
+.board .tagline {
+  font-size: 1.1rem;
+}
+
+.board__updated {
+  margin: 0;
+  color: var(--muted);
+  font-size: 0.9rem;
+}
+
+.board__tiles {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 18px;
+}
+
+.tile {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 22px 24px;
+  border-radius: var(--radius-lg);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  box-shadow: var(--shadow-sm);
+}
+
+.tile strong {
+  font-size: clamp(2.4rem, 5vw, 4.2rem);
+  font-weight: 800;
+  line-height: 1;
+  color: var(--accent);
+  font-variant-numeric: tabular-nums;
+}
+
+.tile span {
+  font-size: 1.1rem;
+  color: var(--muted);
+}
+
+.tile--lead {
+  grid-column: span 2;
+  background: linear-gradient(180deg, var(--accent-soft), var(--surface) 80%);
+}
+
+.tile--lead strong {
+  font-size: clamp(3rem, 7vw, 5.6rem);
+}
+
+.tile--answers strong {
+  color: var(--drive);
+}
+
+.tile .tile__detail {
+  font-size: 0.95rem;
+}
+
+.board__footer {
+  display: flex;
+  align-items: center;
+  gap: 24px;
+  font-size: 1.2rem;
+  color: var(--muted);
+}
+
+.board__qr img {
+  display: block;
+  width: 140px;
+  height: 140px;
+  border-radius: var(--radius);
+}
+
+@media (max-width: 900px) {
+  .board {
+    padding: 20px 16px;
+  }
+
+  .board__tiles {
+    grid-template-columns: repeat(2, 1fr);
+  }
+
+  .board__header {
+    flex-wrap: wrap;
+  }
+}
+
 /* ---- Phones: the map on top, the panel below */
 
 @media (max-width: 760px) {

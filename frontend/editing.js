@@ -61,6 +61,7 @@ export function placePin(kind, point) {
   const pin = element("div", { className: `map-pin map-pin--${kind}` }, element("span", {}, kind === "origin" ? "A" : "B"));
   state.pins[kind] = state.view.marker(point, pin, {
     title: `${kind === "origin" ? "Start" : "Destination"}: drag to move, click to remove`,
+    zIndex: PIN_Z,
     onClick: () => mapTouchAllowed() && changeOnMap(kind, null),
     onDragEnd: (to) => (mapTouchAllowed() ? changeOnMap(kind, unnamed(to)) : placePin(kind, state[kind])),
   });
@@ -78,6 +79,9 @@ export function swapEnds() {
   for (const stop of state.stops) $("stops").append(stop.row);
   renumberStops();
 }
+
+// Pins sit over the routes' markers (turns, crossings, schools), so they can always be dragged.
+const PIN_Z = 40;
 
 // No accidental trip changes while driving, or from the touch that stopped the demo.
 export function mapTouchAllowed() {
@@ -259,6 +263,7 @@ function renumberStops() {
     stop.pin = stop.point
       ? state.view.marker(stop.point, element("div", { className: "map-pin map-pin--stop" }, element("span", {}, number)), {
           title: `Stop ${number}: drag to move, click to remove`,
+          zIndex: PIN_Z,
           onClick: () => mapTouchAllowed() && removeStopOnMap(stop.id),
           onDragEnd: (to) => (mapTouchAllowed() ? moveStopOnMap(stop.id, unnamed(to)) : renumberStops()),
         })

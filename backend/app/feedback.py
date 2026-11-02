@@ -10,7 +10,7 @@ from __future__ import annotations
 import json
 import threading
 from collections.abc import Mapping
-from datetime import datetime
+from datetime import date, datetime
 from pathlib import Path
 from typing import Any
 
@@ -27,9 +27,9 @@ class FeedbackLog:
             with self.path.open("a", encoding="utf-8") as handle:
                 handle.write(line + "\n")
 
-    def summary(self) -> dict[str, Any]:
-        """How many said yes and no, and how much safer and slower the routes they judged were."""
-        answers = self._read()
+    def summary(self, day: date | None = None) -> dict[str, Any]:
+        """How many said yes and no (on day, or ever), and how much safer and slower the routes they judged were."""
+        answers = [a for a in self._read() if day is None or str(a.get("at", "")).startswith(day.isoformat())]
         yes = [a for a in answers if a.get("choice") == "yes"]
         no = [a for a in answers if a.get("choice") == "no"]
 

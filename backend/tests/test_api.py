@@ -466,3 +466,18 @@ def test_bus_routes_for_the_openstreetmap_maps_transit_layer(tmp_path, google):
     google_map = create_app(make_settings(tmp_path, bus_routes_url="https://transit.example/gtfs.zip"), http=httpx.Client(transport=httpx.MockTransport(handler)))
     with TestClient(google_map) as client:
         assert client.get("/bus-routes").status_code == 404
+
+
+def test_the_expo_stats_count_todays_trips_without_places(tmp_path, google):
+    app = create_app(make_settings(tmp_path, map="osm"), http=httpx.Client(transport=httpx.MockTransport(google)))
+    with TestClient(app) as client:
+        assert client.get("/expo-stats").json()["trips"]["trips"] == 0
+        client.post("/route", json={"origin": ORIGIN, "destination": DESTINATION})
+        client.post("/route", json={"origin": ORIGIN, "destination": DESTINATION, "counted": False})  # a sample trip
+        client.post("/feedback", json={"choice": "yes", "safety_gain": 5, "extra_min": 1, "profile": "safe-economy"})
+        stats = client.get("/expo-stats").json()
+    assert stats["trips"]["trips"] == 1 and stats["trips_ever"] == 1
+    assert {"risky_turns_avoided", "rail_crossings_avoided", "school_zones_avoided", "closures_avoided"} <= set(stats["trips"])
+    assert stats["answers"]["yes"] == 1
+    saved = (tmp_path / "cache" / "trips.jsonl").read_text(encoding="utf-8")
+    assert "lat" not in saved and saved.count("\n") == 1

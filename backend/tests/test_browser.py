@@ -85,6 +85,7 @@ def page(browser, site):
 def open_map(page, url):
     page.goto(url)
     page.wait_for_selector("#origin-search input")
+    page.evaluate("document.getElementById('legend').open = false")  # the map key, folded off the pins
 
 
 def center(page, selector):

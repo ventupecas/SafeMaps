@@ -153,7 +153,7 @@ async function reroute(here) {
   const countryCode = (state.origin && state.origin.countryCode) || null;
   const origin = { ...here, label: "Current location", countryCode };
   try {
-    const trip = await requestTrip(origin, state.destination, { heading: nav.heading, stops: nav.stopsLeft });
+    const trip = await requestTrip(origin, state.destination, { heading: nav.heading, stops: nav.stopsLeft, counted: false });
     if (!nav.active) return;
     state.origin = origin; // its pin returns when driving stops
     $("origin-picked").textContent = origin.label;

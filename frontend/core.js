@@ -1,7 +1,5 @@
 // What every part of the page shares: settings, the page's state, and small helpers.
 
-import { hazards } from "./results.js";
-
 export const MILWAUKEE = { lat: 43.0389, lng: -87.9065 };
 
 export const KM_TO_MI = 0.621371;

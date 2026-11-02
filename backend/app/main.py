@@ -13,6 +13,7 @@ try the API directly.
     POST /route       rank routes for one trip; the map draws plan.winner.encoded_polyline
     GET  /traffic-tiles/{z}/{x}/{y}.png   TomTom's traffic map, for the OpenStreetMap page
     GET  /bus-routes  the county's bus routes, for the OpenStreetMap page's Transit layer
+    GET  /expo-stats  today's trips and answers, for the expo's stats screen (stats.html)
     GET  /            the web map (frontend/), when that folder exists
 
 The frontend never calls Google's Routes API itself. Routing, scoring and
@@ -80,6 +81,7 @@ from app.routes_client import DailyLimitReached, RoutesApiError, RoutesClient, d
 from app.sun import low_sun
 from app.traffic_tiles import TILE_REFRESH, TileError, TrafficTiles
 from app.transit import BusRoutes
+from app.trip_log import TripLog
 from app.usage import DailyUsage
 from app.weather import WeatherAlert, WeatherAlerts, for_the_weather
 
@@ -130,6 +132,11 @@ class TripRequest(BaseModel):
         "None: the profile's own limit (max_detour_ratio times the fastest).",
     )
     use_router: bool = Field(True, description="Let our own router design routes too, when a road graph is loaded.")
+    counted: bool = Field(
+        True,
+        description="Count the trip in the expo's stats (GET /expo-stats). False for sample trips, a trip planned "
+        "again after a change on the map, and new routes while driving.",
+    )
     live_traffic: bool = Field(
         True, description="Use Google's live traffic. False: no-traffic estimates and fewer, cheaper Google calls."
     )
@@ -243,6 +250,7 @@ class Engine:
     weather: WeatherAlerts | None = None  # the National Weather Service's alerts (ROUTES_WEATHER_ALERTS)
     feedback: FeedbackLog | None = None  # visitors' "Would you take this route?" answers
     buses: BusRoutes | None = None  # bus routes for the OpenStreetMap map's Transit layer
+    trips: TripLog | None = None  # the trips visitors plan, for the expo's stats (no places)
     warmed_up: bool = False  # the road events across the map are matched to it (warm_up)
     _routers: dict[DrivingSide, Router] = field(default_factory=dict)
     _snapped: dict[tuple[Any, ...], list[RoadEvent]] = field(default_factory=dict)
@@ -414,6 +422,7 @@ def create_app(settings: Settings | None = None, *, http: httpx.Client | None = 
             else None,
             weather=WeatherAlerts(client) if settings.weather_alerts else None,
             feedback=FeedbackLog(settings.cache_dir / "feedback.jsonl"),
+            trips=TripLog(settings.cache_dir / "trips.jsonl"),
             buses=BusRoutes(client, settings.bus_routes_url, settings.cache_dir / "bus-routes.json")
             if settings.bus_routes_url and settings.map == "osm"
             else None,
@@ -647,6 +656,8 @@ def create_app(settings: Settings | None = None, *, http: httpx.Client | None = 
                 daily_limit=engine.usage.limit,
             )
 
+        if trip.counted and engine.trips:
+            engine.trips.add(plan, trip.profile)
         context = prepared.context
         own_used = any(candidate.source == "own" for candidate in plan.candidates)
         return TripResponse(
@@ -728,6 +739,18 @@ def create_app(settings: Settings | None = None, *, http: httpx.Client | None = 
         check_access(x_access_code)
         request.app.state.engine.feedback.add(answer.model_dump())
         return Response(status_code=204)
+
+    @app.get("/expo-stats")
+    def expo_stats(request: Request) -> dict[str, Any]:
+        """Today's trips (what their recommended routes avoided) and visitors' answers, for stats.html. No places."""
+        engine: Engine = request.app.state.engine
+        today = datetime.now().date()
+        return {
+            "day": today.isoformat(),
+            "trips": engine.trips.summary(today),
+            "answers": engine.feedback.summary(today),
+            "trips_ever": engine.trips.summary()["trips"],
+        }
 
     @app.get("/feedback-summary")
     def feedback_summary(request: Request) -> dict[str, Any]:

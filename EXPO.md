@@ -157,6 +157,10 @@ Without internet, place search, addresses for clicked spots, live traffic and ne
 
 Under each recommendation the page asks "Would you take this route?". See the count at any time at **http://127.0.0.1:3143/feedback-summary**: yes and no, and how much safer and longer the routes were for each. No places are kept.
 
+### The stats screen
+
+Open **http://127.0.0.1:3143/stats.html** on a second screen: today's trips, how many got a safer route than the standard one, the risky turns, railroad crossings, school zones and closed roads they avoided, and the share who'd take the safer route. It updates every 20 seconds. Opened from the tunnel's https link, it also shows a QR code for phones. Sample trips (demo mode) and automatic re-plans aren't counted, and no places are kept (`backend/.cache/routes/trips.jsonl`).
+
 ### Watch usage
 
 Every hour or so, run the `/health` check above and look at `google_requests_today` (Google's map), or `tomtom_requests_today` and `tomtom_tiles_today` (the OpenStreetMap map). When TomTom's daily cap is reached, trips still work with work zones and 511, and the **Traffic** map layer stops showing new map squares until midnight.

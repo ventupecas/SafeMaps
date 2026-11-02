@@ -226,7 +226,7 @@ export async function findRoute({ fit = true, again = false } = {}) {
   setFinding(true);
   showStatus("Comparing routes for safety, fuel and time…");
   try {
-    const trip = await requestTrip(state.origin, state.destination);
+    const trip = await requestTrip(state.origin, state.destination, { counted: !again });
     if (ticket !== state.findTicket) return;
     showTrip(trip, { fit });
     if (!again) rememberTrip();
@@ -269,8 +269,9 @@ export function tripChanged() {
 
 // The trip as the server takes it. heading: the direction a moving car is driving, so new
 // routes start that way. stops: places still to stop at (the chosen ones by default).
-// demo: a sample trip, planned without live traffic so it costs no paid requests.
-export function tripPayload(origin, destination, { heading = null, stops = chosenStops(), demo = false } = {}) {
+// demo: a sample trip, planned without live traffic so it costs no paid requests. counted: a
+// visitor's trip for the expo's stats; sample trips and plans made again aren't.
+export function tripPayload(origin, destination, { heading = null, stops = chosenStops(), demo = false, counted = !demo } = {}) {
   const payload = {
     origin: { lat: origin.lat, lng: origin.lng },
     destination: { lat: destination.lat, lng: destination.lng },
@@ -281,6 +282,7 @@ export function tripPayload(origin, destination, { heading = null, stops = chose
     use_router: $("use-router").checked,
     road_events: $("road-events").value,
     departure_offset_min: Number($("leave").value) || 0,
+    counted,
   };
   if ($("extra-time").value) payload.max_extra_min = Number($("extra-time").value);
   if (heading !== null) payload.heading = Math.round(heading * 10) / 10;
