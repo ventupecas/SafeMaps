@@ -101,6 +101,7 @@ const state = {
   dark: false, // the dark map is showing (at night, with Default chosen)
   buses: { available: false, data: null, lines: [] }, // the Transit layer's bus routes (OpenStreetMap map)
   findTicket: 0, // the latest route request: answers to older ones are dropped
+  finding: false, // a route request is on its way
   refreshTimer: null, // planning the trip again after a change on the map
   noticeTimer: null, // hides a mapNotice
   stops: [], // places to stop at on the way: { id, point, pin }, in order
@@ -279,7 +280,7 @@ function clearPoint(kind, { onMap = false } = {}) {
   $(`${kind}-picked`).textContent = "";
   const box = $(`${kind}-search`).querySelector("input");
   if (box) box.value = "";
-  if (state.plan) clearTrip();
+  if (state.plan || state.finding) clearTrip();
   updateFindButton();
 }
 
@@ -332,8 +333,9 @@ function changeOnMap(kind, point) {
 }
 
 function undoMapChange() {
+  if (state.nav.active) return; // kept for after the drive
   const change = state.undo.pop();
-  if (change && !state.nav.active) change.undo();
+  if (change) change.undo();
   updateUndoButton();
 }
 
@@ -467,6 +469,7 @@ async function findRoute({ fit = true, again = false } = {}) {
 }
 
 function setFinding(on) {
+  state.finding = on;
   const button = $("find");
   button.classList.toggle("is-busy", on);
   button.textContent = on ? "Finding…" : "Find route";
@@ -474,11 +477,16 @@ function setFinding(on) {
   else updateFindButton();
 }
 
-// After the trip changes with its routes on the map, plan it again: once, for a burst of changes.
-// With "Plan again after each change" off, a note says the routes are out of date instead.
+// After the trip changes with its routes on the map, or on their way, plan it again: once, for a
+// burst of changes. With "Plan again after each change" off, a note says the routes are out of date.
 function tripChanged() {
   clearTimeout(state.refreshTimer);
-  if (!state.plan || state.nav.active || state.demo.running) return;
+  if (!(state.plan || state.finding) || state.nav.active || state.demo.running) return;
+  if (state.finding) {
+    state.findTicket += 1; // the answer on its way is for the trip before this change
+    setFinding(false);
+    if (!state.plan) $("results").replaceChildren();
+  }
   if (!$("auto-replan").checked) {
     if (!$("stale-note")) {
       $("results").prepend(
@@ -620,7 +628,6 @@ function showTrip(trip, { fit = true } = {}) {
         ]),
   );
   selectRoute(plan.winner.id);
-  drawBuses();
   $("drive").hidden = false;
 }
 
@@ -782,6 +789,7 @@ function selectRoute(id) {
   for (const item of document.querySelectorAll(".route")) {
     item.classList.toggle("route--active", item.dataset.id === id);
   }
+  drawBuses(); // "Only buses near the trip" means near this route
 }
 
 function clearRoutes() {
@@ -1514,14 +1522,19 @@ async function showTransit(on) {
     try {
       const response = await fetch("/bus-routes");
       if (!response.ok) throw new Error(`The server answered ${response.status}`);
-      buses.data = await response.json();
-      for (const route of buses.data.routes) route.points = route.paths.map(decodePolyline);
+      const data = await response.json();
+      for (const route of data.routes) {
+        route.points = route.paths.map(decodePolyline);
+        route.dense = route.points.map((path) => densify(path, NEAR_TRIP_M / 2)); // for "near the trip"
+      }
+      if (data.routes.length) buses.data = data; // none yet (the server still fetching): asked again next time
     } catch (error) {
       console.warn("Bus routes unavailable:", error);
       return;
     }
   }
-  if (buses.data && buses.data.attribution) state.view.credit(buses.data.attribution, on);
+  // The switch may have changed while the routes were on their way.
+  if (buses.data && buses.data.attribution) state.view.credit(buses.data.attribution, $("transit-layer").checked);
   drawBuses();
 }
 
@@ -1534,7 +1547,7 @@ function drawBuses() {
   const followed = state.paths[state.activeRouteId];
   const near = $("buses-near").checked && followed ? nearPath(followed.points, NEAR_TRIP_M) : null;
   for (const route of buses.data.routes) {
-    if (near && !route.points.some((path) => densify(path, NEAR_TRIP_M / 2).some(near))) continue;
+    if (near && !route.dense.some((path) => path.some(near))) continue;
     const popup = { heading: `Route ${route.name}`, text: route.long_name };
     for (const path of route.points) {
       buses.lines.push(state.view.line(path, { color: route.color, weight: 3, opacity: 0.75, zIndex: 1, under: true, popup }));
@@ -1580,7 +1593,7 @@ function recentTrips() {
 }
 
 function rememberTrip() {
-  if ($("demo-mode").checked || state.demo.running) return;
+  if ($("demo-mode").checked || state.demo.running || !state.origin || !state.destination) return;
   const keep = ({ lat, lng, label }) => ({ lat, lng, label: /^(My|Current) location$/.test(label || "") ? null : label });
   const trip = { from: keep(state.origin), to: keep(state.destination), stops: chosenStops().map(keep) };
   const key = (t) => JSON.stringify([t.from, t.to, t.stops].flat().map((p) => [p.lat.toFixed(4), p.lng.toFixed(4)]));

@@ -79,7 +79,6 @@ from app.router import Router
 from app.routes_client import DailyLimitReached, RoutesApiError, RoutesClient, daily_usage
 from app.sun import low_sun
 from app.traffic_tiles import TILE_REFRESH, TileError, TrafficTiles
-from app.transit import ATTRIBUTION as BUS_ATTRIBUTION
 from app.transit import BusRoutes
 from app.usage import DailyUsage
 from app.weather import WeatherAlert, WeatherAlerts, for_the_weather
@@ -513,7 +512,7 @@ def create_app(settings: Settings | None = None, *, http: httpx.Client | None = 
                 {"name": route.name, "long_name": route.long_name, "color": route.color, "paths": list(route.paths)}
                 for route in routes
             ],
-            "attribution": BUS_ATTRIBUTION if routes else None,
+            "attribution": engine.buses.attribution if routes else None,
         }
 
     @app.get("/traffic-tiles/{z}/{x}/{y}.png", include_in_schema=False)

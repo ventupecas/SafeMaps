@@ -163,3 +163,14 @@ def test_no_pricing_keeps_estimates(recorded_router_trip, capsys):
 def test_no_router_flag(recorded_cache, capsys):
     assert cli.main(["--from", FROM, "--to", TO, "--no-router"]) == 0
     assert "Own router: off (--no-router)" in capsys.readouterr().out
+
+
+def test_bus_routes_setting_takes_on_off_or_a_feed_address(monkeypatch):
+    from app.config import BUS_ROUTES_URL, Settings
+
+    for value, expected in [("", BUS_ROUTES_URL), ("on", BUS_ROUTES_URL), ("off", None), ("https://x.example/gtfs.zip", "https://x.example/gtfs.zip")]:
+        monkeypatch.setenv("ROUTES_BUS_ROUTES", value)
+        assert Settings.from_env().bus_routes_url == expected
+    monkeypatch.setenv("ROUTES_BUS_ROUTES", "kamino.mcts.org/gtfs.zip")
+    with pytest.raises(ValueError, match="ROUTES_BUS_ROUTES"):
+        Settings.from_env()

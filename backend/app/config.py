@@ -148,11 +148,15 @@ def _time_windows(text: str) -> tuple[tuple[time, time], ...]:
 
 
 def _bus_routes_url(value: str | None) -> str | None:
-    """ROUTES_BUS_ROUTES: unset means MCTS's feed, off means none, anything else is another GTFS feed's address."""
+    """ROUTES_BUS_ROUTES: unset or on means MCTS's feed, off means none, or another GTFS feed's http(s) address."""
     value = (value or "").strip()
-    if not value:
+    if value.lower() in {"", "1", "true", "yes", "on"}:
         return BUS_ROUTES_URL
-    return None if value.lower() in {"0", "false", "no", "off"} else value
+    if value.lower() in {"0", "false", "no", "off"}:
+        return None
+    if not value.lower().startswith(("http://", "https://")):
+        raise ValueError(f"ROUTES_BUS_ROUTES must be on, off or a GTFS feed's http(s) address; got {value!r}")
+    return value
 
 
 def _backend_path(value: str) -> Path:

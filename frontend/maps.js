@@ -141,7 +141,7 @@ class GoogleView {
       "contextmenu",
       (event) => {
         const projection = overlay.getProjection();
-        if (!projection) return;
+        if (!projection || event.target.closest("gmp-advanced-marker, .gm-style-iw-c, .gmnoprint, .gm-control-active, button, a")) return;
         event.preventDefault();
         const box = element.getBoundingClientRect();
         const at = projection.fromContainerPixelToLatLng(new google.maps.Point(event.clientX - box.left, event.clientY - box.top));
@@ -455,8 +455,10 @@ class OsmView {
   }
 
   credit(text, on) {
-    if (on) this.map.attributionControl.addAttribution(text);
-    else this.map.attributionControl.removeAttribution(text);
+    this.credits ||= new Set(); // Leaflet counts each add, so a credit added twice needs two removes
+    if (on === this.credits.has(text)) return;
+    if (on) this.credits.add(text) && this.map.attributionControl.addAttribution(text);
+    else this.credits.delete(text) && this.map.attributionControl.removeAttribution(text);
   }
 
   async reverse(point) {

@@ -8,7 +8,7 @@ import zipfile
 import httpx
 
 from app.geo import decode_polyline, destination_point, haversine_m
-from app.transit import REFRESH, BusRoutes, read_gtfs
+from app.transit import REFRESH, BusRoutes, read_agency, read_gtfs
 
 START = (43.04, -87.91)
 URL = "https://transit.example/gtfs.zip"
@@ -44,6 +44,7 @@ def feed() -> bytes:
     shapes.reverse()  # rows in any order: the sequence numbers decide
     data = io.BytesIO()
     with zipfile.ZipFile(data, "w") as gtfs:
+        gtfs.writestr("agency.txt", table([{"agency_id": "MCTS", "agency_name": "Milwaukee County Transit System"}]))
         gtfs.writestr("routes.txt", "﻿" + table(routes))  # some feeds start with a byte-order mark
         gtfs.writestr("trips.txt", table(trips))
         gtfs.writestr("shapes.txt", table(shapes))
@@ -58,6 +59,7 @@ def test_each_route_is_drawn_by_its_most_run_shape_in_each_direction():
     assert len(points) == 2  # a straight line needs only its ends
     assert haversine_m(points[0], START) < 2 and 990 < haversine_m(points[0], points[-1]) < 1010
     assert four.color == "#1a73e8"  # white would vanish on the map
+    assert read_agency(feed()) == "Milwaukee County Transit System"
 
 
 def test_bus_routes_are_fetched_once_and_kept_on_disk(tmp_path):
@@ -83,5 +85,7 @@ def test_old_bus_routes_are_served_when_the_feed_is_down(tmp_path):
     old = saved.stat().st_mtime - REFRESH.total_seconds() - 60
     os.utime(saved, (old, old))
     down = httpx.Client(transport=httpx.MockTransport(lambda r: httpx.Response(503)))
-    assert [route.name for route in BusRoutes(down, URL, saved).routes()] == ["4", "30"]
+    old_lines = BusRoutes(down, URL, saved)
+    assert [route.name for route in old_lines.routes()] == ["4", "30"]  # at once, while a new fetch is tried
+    assert old_lines.attribution == "Bus routes: Milwaukee County Transit System"
     assert BusRoutes(down, URL, tmp_path / "never-saved.json").routes() == []

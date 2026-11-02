@@ -183,3 +183,19 @@ def test_map_layers_are_remembered(page, site):
     page.reload()
     page.wait_for_selector("#origin-search input")
     assert page.locator('input[value="satellite"]').is_checked() and page.locator("#transit-layer").is_checked()
+
+
+def test_routes_for_a_trip_changed_while_they_were_on_their_way_are_dropped(page, site):
+    held = []
+    page.route("**/route", lambda route: held.append(route))  # answered only after the trip changes
+    open_map(page, site + TRIP)
+    for _ in range(100):
+        if held:
+            break
+        page.wait_for_timeout(100)
+    page.mouse.click(*center(page, ".map-pin--origin"))  # a pin taken off (at this zoom, A and B overlap)
+    held[0].continue_()
+    page.wait_for_timeout(1500)
+    assert sum(pins(page)) == 1
+    assert page.locator(".route").count() == 0 and page.locator("#results .status--error").count() == 0
+    assert page.locator("#find").text_content() == "Find route"
