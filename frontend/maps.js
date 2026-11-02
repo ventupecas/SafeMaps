@@ -18,6 +18,7 @@
 //   view.markerGroup()                    -> { add(point, element, options), show(on), clear() }
 //                                         markers that cluster into a count where crowded (OpenStreetMap)
 //   view.fit(points), view.panTo(point), view.setZoom(zoom)
+//   view.center()                         the point at the middle of the map
 //   view.traffic(on), view.hasTraffic     a traffic layer, when the map has one
 //   view.baseMap(kind)                    "roadmap", "satellite", "terrain" or "dark"
 //   view.switchesDark                     whether baseMap("dark") works after create (not on Google's map)
@@ -242,6 +243,11 @@ class GoogleView {
     this.map.panTo(point);
   }
 
+  center() {
+    const middle = this.map.getCenter();
+    return { lat: middle.lat(), lng: middle.lng() };
+  }
+
   setZoom(zoom) {
     this.map.setZoom(zoom);
   }
@@ -427,6 +433,11 @@ class OsmView {
 
   panTo(point) {
     this.map.panTo([point.lat, point.lng]);
+  }
+
+  center() {
+    const { lat, lng } = this.map.getCenter();
+    return { lat, lng };
   }
 
   setZoom(zoom) {

@@ -1297,6 +1297,39 @@ summary:focus-visible {
   display: none;
 }
 
+/* The cross in the middle of the map, while it has keyboard focus: where Enter and S put points.
+   Not after a click: the map takes focus then too (data-input, set in app.js). */
+.crosshair {
+  display: none;
+  position: absolute;
+  z-index: 900;
+  left: 50%;
+  top: 50%;
+  width: 34px;
+  height: 34px;
+  transform: translate(-50%, -50%);
+  pointer-events: none;
+  background:
+    linear-gradient(var(--focus), var(--focus)) center / 3px 100% no-repeat,
+    linear-gradient(var(--focus), var(--focus)) center / 100% 3px no-repeat;
+  filter: drop-shadow(0 0 2px #fff) drop-shadow(0 0 1px #fff);
+}
+
+[data-input="keys"] .map-wrap:has(#map:focus, #map :focus) .crosshair {
+  display: block;
+}
+
+/* Read by screen readers, not shown. */
+.visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+}
+
 /* Pins move with a drag and come off the map with a click. */
 .map-pin {
   cursor: grab;

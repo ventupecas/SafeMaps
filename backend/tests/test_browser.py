@@ -215,3 +215,21 @@ def test_the_page_opens_without_the_network_once_it_has_been_seen(browser, site)
     page.wait_for_selector("#origin-search input")  # the map library and the server's settings came from the copy
     assert page.locator(".leaflet-container").count() == 1
     context.close()
+
+
+def test_points_can_be_placed_from_the_keyboard(page, site):
+    open_map(page, site + TRIP)
+    wait_for_routes(page)
+    page.click("#clear")
+    page.focus("#map")
+    page.keyboard.press("Enter")  # the start, in the middle
+    page.keyboard.press("ArrowRight")  # the map moves
+    page.wait_for_timeout(400)
+    page.keyboard.press("Enter")  # the destination
+    assert pins(page) == [1, 1, 0] and page.locator("#map-status").text_content() == "Destination set."
+    page.keyboard.press("ArrowUp")
+    page.wait_for_timeout(400)
+    page.keyboard.press("s")
+    assert pins(page) == [1, 1, 1] and page.locator("#map-status").text_content() == "Stop 1 added."
+    page.keyboard.press("Control+z")
+    assert pins(page) == [1, 1, 0]

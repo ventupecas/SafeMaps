@@ -136,6 +136,10 @@ function wireControls() {
   $("drive").addEventListener("click", () => (state.nav.active ? stopDriving() : startDriving()));
   $("recenter").addEventListener("click", recenter);
   $("undo").addEventListener("click", undoMapChange);
+  $("map").addEventListener("keydown", placeByKeyboard);
+  // The cross in the middle of the map is for keyboard users: the last kind of input decides.
+  document.addEventListener("keydown", () => (document.body.dataset.input = "keys"), true);
+  document.addEventListener("pointerdown", () => (document.body.dataset.input = "pointer"), true);
   $("traffic-layer").addEventListener("change", (event) => {
     if (state.view && state.view.hasTraffic) state.view.traffic(event.target.checked);
     else drawTraffic(); // no traffic layer: the measured slowdowns from the last trip
@@ -171,6 +175,30 @@ function wireControls() {
   document.addEventListener("visibilitychange", () => {
     if (state.nav.active && document.visibilityState === "visible") keepScreenOn();
   });
+}
+
+// From the keyboard, points go where the cross in the middle of the map is: Enter for the start,
+// then the destination, S for a stop. The map's own keys move it (arrows) and zoom it (+ and -).
+// Pins are reached with Tab, and Enter on one removes it.
+function placeByKeyboard(event) {
+  const key = event.key.toLowerCase();
+  if ((key !== "enter" && key !== "s") || event.ctrlKey || event.metaKey || event.altKey) return;
+  if (event.target.closest(".leaflet-marker-icon, gmp-advanced-marker, .leaflet-popup, .gm-style-iw-c, input, button, a")) return;
+  if (!state.view || !mapTouchAllowed()) return;
+  event.preventDefault();
+  const point = state.view.center();
+  const before = { origin: state.origin, destination: state.destination, stops: state.stops.length };
+  if (key === "s") addStopOnMap(point);
+  else changeOnMap(state.origin ? "destination" : "origin", unnamed(point));
+  const said =
+    state.stops.length > before.stops
+      ? `Stop ${state.stops.length} added.`
+      : state.destination !== before.destination
+        ? "Destination set."
+        : state.origin !== before.origin
+          ? "Start set."
+          : "";
+  $("map-status").textContent = said;
 }
 
 async function loadProfiles() {

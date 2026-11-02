@@ -66,7 +66,7 @@
           <p class="hint">
             Search for a place, or click the map: the first click sets the start, the next the destination. Right-click (or
             press and hold) to add a stop. Drag a pin to move it, click it to remove it; <strong>Undo</strong> on the map
-            takes a change back.
+            takes a change back. With the keyboard, Tab to the map: Enter puts a point at the cross in the middle, S a stop.
           </p>
           <details id="recent" class="recent" hidden>
             <summary>Recent trips</summary>
@@ -141,7 +141,14 @@
       </aside>
 
       <section class="map-wrap">
-        <div id="map" class="map" role="application" aria-label="Map"></div>
+        <div
+          id="map"
+          class="map"
+          role="application"
+          aria-label="Map. Arrow keys move it, plus and minus zoom. Enter puts the start, then the destination, at the middle; S adds a stop there; Control Z undoes."
+        ></div>
+        <div class="crosshair" aria-hidden="true"></div>
+        <p id="map-status" class="visually-hidden" role="status"></p>
         <p id="nav-banner" class="nav-banner" role="status" hidden></p>
         <p id="demo-banner" class="demo-banner" role="status" hidden></p>
         <button id="recenter" class="button recenter" type="button" hidden>Re-center</button>
