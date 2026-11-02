@@ -1310,6 +1310,53 @@ summary:focus-visible {
   opacity: 0.9;
 }
 
+/* Railroad crossings (a crossbuck) and schools (a school sign's yellow) along the routes. */
+.spot {
+  display: grid;
+  place-items: center;
+  width: 18px;
+  height: 18px;
+  border: 2px solid #fff;
+  box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.35), 0 1px 3px rgba(0, 0, 0, 0.3);
+  color: #202124;
+  font-size: 11px;
+  font-weight: 800;
+  line-height: 1;
+  transform: translateY(50%); /* centered on the spot */
+}
+
+.spot--rail {
+  border-radius: 50%;
+  background: #fff;
+  border-color: #202124;
+}
+
+.spot--rail::before {
+  content: "✕";
+}
+
+.spot--school {
+  border-radius: 4px;
+  background: #f2c200;
+}
+
+.spot--school::before {
+  content: "S";
+}
+
+.spot--avoided {
+  opacity: 0.5;
+  border-style: dashed;
+}
+
+.legend .spot {
+  width: 16px;
+  height: 16px;
+  margin: 0 6px;
+  font-size: 9px;
+  transform: none;
+}
+
 .car {
   position: relative;
   width: 22px;

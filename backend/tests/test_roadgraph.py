@@ -313,6 +313,7 @@ def test_railroad_crossings_and_school_zones_are_built_into_the_map(tmp_path):
     again = RoadGraph.load(tmp_path / "g.json.gz")
     assert again.rail_crossings == graph.rail_crossings and again.school_zone == graph.school_zone
     assert again.rail_crossings_along([[point(1, 0), point(1, 3)]]) == 1  # Main St passes the crossing
+    assert again.rail_crossings_at([[point(1, 0), point(1, 3)]]) == again.rail_crossing_points  # where, for the map
     assert again.schools_along([[point(2, 1), point(2, 3)]]) == 1
 
 

@@ -371,10 +371,11 @@ def _joined(legs: Sequence[ScoredRoute], stops: Sequence[LatLng], route_id: str,
         if number:
             maneuvers.append(Maneuver(maneuver="WAYPOINT", instruction=f"Arrive at stop {number}", location=stops[number - 1]))
         maneuvers += leg.maneuvers
+    # Counts and times add up over the legs; lists of places (turns, crossings, schools) join.
     features = RouteFeatures(
         **{
-            name: tuple(turn for leg in legs for turn in leg.features.crossing_turns)
-            if name == "crossing_turns"
+            name: tuple(item for leg in legs for item in getattr(leg.features, name))
+            if isinstance(getattr(legs[0].features, name), tuple)
             else sum(getattr(leg.features, name) for leg in legs)
             for name in RouteFeatures.model_fields
         }

@@ -14,6 +14,7 @@ export function showTrip(trip, { fit = true } = {}) {
   clearRoutes();
   drawRoutes(plan, fit);
   drawRiskyTurns(plan);
+  drawCrossingsAndSchools(plan);
   state.closures = trip.road_events.filter((event) => !isTraffic(event));
   drawClosures();
   state.trafficEvents = trip.road_events.filter(isTraffic);
@@ -175,6 +176,42 @@ function followablePath(points, route, plan) {
     along: nearestOnPath(maneuver.location, followable).along,
   }));
   return followable;
+}
+
+// Railroad crossings and school zones (when they count, at school times): the recommended route's,
+// and, faded, the standard route's that the recommended route stays clear of.
+function drawCrossingsAndSchools(plan) {
+  const standard = plan.candidates.find(isStandard);
+  const kinds = [
+    {
+      field: "rail_crossing_points",
+      className: "spot spot--rail",
+      heading: "Railroad crossing",
+      ours: "The recommended route crosses railroad tracks here, at street level.",
+      theirs: "The standard route crosses railroad tracks here, at street level. The recommended route doesn't.",
+    },
+    {
+      field: "school_points",
+      className: "spot spot--school",
+      heading: "School zone",
+      ours: "The recommended route passes this school at drop-off or pickup time.",
+      theirs: "The standard route passes this school at drop-off or pickup time. The recommended route doesn't.",
+    },
+  ];
+  for (const kind of kinds) {
+    const ours = plan.winner.features[kind.field] || [];
+    const show = (spot, avoided) => {
+      const mark = element("div", { className: `${kind.className}${avoided ? " spot--avoided" : ""}` });
+      const heading = avoided ? `${kind.heading} avoided` : kind.heading;
+      const text = avoided ? kind.theirs : kind.ours;
+      state.turnMarkers.push(state.view.marker(spot, mark, { title: heading, zIndex: avoided ? 27 : 28, popup: { heading, text } }));
+    };
+    ours.forEach((spot) => show(spot, false));
+    if (!standard || standard.id === plan.winner.id) continue;
+    for (const spot of standard.features[kind.field] || []) {
+      if (!ours.some((mine) => distanceM(mine, spot) < 30)) show(spot, true);
+    }
+  }
 }
 
 // Red dots: the recommended route's risky turns. Red rings: the standard route's, where the
