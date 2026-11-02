@@ -1,7 +1,7 @@
 # Runs the tests on every push and pull request. They need no keys: every
 # outside service is faked, and the road maps they use are built in the tests.
-# The browser tests (tests/test_browser.py) drive the web map in Chromium; they
-# load the map library from unpkg, the only network they use.
+# The browser tests (tests/test_browser.py) drive the web map in Chromium, also
+# without the network.
 name: Tests
 
 on:

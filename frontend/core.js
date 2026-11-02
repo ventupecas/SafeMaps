@@ -82,7 +82,7 @@ export const EVENT_SOURCES = {
   apify: "traffic tiles",
 };
 
-export const QR_LIBRARY = "https://unpkg.com/qrcode-generator@1.4.4/qrcode.js";
+export const QR_LIBRARY = "vendor/qrcode-generator/qrcode.js"; // qrcode-generator 1.4.4
 
 export const NARROW = "(max-width: 760px)"; // the phone layout in styles.css
 

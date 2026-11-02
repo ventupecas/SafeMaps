@@ -30,8 +30,9 @@
 // map, so the OpenStreetMap page never loads Google at all. Its traffic layer
 // is TomTom's, served through our server (trafficTiles), which holds the key.
 
-const LEAFLET = "https://unpkg.com/leaflet@1.9.4/dist/";
-const MARKER_CLUSTER = "https://unpkg.com/leaflet.markercluster@1.5.3/dist/";
+// Served from here (frontend/vendor), so the map works without the internet once its images are kept (sw.js).
+const LEAFLET = "vendor/leaflet/"; // Leaflet 1.9.4
+const MARKER_CLUSTER = "vendor/markercluster/"; // Leaflet.markercluster 1.5.3
 const CLUSTER_RADIUS_PX = 40; // markers closer than this on screen share one count
 const OSM_TILES = "https://tile.openstreetmap.org/{z}/{x}/{y}.png";
 const OSM_CREDIT = '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors';
@@ -443,7 +444,8 @@ class OsmView {
   baseMap(kind) {
     const { url, ...options } = OSM_BASE_MAPS[kind] || OSM_BASE_MAPS.roadmap;
     if (this.base) this.base.remove();
-    this.base = L.tileLayer(url, { maxZoom: 19, zIndex: Z_BASE, ...options }).addTo(this.map);
+    // crossOrigin: fetched so the page can keep them for offline use (sw.js); every one of these servers allows it.
+    this.base = L.tileLayer(url, { maxZoom: 19, zIndex: Z_BASE, crossOrigin: "anonymous", ...options }).addTo(this.map);
   }
 
   transit(on) {
@@ -476,7 +478,7 @@ class OsmView {
 
   overlay(name, on) {
     const { url, attribution } = OSM_OVERLAYS[name];
-    this.overlays[name] ||= L.tileLayer(url, { maxZoom: 19, zIndex: Z_OVERLAY, attribution });
+    this.overlays[name] ||= L.tileLayer(url, { maxZoom: 19, zIndex: Z_OVERLAY, attribution, crossOrigin: "anonymous" });
     if (on) this.overlays[name].addTo(this.map);
     else this.overlays[name].remove();
   }

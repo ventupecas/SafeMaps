@@ -33,6 +33,9 @@ boot();
 async function boot() {
   loadProfiles();
   wireControls();
+  // Keeps the page and the map images seen for when the network drops (sw.js). Browsers allow it
+  // on https and on this computer's own address.
+  if ("serviceWorker" in navigator) navigator.serviceWorker.register("sw.js").catch((error) => console.warn("No offline copy:", error));
 
   let trafficTiles = false;
   try {
