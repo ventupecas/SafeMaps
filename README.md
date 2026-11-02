@@ -39,6 +39,8 @@ backend/
   tests/              331 tests, no network needed; GitHub runs them on every push (.github/workflows/tests.yml)
 frontend/
   index.html, app.js, styles.css   The web map: place search, routes drawn and explained, driving mode
+  core.js, editing.js, results.js, drive.js, layers.js, trips.js, expo.js
+                                   The page's parts (app.js's header says which does what)
   maps.js                          The map underneath: Google's or OpenStreetMap's (ROUTES_MAP)
   config.example.js                Copy to config.js (gitignored) with the browser key
 ```
