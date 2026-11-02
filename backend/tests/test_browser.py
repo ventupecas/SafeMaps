@@ -233,3 +233,19 @@ def test_points_can_be_placed_from_the_keyboard(page, site):
     assert pins(page) == [1, 1, 1] and page.locator("#map-status").text_content() == "Stop 1 added."
     page.keyboard.press("Control+z")
     assert pins(page) == [1, 1, 0]
+
+
+def test_the_page_in_spanish_and_back_to_english_with_the_trip_kept(browser, site):
+    context = browser.new_context(locale="es-US", service_workers="block")
+    context.route("**/*", lambda route: route.continue_() if "127.0.0.1" in route.request.url else route.abort())
+    page = context.new_page()
+    open_map(page, site + TRIP)
+    wait_for_routes(page)
+    assert page.locator("html").get_attribute("lang") == "es"
+    assert page.locator("#find").text_content() == "Buscar ruta" and page.locator(".winner__badge").text_content() == "Recomendada"
+    assert page.locator("#origin-search input").get_attribute("placeholder") == "¿Desde dónde?"
+    with page.expect_navigation():
+        page.click("#lang")  # English, the same trip
+    page.wait_for_selector(".route")
+    assert page.locator("#find").text_content() == "Find route" and page.locator("#lang").text_content() == "Español"
+    context.close()

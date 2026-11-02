@@ -6,6 +6,7 @@ import { requestTrip } from "./app.js";
 import { removeStop, setPoint } from "./editing.js";
 import { showTrip } from "./results.js";
 import { tripLink } from "./trips.js";
+import { locale } from "./i18n.js";
 
 export function setUpDemo() {
   const fromLink = new URLSearchParams(window.location.search).get("demo");
@@ -92,7 +93,7 @@ export async function showAbout() {
     if (!results || !results.trips) return;
     $("about-results-title").textContent = `Across ${results.trips} Milwaukee test trips`;
     $("about-numbers").replaceChildren(...resultLines(results).map((text) => element("li", {}, text)));
-    const day = new Date(`${results.generated}T12:00:00`).toLocaleDateString("en-US", { month: "long", day: "numeric", year: "numeric" });
+    const day = new Date(`${results.generated}T12:00:00`).toLocaleDateString(locale, { month: "long", day: "numeric", year: "numeric" });
     $("about-measured").textContent = `Measured ${day}, with that day's closures and traffic.`;
     $("about-results").hidden = false;
   } catch {

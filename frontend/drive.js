@@ -6,6 +6,7 @@ import { requestTrip, showStatus } from "./app.js";
 import { chosenStops, placePin, setPoint } from "./editing.js";
 import { selectRoute, showTrip } from "./results.js";
 import { stopDemo } from "./expo.js";
+import { locale, translate } from "./i18n.js";
 
 function locationProblem() {
   if (!window.isSecureContext) return "Location only works on a secure page: https, or this computer's own address.";
@@ -198,8 +199,8 @@ function spokenDistance(meters) {
 // Read directions aloud, if the driver wants them and the browser can.
 function speak(text) {
   if (!$("voice").checked || !("speechSynthesis" in window)) return;
-  const utterance = new SpeechSynthesisUtterance(text);
-  utterance.lang = "en-US";
+  const utterance = new SpeechSynthesisUtterance(translate(text));
+  utterance.lang = locale;
   window.speechSynthesis.speak(utterance);
 }
 

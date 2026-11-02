@@ -27,6 +27,7 @@ const PAGE_FILES = [
   "trips.js",
   "expo.js",
   "maps.js",
+  "i18n.js",
   "stats.html",
   "stats.js",
   "manifest.json",

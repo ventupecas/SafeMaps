@@ -3,10 +3,12 @@
 
 import { QR_LIBRARY, $ } from "./core.js";
 import { loadScript } from "./maps.js";
+import { locale, startTranslating } from "./i18n.js";
 
 const REFRESH_MS = 20000;
 const LOCAL = ["localhost", "127.0.0.1", "[::1]"];
 
+startTranslating();
 show();
 setInterval(show, REFRESH_MS);
 showQr();
@@ -23,7 +25,7 @@ async function show() {
     return;
   }
   const { trips, answers } = stats;
-  const day = new Date(`${stats.day}T12:00:00`).toLocaleDateString("en-US", { weekday: "long", month: "long", day: "numeric" });
+  const day = new Date(`${stats.day}T12:00:00`).toLocaleDateString(locale, { weekday: "long", month: "long", day: "numeric" });
   $("board-day").textContent = `Today at the booth · ${day}`;
   $("stat-trips").textContent = number(trips.trips);
   $("stat-safer").textContent = trips.trips ? `${Math.round((100 * trips.safer_than_standard) / trips.trips)}%` : "–";
@@ -37,11 +39,11 @@ async function show() {
   $("stat-gain").textContent = trips.average_safety_gain === null ? "–" : `+${trips.average_safety_gain}`;
   $("stat-yes").textContent = answers.yes_share === null ? "–" : `${Math.round(answers.yes_share * 100)}%`;
   $("stat-answers").textContent = answers.total ? `${number(answers.yes)} yes · ${number(answers.no)} no` : "No answers yet today";
-  $("board-updated").textContent = `Updated ${new Date().toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit" })}`;
+  $("board-updated").textContent = `Updated ${new Date().toLocaleTimeString(locale, { hour: "numeric", minute: "2-digit" })}`;
 }
 
 function number(value) {
-  return Number(value || 0).toLocaleString("en-US");
+  return Number(value || 0).toLocaleString(locale);
 }
 
 // A code for phones to open the planner. Only from the public link: this computer's own address

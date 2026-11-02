@@ -78,8 +78,9 @@ const PHOTON_REVERSE = "https://photon.komoot.io/reverse";
 const SEARCH_BIAS = { lat: 43.0389, lng: -87.9065 }; // prefer places around Milwaukee
 
 // trafficTiles: the OpenStreetMap map's traffic layer, a tile URL template ({z}/{x}/{y}); none means no layer.
-export function createMapView(kind, { mapsApiKey, mapId, onAuthFailure, trafficTiles = null } = {}) {
-  return kind === "osm" ? new OsmView(trafficTiles) : new GoogleView(mapsApiKey, mapId, onAuthFailure);
+// language: "en" or "es", for Google's map: its labels, controls and place search.
+export function createMapView(kind, { mapsApiKey, mapId, onAuthFailure, trafficTiles = null, language = "en" } = {}) {
+  return kind === "osm" ? new OsmView(trafficTiles) : new GoogleView(mapsApiKey, mapId, onAuthFailure, language);
 }
 
 // ---- Google
@@ -88,7 +89,8 @@ class GoogleView {
   hasTraffic = true;
   switchesDark = false;
 
-  constructor(apiKey, mapId, onAuthFailure) {
+  constructor(apiKey, mapId, onAuthFailure, language) {
+    this.language = language;
     this.apiKey = apiKey;
     this.mapId = mapId || "DEMO_MAP_ID";
     this.onAuthFailure = onAuthFailure;
@@ -104,6 +106,8 @@ class GoogleView {
         v: "weekly",
         loading: "async",
         libraries: "places,marker",
+        language: this.language,
+        region: "US",
         callback: "initMap",
       });
       const script = document.createElement("script");

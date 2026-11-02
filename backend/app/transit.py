@@ -25,7 +25,7 @@ from collections.abc import Callable, Iterator
 from dataclasses import asdict, dataclass
 from datetime import timedelta
 from pathlib import Path
-from threading import Lock, Thread
+from threading import Event, Lock, Thread
 
 import httpx
 
@@ -120,6 +120,8 @@ class BusRoutes:
         self._agency: str | None = None
         self._checked_at = float("-inf")
         self._refreshing = False
+        self._fetched = Event()  # set whenever no fetch is under way
+        self._fetched.set()
         self._lock = Lock()
 
     @property
@@ -130,11 +132,16 @@ class BusRoutes:
         with self._lock:
             if self._routes is None:
                 self._read_saved()
-            if self._refreshing or self._clock() - self._checked_at < REFRESH.total_seconds():
+            first_fetch_under_way = self._refreshing and not self._routes
+            if not first_fetch_under_way and (self._refreshing or self._clock() - self._checked_at < REFRESH.total_seconds()):
                 return self._routes or []
-            self._refreshing = True
+            if not first_fetch_under_way:
+                self._refreshing = True
+                self._fetched.clear()
             waiting = not self._routes
-        if waiting:
+        if first_fetch_under_way:
+            self._fetched.wait(timeout=90)  # the first fetch, started by another request: wait for it too
+        elif waiting:
             self._refresh()  # nothing to show yet: this request waits for the feed
         else:
             Thread(target=self._refresh, name="bus-routes-refresh", daemon=True).start()
@@ -151,10 +158,12 @@ class BusRoutes:
                 # Try again after RETRY, keeping whatever lines there are meanwhile.
                 self._checked_at = self._clock() - REFRESH.total_seconds() + RETRY.total_seconds()
                 self._refreshing = False
+            self._fetched.set()
             return
         self._save(routes, agency)
         with self._lock:
             self._routes, self._agency, self._checked_at, self._refreshing = routes, agency, self._clock(), False
+        self._fetched.set()
         logger.info("Bus routes: %d from %s", len(routes), self._url)
 
     def _read_saved(self) -> None:

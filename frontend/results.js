@@ -6,6 +6,7 @@ import { $, CO2_KG_PER_GALLON, COLORS, EVENT_SOURCES, KM_TO_MI, LITERS_PER_GALLO
 import { driverNotes, findRoute, postJson, tripPayload } from "./app.js";
 import { nearestOnPath } from "./drive.js";
 import { drawBuses } from "./layers.js";
+import { locale } from "./i18n.js";
 
 // fit: zoom the map to the routes. Off while driving, so the map stays on the car.
 export function showTrip(trip, { fit = true } = {}) {
@@ -356,7 +357,7 @@ function weatherAlert(alert) {
 // "3:45 PM" from an ISO time.
 function clockTime(iso) {
   const moment = new Date(iso);
-  return Number.isNaN(moment.getTime()) ? "" : moment.toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit" });
+  return Number.isNaN(moment.getTime()) ? "" : moment.toLocaleTimeString(locale, { hour: "numeric", minute: "2-digit" });
 }
 
 function stats(route) {

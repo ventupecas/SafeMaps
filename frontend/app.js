@@ -25,12 +25,14 @@ import { addStop, addStopOnMap, changeOnMap, chosenStops, clearPoint, mapTouchAl
 import { clearRoutes, drawClosures, drawTraffic, showTrip } from "./results.js";
 import { keepScreenOn, recenter, setNavStatus, startDriving, stopDriving, useMyLocation } from "./drive.js";
 import { applyBaseMap, drawBuses, isNight, rememberLayers, restoreLayers, savedLayers, showTransit } from "./layers.js";
-import { forgetRecentTrips, openTripFromLink, rememberTrip, showRecentTrips } from "./trips.js";
+import { forgetRecentTrips, openTripFromLink, rememberTrip, showRecentTrips, tripLink } from "./trips.js";
 import { setUpDemo, showAbout, showPhoneLink } from "./expo.js";
+import { lang, startTranslating, switchLanguage } from "./i18n.js";
 
 boot();
 
 async function boot() {
+  startTranslating(); // in Spanish, everything on the page from here on
   loadProfiles();
   wireControls();
   // Keeps the page and the map images seen for when the network drops (sw.js). Browsers allow it
@@ -59,6 +61,7 @@ async function boot() {
   $("auto-replan").checked = state.mapKind === "osm";
   state.view = createMapView(state.mapKind, {
     mapsApiKey: config.mapsApiKey,
+    language: lang,
     mapId: config.mapId,
     trafficTiles: trafficTiles ? trafficTileUrl() : null,
     onAuthFailure: () =>
@@ -131,6 +134,8 @@ async function initMap() {
 function wireControls() {
   $("find").addEventListener("click", () => findRoute());
   $("swap").addEventListener("click", swapEnds);
+  // The other language: the page opens again with the trip on it (tripLink).
+  $("lang").addEventListener("click", () => switchLanguage(tripLink()));
   $("clear").addEventListener("click", clearAll);
   $("locate").addEventListener("click", useMyLocation);
   $("drive").addEventListener("click", () => (state.nav.active ? stopDriving() : startDriving()));
