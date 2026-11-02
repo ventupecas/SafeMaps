@@ -4,11 +4,14 @@
 // interface, so app.js never touches a map library directly:
 //
 //   await view.load()                     load the library
-//   await view.create(element, options)   { center, zoom, onClick(point), onDragStart() }
-//   view.line(points, style)              { color, weight, opacity, dashed } -> { front(on), remove() }
-//   view.marker(point, element, options)  { title, zIndex, popup, onClick } -> { move(point), remove() }
+//   await view.create(element, options)   { center, zoom, onClick(point), onContextMenu(point), onDragStart() }
+//                                         onContextMenu: a right-click, or a long press on a touch screen
+//   view.line(points, style)              { color, weight, opacity, dashed, under } -> { front(on), remove() }
+//                                         under: beneath every other line (the OpenStreetMap map draws in order)
+//   view.marker(point, element, options)  { title, zIndex, popup, onClick, onDragEnd } -> { move(point), remove() }
 //                                         popup: { heading, text }, opened by a click or tap
 //                                         onClick: called on a click or tap instead (no popup)
+//                                         onDragEnd(point): the marker can be dragged; called where it's dropped
 //   view.markerGroup()                    -> { add(point, element, options), show(on), clear() }
 //                                         markers that cluster into a count where crowded (OpenStreetMap)
 //   view.fit(points), view.panTo(point), view.setZoom(zoom)
@@ -16,6 +19,8 @@
 //   view.baseMap(kind)                    "roadmap", "satellite" or "terrain"
 //   view.transit(on), view.biking(on)     transit lines, bike lanes and trails over the map
 //   await view.search(container, placeholder, onPick(place))   place search in a box
+//   await view.reverse(point)             the nearest address, { label, countryCode }, or null
+//   view.credit(text, on)                 a credit line for data drawn on the map
 //
 // Points are { lat, lng }. Google's terms don't allow its results on another
 // map, so the OpenStreetMap page never loads Google at all. Its traffic layer
@@ -57,6 +62,7 @@ const Z_BASE = 0;
 const Z_OVERLAY = 2;
 const Z_TRAFFIC = 3;
 const PHOTON = "https://photon.komoot.io/api/";
+const PHOTON_REVERSE = "https://photon.komoot.io/reverse";
 const SEARCH_BIAS = { lat: 43.0389, lng: -87.9065 }; // prefer places around Milwaukee
 
 // trafficTiles: the OpenStreetMap map's traffic layer, a tile URL template ({z}/{x}/{y}); none means no layer.
@@ -95,7 +101,7 @@ class GoogleView {
     });
   }
 
-  async create(element, { center, zoom, onClick, onDragStart }) {
+  async create(element, { center, zoom, onClick, onContextMenu, onDragStart }) {
     this.map = new google.maps.Map(element, {
       center,
       zoom,
@@ -109,9 +115,11 @@ class GoogleView {
     this.bikingLayer = new google.maps.BicyclingLayer();
     ({ AdvancedMarkerElement: this.Marker } = await google.maps.importLibrary("marker"));
     this.map.addListener("click", (event) => onClick({ lat: event.latLng.lat(), lng: event.latLng.lng() }));
+    if (onContextMenu) this.map.addListener("contextmenu", (event) => onContextMenu({ lat: event.latLng.lat(), lng: event.latLng.lng() }));
     this.map.addListener("dragstart", onDragStart);
   }
 
+  // under: Google stacks lines by zIndex alone.
   line(points, { color, weight = 5, opacity = 1, dashed = false, zIndex = 0 }) {
     const options = dashed
       ? {
@@ -126,8 +134,22 @@ class GoogleView {
     };
   }
 
-  marker(point, element, { title = "", zIndex, popup = null, onClick = null } = {}) {
-    const marker = new this.Marker({ map: this.map, position: point, content: element, title, zIndex, gmpClickable: Boolean(popup || onClick) });
+  marker(point, element, { title = "", zIndex, popup = null, onClick = null, onDragEnd = null } = {}) {
+    const marker = new this.Marker({
+      map: this.map,
+      position: point,
+      content: element,
+      title,
+      zIndex,
+      gmpClickable: Boolean(popup || onClick),
+      gmpDraggable: Boolean(onDragEnd),
+    });
+    if (onDragEnd) {
+      marker.addListener("dragend", () => {
+        const at = marker.position; // a LatLng or a { lat, lng }, depending on the version
+        onDragEnd(typeof at.lat === "function" ? { lat: at.lat(), lng: at.lng() } : { lat: at.lat, lng: at.lng });
+      });
+    }
     if (onClick) {
       marker.addListener("click", onClick);
     } else if (popup) {
@@ -200,6 +222,27 @@ class GoogleView {
     this.bikingLayer.setMap(on ? this.map : null);
   }
 
+  // Google's own credits cover everything this map draws.
+  credit() {}
+
+  // Needs the Geocoding API enabled for the key; without it, clicked points keep their coordinates.
+  async reverse(point) {
+    try {
+      this.geocoder ||= new google.maps.Geocoder();
+      const { results } = await this.geocoder.geocode({ location: point });
+      const best = results && results[0];
+      if (!best) return null;
+      const country = best.address_components.find((part) => part.types.includes("country"));
+      return {
+        label: best.formatted_address.replace(/, USA$/, ""),
+        countryCode: country ? country.short_name : null,
+      };
+    } catch (error) {
+      console.warn("Address lookup unavailable:", error);
+      return null;
+    }
+  }
+
   async search(container, placeholder, onPick) {
     try {
       const { PlaceAutocompleteElement } = await google.maps.importLibrary("places");
@@ -262,24 +305,34 @@ class OsmView {
     }
   }
 
-  async create(element, { center, zoom, onClick, onDragStart }) {
+  async create(element, { center, zoom, onClick, onContextMenu, onDragStart }) {
     this.map = L.map(element, { zoomControl: true }).setView([center.lat, center.lng], zoom);
+    this.map.createPane("under").style.zIndex = 350; // between the map's tiles (200) and its lines (400)
     this.baseMap("roadmap");
     this.map.on("click", (event) => onClick({ lat: event.latlng.lat, lng: event.latlng.lng }));
+    // Leaflet turns a long press into a contextmenu event on touch screens too.
+    if (onContextMenu) this.map.on("contextmenu", (event) => onContextMenu({ lat: event.latlng.lat, lng: event.latlng.lng }));
     this.map.on("dragstart", onDragStart);
   }
 
-  line(points, { color, weight = 5, opacity = 1, dashed = false }) {
+  line(points, { color, weight = 5, opacity = 1, dashed = false, under = false }) {
     const line = L.polyline(
       points.map((p) => [p.lat, p.lng]),
-      { color, weight: dashed ? 4 : weight, opacity, dashArray: dashed ? "2 10" : null, interactive: false },
+      {
+        color,
+        weight: dashed ? 4 : weight,
+        opacity,
+        dashArray: dashed ? "2 10" : null,
+        interactive: false,
+        pane: under ? "under" : "overlayPane",
+      },
     ).addTo(this.map);
     // Leaflet draws in the order lines are added; bring one forward to raise it.
     return { front: (on) => on && line.bringToFront(), remove: () => line.remove() };
   }
 
   // layer: a marker group's layer to add it to, instead of the map.
-  marker(point, element, { title = "", zIndex = 0, popup = null, onClick = null, layer = null } = {}) {
+  marker(point, element, { title = "", zIndex = 0, popup = null, onClick = null, onDragEnd = null, layer = null } = {}) {
     // Anchored at the bottom middle, like Google's markers, so the same styles fit both.
     const anchor = document.createElement("div");
     anchor.className = "lf-anchor";
@@ -288,11 +341,14 @@ class OsmView {
       icon: L.divIcon({ html: anchor, className: "lf-icon", iconSize: [0, 0] }),
       title,
       zIndexOffset: zIndex * 100,
-      interactive: Boolean(title || popup || onClick),
+      interactive: Boolean(title || popup || onClick || onDragEnd),
       keyboard: Boolean(popup || onClick),
+      draggable: Boolean(onDragEnd),
+      autoPan: true, // dragged to the edge, the map follows
     });
-    // A marker's click doesn't reach the map, so it never counts as a map click too.
+    // A marker's click doesn't reach the map, so it never counts as a map click too; nor does the end of a drag.
     if (onClick) marker.on("click", onClick);
+    if (onDragEnd) marker.on("dragend", () => onDragEnd({ lat: marker.getLatLng().lat, lng: marker.getLatLng().lng }));
     else if (popup) marker.bindPopup(popupContent(popup), { offset: [0, -6] });
     marker.addTo(layer || this.map);
     return {
@@ -352,6 +408,24 @@ class OsmView {
 
   biking(on) {
     this.overlay("biking", on);
+  }
+
+  credit(text, on) {
+    if (on) this.map.attributionControl.addAttribution(text);
+    else this.map.attributionControl.removeAttribution(text);
+  }
+
+  async reverse(point) {
+    try {
+      const params = new URLSearchParams({ lat: point.lat, lon: point.lng, lang: "en", limit: 1 });
+      const response = await fetch(`${PHOTON_REVERSE}?${params}`);
+      if (!response.ok) throw new Error(`Photon answered ${response.status}`);
+      const { features } = await response.json();
+      return features.length ? photonPlace(features[0]) : null;
+    } catch (error) {
+      console.warn("Address lookup failed:", error);
+      return null;
+    }
   }
 
   overlay(name, on) {
@@ -490,16 +564,19 @@ async function photon(text) {
   const response = await fetch(`${PHOTON}?${params}`);
   if (!response.ok) throw new Error(`Photon answered ${response.status}`);
   const { features } = await response.json();
-  return features.map(({ geometry, properties: p }) => {
-    const street = [p.housenumber, p.street].filter(Boolean).join(" ");
-    const parts = [p.name, street, p.city || p.district, p.state].filter(Boolean);
-    return {
-      lat: geometry.coordinates[1],
-      lng: geometry.coordinates[0],
-      label: [...new Set(parts)].join(", "),
-      countryCode: p.countrycode ? p.countrycode.toUpperCase() : null,
-    };
-  });
+  return features.map(photonPlace);
+}
+
+// "Fiserv Forum, 1111 N Vel R. Phillips Ave, Milwaukee, Wisconsin" from one of Photon's results.
+function photonPlace({ geometry, properties: p }) {
+  const street = [p.housenumber, p.street].filter(Boolean).join(" ");
+  const parts = [p.name, street, p.city || p.district, p.state].filter(Boolean);
+  return {
+    lat: geometry.coordinates[1],
+    lng: geometry.coordinates[0],
+    label: [...new Set(parts)].join(", "),
+    countryCode: p.countrycode ? p.countrycode.toUpperCase() : null,
+  };
 }
 
 // ---- Geometry without a map library

@@ -12,6 +12,7 @@ try the API directly.
     GET  /app-config  which map the page shows (ROUTES_MAP), and whether it has a traffic layer
     POST /route       rank routes for one trip; the map draws plan.winner.encoded_polyline
     GET  /traffic-tiles/{z}/{x}/{y}.png   TomTom's traffic map, for the OpenStreetMap page
+    GET  /bus-routes  the county's bus routes, for the OpenStreetMap page's Transit layer
     GET  /            the web map (frontend/), when that folder exists
 
 The frontend never calls Google's Routes API itself. Routing, scoring and
@@ -78,6 +79,8 @@ from app.router import Router
 from app.routes_client import DailyLimitReached, RoutesApiError, RoutesClient, daily_usage
 from app.sun import low_sun
 from app.traffic_tiles import TILE_REFRESH, TileError, TrafficTiles
+from app.transit import ATTRIBUTION as BUS_ATTRIBUTION
+from app.transit import BusRoutes
 from app.usage import DailyUsage
 from app.weather import WeatherAlert, WeatherAlerts, for_the_weather
 
@@ -240,6 +243,7 @@ class Engine:
     tiles: TrafficTiles | None = None  # TomTom's traffic map, on the OpenStreetMap page only
     weather: WeatherAlerts | None = None  # the National Weather Service's alerts (ROUTES_WEATHER_ALERTS)
     feedback: FeedbackLog | None = None  # visitors' "Would you take this route?" answers
+    buses: BusRoutes | None = None  # bus routes for the OpenStreetMap map's Transit layer
     warmed_up: bool = False  # the road events across the map are matched to it (warm_up)
     _routers: dict[DrivingSide, Router] = field(default_factory=dict)
     _snapped: dict[tuple[Any, ...], list[RoadEvent]] = field(default_factory=dict)
@@ -411,9 +415,14 @@ def create_app(settings: Settings | None = None, *, http: httpx.Client | None = 
             else None,
             weather=WeatherAlerts(client) if settings.weather_alerts else None,
             feedback=FeedbackLog(settings.cache_dir / "feedback.jsonl"),
+            buses=BusRoutes(client, settings.bus_routes_url, settings.cache_dir / "bus-routes.json")
+            if settings.bus_routes_url and settings.map == "osm"
+            else None,
         )
         app.state.engine = engine
         Thread(target=engine.warm_up, name="road-events-warm-up", daemon=True).start()
+        if engine.buses:  # fetched ahead, so the Transit layer shows at once
+            Thread(target=engine.buses.routes, name="bus-routes", daemon=True).start()
         logger.info(
             "Started: %s map, road graph %s, crash data %s, cache %s, road events from %s%s",
             "OpenStreetMap" if settings.map == "osm" else "Google",
@@ -471,6 +480,7 @@ def create_app(settings: Settings | None = None, *, http: httpx.Client | None = 
                 "apify_tiles_today": engine.apify.usage.used_today() if engine.apify else 0,
             },
             "weather_alerts": engine.weather is not None,
+            "bus_routes": engine.buses is not None,
             "feedback": {key: engine.feedback.summary()[key] for key in ("yes", "no")} if engine.feedback else None,
         }
 
@@ -481,11 +491,29 @@ def create_app(settings: Settings | None = None, *, http: httpx.Client | None = 
     @app.get("/app-config")
     def app_config(request: Request) -> dict[str, Any]:
         """What the web map needs before it loads: which map to show (ROUTES_MAP), whether
-        /traffic-tiles serves a traffic layer for it, and the price of gas (ROUTES_FUEL_PRICE)."""
+        /traffic-tiles serves a traffic layer for it and /bus-routes its buses, and the price
+        of gas (ROUTES_FUEL_PRICE)."""
         return {
             "map": settings.map,
             "traffic_tiles": request.app.state.engine.tiles is not None,
+            "bus_routes": request.app.state.engine.buses is not None,
             "fuel_price": settings.fuel_price,
+        }
+
+    @app.get("/bus-routes")
+    def bus_routes(request: Request, response: Response) -> dict[str, Any]:
+        """Each bus route's line, in its own color, for the OpenStreetMap map's Transit layer (Google's map has its own)."""
+        engine: Engine = request.app.state.engine
+        if engine.buses is None:
+            raise HTTPException(status_code=404, detail="No bus routes: they're for ROUTES_MAP=osm, with ROUTES_BUS_ROUTES on.")
+        routes = engine.buses.routes()
+        response.headers["Cache-Control"] = "public, max-age=3600"
+        return {
+            "routes": [
+                {"name": route.name, "long_name": route.long_name, "color": route.color, "paths": list(route.paths)}
+                for route in routes
+            ],
+            "attribution": BUS_ATTRIBUTION if routes else None,
         }
 
     @app.get("/traffic-tiles/{z}/{x}/{y}.png", include_in_schema=False)

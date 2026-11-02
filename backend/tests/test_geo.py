@@ -9,6 +9,7 @@ from app.geo import (
     haversine_m,
     initial_bearing_deg,
     midpoint,
+    simplify,
     total_heading_change_deg,
 )
 
@@ -80,3 +81,15 @@ def test_distance_to_path_and_its_bearing_there():
     assert bearing == pytest.approx(90, abs=0.5)
     past_the_end = destination_point(east, 90, 50)
     assert distance_to_path_m(past_the_end, [west, east])[0] == pytest.approx(50, abs=0.5)
+
+
+def test_simplify_keeps_corners_and_drops_points_along_straight_stretches():
+    straight = [destination_point((43.0, -87.9), 90, d) for d in range(0, 1001, 50)]
+    corner = straight[-1]
+    north = [destination_point(corner, 0, d) for d in range(50, 501, 50)]
+    path = straight + north
+    kept = simplify(path, tolerance_m=5)
+    assert kept == [path[0], corner, path[-1]]
+    wobble = [path[0], destination_point(straight[10], 0, 20), corner]  # 20 m off the line
+    assert simplify(wobble, tolerance_m=5) == wobble and simplify(wobble, tolerance_m=30) == [path[0], corner]
+    assert simplify(path[:2], tolerance_m=5) == path[:2]

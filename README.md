@@ -93,7 +93,10 @@ Errors come back as: 422 bad input, 404 no route, 429 the daily Google limit is 
 3. Copy `frontend/config.example.js` to `frontend/config.js` and paste the key in. `config.js` is gitignored.
 
 Until then, the page shows these steps in place of the map. On the page:
-- Search for the start and destination, or click the map: the first click sets the start, the next the destination. **Use my location** sets the start from the device.
+- Search for the start and destination, or click the map: the first click sets the start, the next the destination. **Use my location** sets the start from the device. A clicked spot is named by the nearest address (Photon on the OpenStreetMap map; on Google's map, the Geocoding API if the key allows it). **Swap** turns the trip around.
+- Right-click the map (or press and hold on a phone) to add a stop where it fits the trip best. Drag any pin to move it; click a pin to remove it. **Undo** on the map takes back the last change made on it. With routes drawn, a change plans the trip again.
+- **Map layers** (top left of the map): Default, Satellite or Terrain, and Traffic, Transit and Biking over it. The choice is remembered in the browser. On satellite imagery the gray and black lines get a white edge.
+- **Open on your phone** carries the trip: the phone opens with the same start, destination and stops, and plans it.
 - The recommended route is drawn bold green, the standard route (Google's own choice, or our fastest on the OpenStreetMap map) dashed, and the other options in gray. Red dots mark risky turns on the recommended route. The **Map key** in the corner says what each line and marker means; it starts folded on a phone.
 - Closed roads are black and lane closures dashed orange. Tap a closure's marker (or a risky turn's) for the details. On the OpenStreetMap map, closure markers close together merge into a numbered circle that splits apart as you zoom in. **Show closures** hides them all.
 - Routes are named by their main road, "Via W Wisconsin Ave", from our road map: each route's longest road that no better route already goes by. Below the name: what it is ("Our safer design 2", "Standard route") and the reason for its place.
@@ -129,6 +132,7 @@ Until then, the page shows these steps in place of the map. On the page:
   - **Our router designs every route.** The "standard route" to compare with is its fastest one.
   - **Live traffic comes from TomTom and Wisconsin 511 instead** (with `TOMTOM_API_KEY` and `WI511_API_KEY`): see "TomTom: traffic on every street" and "511 travel times" below. Google's Live traffic toggle is hidden.
   - The **Traffic** map layer shows TomTom's traffic map: every street colored green to red by speed, credited "Traffic © TomTom". Without a TomTom key it draws the 511 slowdowns instead.
+  - The other layers come from free map services, each credited on the map: satellite imagery from Esri, terrain from OpenTopoMap, bike lanes from CyclOSM and rail lines from OpenRailwayMap. **Transit** also draws Milwaukee County Transit System's bus routes, each in its color, from MCTS's published schedule (GTFS, free, no key): the server fetches it at most once a week and keeps the lines in the cache folder (`GET /bus-routes`). `ROUTES_BUS_ROUTES=off` leaves them out; any other value is another GTFS feed's address.
   - **Still on:** work zones, 511, crash data, school zones and rail crossings.
   - **Keys:** neither Google key is needed, any port works, and the page credits "© OpenStreetMap contributors".
 

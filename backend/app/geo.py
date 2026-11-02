@@ -184,3 +184,34 @@ def total_heading_change_deg(points: Sequence[Point], min_segment_m: float = 30.
         diff = abs(h2 - h1) % 360
         total += min(diff, 360 - diff)
     return total
+
+
+def simplify(points: Sequence[Point], tolerance_m: float) -> list[Point]:
+    """The path with fewer points, none of the dropped ones more than tolerance_m off it (Douglas-Peucker).
+
+    Uses a flat projection around the path's first point: fine across a city.
+    """
+    if len(points) < 3:
+        return list(points)
+    m_per_deg = math.radians(1) * EARTH_RADIUS_M
+    m_per_deg_lng = m_per_deg * math.cos(math.radians(points[0][0]))
+    xy = [(lng * m_per_deg_lng, lat * m_per_deg) for lat, lng in points]
+    keep = [False] * len(points)
+    keep[0] = keep[-1] = True
+    spans = [(0, len(points) - 1)]  # a stack rather than recursion: bus routes run to thousands of points
+    while spans:
+        first, last = spans.pop()
+        (ax, ay), (bx, by) = xy[first], xy[last]
+        dx, dy = bx - ax, by - ay
+        length_sq = dx * dx + dy * dy
+        worst, worst_m = -1, tolerance_m
+        for i in range(first + 1, last):
+            px, py = xy[i]
+            t = 0.0 if length_sq == 0 else max(0.0, min(1.0, ((px - ax) * dx + (py - ay) * dy) / length_sq))
+            distance = math.hypot(px - ax - t * dx, py - ay - t * dy)
+            if distance > worst_m:
+                worst, worst_m = i, distance
+        if worst >= 0:
+            keep[worst] = True
+            spans += [(first, worst), (worst, last)]
+    return [point for point, kept in zip(points, keep, strict=True) if kept]

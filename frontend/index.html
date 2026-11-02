@@ -50,7 +50,10 @@
             <div class="stop stop--b">
               <span class="pin pin--b" aria-hidden="true">B</span>
               <div class="stop__body">
-                <div class="stop__head"><span class="stop__label" id="destination-label">Destination</span></div>
+                <div class="stop__head">
+                  <span class="stop__label" id="destination-label">Destination</span>
+                  <button id="swap" class="link-button" type="button" title="Swap the start and destination">Swap</button>
+                </div>
                 <div id="destination-search" class="search"></div>
                 <p id="destination-picked" class="picked"></p>
               </div>
@@ -58,8 +61,9 @@
             <button id="add-stop" class="link-button add-stop" type="button">Add a stop</button>
           </div>
           <p class="hint">
-            Search for a place, or click the map: the first click sets the start, the next the destination. Click a pin to
-            remove it; <strong>Undo</strong> on the map takes a click back.
+            Search for a place, or click the map: the first click sets the start, the next the destination. Right-click (or
+            press and hold) to add a stop. Drag a pin to move it, click it to remove it; <strong>Undo</strong> on the map
+            takes a change back.
           </p>
 
           <div class="prefs">
@@ -159,6 +163,7 @@
             <li class="osm-only"><span class="key key--cluster">3</span>Several closures: zoom in</li>
             <li><span class="key key--turn"></span>Risky turn across traffic</li>
             <li id="legend-traffic" hidden><span class="key key--traffic"></span>Traffic: flowing → jammed</li>
+            <li id="legend-buses" class="osm-only" hidden><span class="key key--buses"></span>Bus routes, each its own color</li>
           </ul>
         </details>
         <div id="setup" class="setup" hidden></div>

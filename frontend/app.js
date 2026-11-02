@@ -43,6 +43,7 @@ const COLORS = {
 };
 const CO2_KG_PER_GALLON = 8.887; // burning a gallon of gasoline (US EPA)
 const MAX_STOPS = 3;
+const LAYERS_KEY = "routes-layers"; // the map layers chosen, remembered in this browser
 // Demo mode: after DEMO.idleMs with no one touching the page, it plans these trips in turn.
 const DEMO = {
   idleMs: 45000,
@@ -80,7 +81,12 @@ const state = {
   origin: null, // { lat, lng, label, countryCode }
   destination: null,
   pins: { origin: null, destination: null },
-  undo: [], // changes made on the map (clicks, pins clicked away), newest last: { kind, before }
+  undo: [], // changes made on the map, newest last: { kind, what, undo() }
+  baseMap: "roadmap", // the map's look: "roadmap", "satellite" or "terrain"
+  buses: { available: false, data: null, lines: [] }, // the Transit layer's bus routes (OpenStreetMap map)
+  findTicket: 0, // the latest route request: answers to older ones are dropped
+  refreshTimer: null, // planning the trip again after a change on the map
+  noticeTimer: null, // hides a mapNotice
   stops: [], // places to stop at on the way: { id, point, pin }, in order
   nextStopId: 1,
   fuelPrice: 3.25, // US dollars a gallon (the server's ROUTES_FUEL_PRICE)
@@ -126,6 +132,7 @@ async function boot() {
     const appConfig = await (await fetch("/app-config")).json();
     state.mapKind = appConfig.map;
     trafficTiles = Boolean(appConfig.traffic_tiles);
+    state.buses.available = Boolean(appConfig.bus_routes);
     if (Number.isFinite(appConfig.fuel_price)) state.fuelPrice = appConfig.fuel_price;
   } catch {
     state.mapKind = "google"; // an older server: it only knew Google's map
@@ -152,6 +159,8 @@ async function boot() {
     return;
   }
   await initMap();
+  restoreLayers();
+  openTripFromLink();
   setUpDemo();
 }
 
@@ -180,8 +189,9 @@ async function initMap() {
       if (!mapTouchAllowed()) return;
       // First click sets the start; after that, clicks move the destination.
       const kind = state.origin ? "destination" : "origin";
-      changeOnMap(kind, { ...point, label: null, countryCode: null });
+      changeOnMap(kind, unnamed(point));
     },
+    onContextMenu: addStopOnMap,
     onDragStart: () => {
       if (!state.nav.active) return;
       state.nav.following = false; // the driver is looking around; "Re-center" resumes
@@ -206,11 +216,34 @@ async function initMap() {
 async function setPoint(kind, point, { fromSearch = false, onMap = false } = {}) {
   if (!onMap) forgetUndo(kind);
   state[kind] = point;
-  $(`${kind}-picked`).textContent = fromSearch ? "" : point.label || `${point.lat.toFixed(5)}, ${point.lng.toFixed(5)}`;
+  $(`${kind}-picked`).textContent = fromSearch ? "" : placeName(point);
   const box = $(`${kind}-search`).querySelector("input");
   if (box && !fromSearch) box.value = "";
   placePin(kind, point);
   updateFindButton();
+  nameIt(point, () => {
+    if (state[kind] === point) $(`${kind}-picked`).textContent = point.label;
+  });
+  tripChanged();
+}
+
+// A spot on the map, not yet named.
+function unnamed({ lat, lng }) {
+  return { lat, lng, label: null, countryCode: null };
+}
+
+function placeName(point) {
+  return point.label || `${point.lat.toFixed(5)}, ${point.lng.toFixed(5)}`;
+}
+
+// A spot picked on the map gets the nearest address, when the lookup answers. show: put it on the page.
+async function nameIt(point, show) {
+  if (point.label || !state.view) return;
+  const place = await state.view.reverse(point);
+  if (!place || !place.label || point.label) return;
+  point.label = place.label;
+  point.countryCode ||= place.countryCode;
+  show();
 }
 
 // The start or destination taken off the map. Routes drawn to it go too.
@@ -226,14 +259,28 @@ function clearPoint(kind, { onMap = false } = {}) {
   updateFindButton();
 }
 
-// Clicking a pin removes it.
+// Dragging a pin moves it; clicking it removes it. A drag that isn't allowed (while driving) springs back.
 function placePin(kind, point) {
   if (state.pins[kind]) state.pins[kind].remove();
   const pin = element("div", { className: `map-pin map-pin--${kind}` }, element("span", {}, kind === "origin" ? "A" : "B"));
   state.pins[kind] = state.view.marker(point, pin, {
-    title: `${kind === "origin" ? "Start" : "Destination"}: click to remove`,
+    title: `${kind === "origin" ? "Start" : "Destination"}: drag to move, click to remove`,
     onClick: () => mapTouchAllowed() && changeOnMap(kind, null),
+    onDragEnd: (to) => (mapTouchAllowed() ? changeOnMap(kind, unnamed(to)) : placePin(kind, state[kind])),
   });
+}
+
+// Start and destination trade places, and the stops turn around: the same trip, the other way.
+function swapEnds() {
+  if (state.nav.active || !(state.origin || state.destination)) return;
+  const { origin, destination } = state;
+  for (const [kind, point] of [["origin", destination], ["destination", origin]]) {
+    if (point) setPoint(kind, point);
+    else clearPoint(kind);
+  }
+  state.stops.reverse();
+  for (const stop of state.stops) $("stops").append(stop.row);
+  renumberStops();
 }
 
 // No accidental trip changes while driving, or from the touch that stopped the demo.
@@ -241,26 +288,32 @@ function mapTouchAllowed() {
   return !state.nav.active && Date.now() - (state.demo.stoppedAt || 0) >= 800;
 }
 
-// ---- Undo: map clicks and removed pins, taken back newest first
+// ---- Undo: changes made on the map (clicks, drags, pins added or removed), taken back newest first
+
+// kind: what changed ("origin", "destination" or "stops"); what: the button's tooltip; undo: puts it back.
+function remember(kind, what, undo) {
+  state.undo.push({ kind, what, undo });
+  updateUndoButton();
+}
 
 // point: where the start or destination goes, or null to remove it.
 function changeOnMap(kind, point) {
-  state.undo.push({ kind, before: state[kind] });
+  const before = state[kind];
+  const name = kind === "origin" ? "start" : "destination";
+  remember(kind, before ? `Put the ${name} back` : `Take the ${name} off the map`, () =>
+    before ? setPoint(kind, before, { onMap: true }) : clearPoint(kind, { onMap: true }),
+  );
   if (point) setPoint(kind, point, { onMap: true });
   else clearPoint(kind, { onMap: true });
-  updateUndoButton();
 }
 
 function undoMapChange() {
   const change = state.undo.pop();
-  if (change && !state.nav.active) {
-    if (change.before) setPoint(change.kind, change.before, { onMap: true });
-    else clearPoint(change.kind, { onMap: true });
-  }
+  if (change && !state.nav.active) change.undo();
   updateUndoButton();
 }
 
-// A point set some other way (search, location, Clear) can't be undone back to an older click.
+// A place set some other way (search, location, Clear) can't be undone back to an older click.
 function forgetUndo(kind) {
   state.undo = state.undo.filter((change) => change.kind !== kind);
   updateUndoButton();
@@ -269,13 +322,20 @@ function forgetUndo(kind) {
 function updateUndoButton() {
   const last = state.undo[state.undo.length - 1];
   $("undo").hidden = !last;
-  if (!last) return;
-  const name = last.kind === "origin" ? "start" : "destination";
-  $("undo").title = last.before ? `Put the ${name} back where it was` : `Take the ${name} off the map`;
+  $("undo").title = last ? last.what : "";
+}
+
+// A short note over the map, gone after a few seconds (the driving banner, while not driving).
+function mapNotice(text) {
+  if (state.nav.active) return;
+  setNavStatus(text);
+  clearTimeout(state.noticeTimer);
+  state.noticeTimer = setTimeout(() => state.nav.active || setNavStatus(null), 3500);
 }
 
 function wireControls() {
-  $("find").addEventListener("click", findRoute);
+  $("find").addEventListener("click", () => findRoute());
+  $("swap").addEventListener("click", swapEnds);
   $("clear").addEventListener("click", clearAll);
   $("locate").addEventListener("click", useMyLocation);
   $("drive").addEventListener("click", () => (state.nav.active ? stopDriving() : startDriving()));
@@ -287,10 +347,16 @@ function wireControls() {
     $("legend-traffic").hidden = !event.target.checked;
   });
   for (const radio of document.querySelectorAll('input[name="base-map"]')) {
-    radio.addEventListener("change", () => state.view && state.view.baseMap(radio.value));
+    radio.addEventListener("change", () => {
+      state.baseMap = radio.value;
+      if (!state.view) return;
+      state.view.baseMap(radio.value);
+      redrawLines();
+    });
   }
-  $("transit-layer").addEventListener("change", (event) => state.view && state.view.transit(event.target.checked));
+  $("transit-layer").addEventListener("change", (event) => showTransit(event.target.checked));
   $("biking-layer").addEventListener("change", (event) => state.view && state.view.biking(event.target.checked));
+  for (const input of document.querySelectorAll("#layers input")) input.addEventListener("change", rememberLayers);
   $("closures-layer").addEventListener("change", drawClosures);
   $("about-open").addEventListener("click", showAbout);
   $("phone-open").addEventListener("click", showPhoneLink);
@@ -329,8 +395,11 @@ function clearAll() {
   clearTrip();
 }
 
-// The drawn routes and their results, keeping the trip's places.
+// The drawn routes and their results, keeping the trip's places. A route request on its way is dropped.
 function clearTrip() {
+  state.findTicket += 1;
+  clearTimeout(state.refreshTimer);
+  setFinding(false);
   clearRoutes();
   state.trafficEvents = [];
   drawTraffic();
@@ -344,22 +413,35 @@ function clearTrip() {
 
 // ---- Asking the backend
 
-async function findRoute() {
+// fit: zoom the map to the routes. A trip planned again after a change on the map keeps the view.
+async function findRoute({ fit = true } = {}) {
   if (!state.origin || !state.destination) return;
-  const button = $("find");
-  button.disabled = true;
-  button.classList.add("is-busy");
-  button.textContent = "Finding…";
+  const ticket = ++state.findTicket;
+  setFinding(true);
   showStatus("Comparing routes for safety, fuel and time…");
   try {
-    showTrip(await requestTrip(state.origin, state.destination));
+    const trip = await requestTrip(state.origin, state.destination);
+    if (ticket === state.findTicket) showTrip(trip, { fit });
   } catch (error) {
-    showStatus(error.message, true);
+    if (ticket === state.findTicket) showStatus(error.message, true);
   } finally {
-    button.classList.remove("is-busy");
-    button.textContent = "Find route";
-    updateFindButton();
+    if (ticket === state.findTicket) setFinding(false);
   }
+}
+
+function setFinding(on) {
+  const button = $("find");
+  button.classList.toggle("is-busy", on);
+  button.textContent = on ? "Finding…" : "Find route";
+  if (on) button.disabled = true;
+  else updateFindButton();
+}
+
+// After the trip changes with its routes on the map, plan it again: once, for a burst of changes.
+function tripChanged() {
+  clearTimeout(state.refreshTimer);
+  if (!state.plan || state.nav.active || state.demo.running) return;
+  state.refreshTimer = setTimeout(() => findRoute({ fit: false }), 400);
 }
 
 // The trip as the server takes it. heading: the direction a moving car is driving, so new
@@ -495,8 +577,10 @@ function showTrip(trip, { fit = true } = {}) {
   $("drive").hidden = false;
 }
 
+// On satellite imagery, the gray and black lines get a white edge to stand out.
 function drawRoutes(plan, fit) {
   const view = state.view;
+  const edged = state.baseMap === "satellite";
   const everywhere = [];
   state.paths = {};
   // Losers first, so the winner is drawn on top.
@@ -511,8 +595,10 @@ function drawRoutes(plan, fit) {
       lines.push(view.line(path, { color: "#ffffff", weight: 10, zIndex: 20 }));
       lines.push(view.line(path, { color: COLORS.winner, weight: 6, zIndex: 21 }));
     } else if (isStandard(route)) {
+      if (edged) lines.push(view.line(path, { color: "#ffffff", weight: 7, opacity: 0.85, zIndex: 9 }));
       lines.push(view.line(path, { color: COLORS.standard, dashed: true, zIndex: 10 }));
     } else {
+      if (edged) lines.push(view.line(path, { color: "#ffffff", weight: 8, opacity: 0.7, zIndex: 4 }));
       lines.push(view.line(path, { color: COLORS.alternative, weight: 5, opacity: 0.8, zIndex: 5 }));
     }
     state.routeLines.push({ id: route.id, lines });
@@ -561,6 +647,9 @@ function drawClosures() {
   if (!$("closures-layer").checked) return;
   for (const event of state.closures) {
     const path = decodePolyline(event.path);
+    if (path.length > 1 && event.kind === "closed" && state.baseMap === "satellite") {
+      state.closureLines.push(state.view.line(path, { color: "#ffffff", weight: 10, opacity: 0.85, zIndex: 24 }));
+    }
     if (path.length > 1) {
       state.closureLines.push(
         event.kind === "closed"
@@ -575,6 +664,18 @@ function drawClosures() {
     const title = event.description ? `${heading}: ${event.description}` : heading;
     state.closureMarkers.add(path[0], dot, { title, zIndex: 26, popup: { heading, text: event.description } });
   }
+}
+
+// The routes and closures drawn again for a new map look (see drawRoutes), keeping the route being followed.
+function redrawLines() {
+  if (state.plan) {
+    const active = state.activeRouteId;
+    for (const entry of state.routeLines) entry.lines.forEach((line) => line.remove());
+    state.routeLines = [];
+    drawRoutes(state.plan, false);
+    selectRoute(active);
+  }
+  drawClosures();
 }
 
 // What following a route needs: its points, the distance to each along it, and its expected time.
@@ -1089,9 +1190,10 @@ function nearestOnPath(point, path) {
 
 // ---- Stops on the way (up to MAX_STOPS, in order)
 
-async function addStop() {
-  if (state.stops.length >= MAX_STOPS || !state.view) return;
-  const id = state.nextStopId++;
+// point: a place already picked on the map; index: its place in the order (last by default);
+// id: the stop's own, when Undo puts back a removed stop. Returns the stop's id, or null when full.
+async function addStop({ point = null, index = state.stops.length, id = state.nextStopId++ } = {}) {
+  if (state.stops.length >= MAX_STOPS || !state.view) return null;
   const searchBox = element("div", { id: `stop-${id}-search`, className: "search" });
   const remove = element("button", { className: "link-button link-button--remove", type: "button" }, "Remove");
   const pin = element("span", { className: "pin pin--via" });
@@ -1109,33 +1211,107 @@ async function addStop() {
     ),
   );
   remove.addEventListener("click", () => removeStop(id));
-  $("stops").append(row);
-  state.stops.push({ id, point: null, pin: null, row });
+  const stop = { id, point, pin: null, row };
+  const next = state.stops[index];
+  $("stops").insertBefore(row, next ? next.row : null);
+  state.stops.splice(index, 0, stop);
   renumberStops();
   $("add-stop").hidden = state.stops.length >= MAX_STOPS;
+  if (point) {
+    showStopName(stop);
+    tripChanged();
+  }
   await state.view.search(searchBox, "Add a stop", (place) => setStop(id, place));
   const input = searchBox.querySelector("input");
-  if (input) input.focus();
+  if (input && !point) input.focus();
+  return id;
 }
 
+// Picked in the stop's search box, which shows its name.
 function setStop(id, place) {
   const stop = state.stops.find((candidate) => candidate.id === id);
   if (!stop) return;
+  forgetUndo("stops");
   stop.point = place;
+  stop.row.querySelector(".picked").textContent = "";
   renumberStops();
+  tripChanged();
 }
 
-function removeStop(id) {
+function moveStop(id, point) {
+  const stop = state.stops.find((candidate) => candidate.id === id);
+  if (!stop) return;
+  stop.point = point;
+  const box = stop.row.querySelector("input");
+  if (box) box.value = "";
+  renumberStops();
+  showStopName(stop);
+  tripChanged();
+}
+
+// onMap: Undo can bring it back (see removeStopOnMap); any other removal forgets those.
+function removeStop(id, { onMap = false } = {}) {
   const index = state.stops.findIndex((stop) => stop.id === id);
   if (index < 0) return;
+  if (!onMap) forgetUndo("stops");
   const [stop] = state.stops.splice(index, 1);
   stop.row.remove();
   if (stop.pin) stop.pin.remove();
   renumberStops();
   $("add-stop").hidden = false;
+  tripChanged();
 }
 
-// Stops are numbered in order, in the panel and on their map pins.
+// A stop placed on the map is spelled out under its box, then named by the nearest address.
+function showStopName(stop) {
+  const point = stop.point;
+  const picked = stop.row.querySelector(".picked");
+  picked.textContent = point ? placeName(point) : "";
+  if (point) nameIt(point, () => stop.point === point && (picked.textContent = point.label));
+}
+
+// A right-click or long press adds a stop where it fits the trip best. Before the trip has
+// both ends, it sets them like a click.
+function addStopOnMap(point) {
+  if (!mapTouchAllowed()) return;
+  if (!state.origin || !state.destination) return changeOnMap(state.origin ? "destination" : "origin", unnamed(point));
+  if (state.stops.length >= MAX_STOPS) return mapNotice(`Up to ${MAX_STOPS} stops: remove one to add another.`);
+  const id = state.nextStopId++;
+  remember("stops", "Take the stop off the map", () => removeStop(id, { onMap: true }));
+  addStop({ point: unnamed(point), index: bestStopIndex(point), id });
+}
+
+function moveStopOnMap(id, point) {
+  const stop = state.stops.find((candidate) => candidate.id === id);
+  if (!stop) return;
+  const before = stop.point;
+  remember("stops", "Put the stop back", () => moveStop(id, before));
+  moveStop(id, point);
+}
+
+function removeStopOnMap(id) {
+  const index = state.stops.findIndex((stop) => stop.id === id);
+  if (index < 0) return;
+  const { point } = state.stops[index];
+  remember("stops", "Put the stop back", () => addStop({ point, index, id }));
+  removeStop(id, { onMap: true });
+}
+
+// Where a new stop fits: the place in the order that adds the least distance, as the crow flies.
+function bestStopIndex(point) {
+  const length = (points) => points.reduce((sum, p, i) => (i ? sum + distanceM(points[i - 1], p) : 0), 0);
+  let best = state.stops.length;
+  let shortest = Infinity;
+  for (let i = 0; i <= state.stops.length; i++) {
+    const stops = state.stops.map((stop) => stop.point);
+    stops.splice(i, 0, point);
+    const total = length([state.origin, ...stops, state.destination].filter(Boolean));
+    if (total < shortest - 1) [best, shortest] = [i, total];
+  }
+  return best;
+}
+
+// Stops are numbered in order, in the panel and on their map pins, which drag and click like the others.
 function renumberStops() {
   state.stops.forEach((stop, i) => {
     const number = String(i + 1);
@@ -1144,8 +1320,9 @@ function renumberStops() {
     if (stop.pin) stop.pin.remove();
     stop.pin = stop.point
       ? state.view.marker(stop.point, element("div", { className: "map-pin map-pin--stop" }, element("span", {}, number)), {
-          title: `Stop ${number}: click to remove`,
-          onClick: () => mapTouchAllowed() && removeStop(stop.id),
+          title: `Stop ${number}: drag to move, click to remove`,
+          onClick: () => mapTouchAllowed() && removeStopOnMap(stop.id),
+          onDragEnd: (to) => (mapTouchAllowed() ? moveStopOnMap(stop.id, unnamed(to)) : renumberStops()),
         })
       : null;
   });
@@ -1153,6 +1330,71 @@ function renumberStops() {
 
 function chosenStops() {
   return state.stops.filter((stop) => stop.point).map((stop) => stop.point);
+}
+
+// ---- Map layers: remembered in this browser; the OpenStreetMap map's buses
+
+function rememberLayers() {
+  const base = document.querySelector('input[name="base-map"]:checked').value;
+  const on = (name) => $(`${name}-layer`).checked;
+  try {
+    localStorage.setItem(LAYERS_KEY, JSON.stringify({ base, traffic: on("traffic"), transit: on("transit"), biking: on("biking") }));
+  } catch {
+    // Storage blocked: the layers start as they are next time.
+  }
+}
+
+// Set as last time, through the controls' own change handlers.
+function restoreLayers() {
+  let saved = null;
+  try {
+    saved = JSON.parse(localStorage.getItem(LAYERS_KEY));
+  } catch {
+    return;
+  }
+  if (!saved || typeof saved !== "object") return;
+  const radio = [...document.querySelectorAll('input[name="base-map"]')].find((input) => input.value === saved.base);
+  const changes = radio && !radio.checked ? [radio] : [];
+  for (const name of ["traffic", "transit", "biking"]) {
+    const box = $(`${name}-layer`);
+    if (typeof saved[name] === "boolean" && box.checked !== saved[name]) changes.push(box);
+  }
+  for (const input of changes) {
+    input.checked = input.type === "radio" || !input.checked;
+    input.dispatchEvent(new Event("change"));
+  }
+}
+
+// Transit lines from the map itself, and on the OpenStreetMap map the county's bus routes from
+// our server, each in its own color, beneath the trip's routes.
+async function showTransit(on) {
+  if (!state.view) return;
+  state.view.transit(on);
+  const buses = state.buses;
+  if (!buses.available) return;
+  $("legend-buses").hidden = !on;
+  if (!on) {
+    buses.lines.splice(0).forEach((line) => line.remove());
+    if (buses.data) state.view.credit(buses.data.attribution, false);
+    return;
+  }
+  try {
+    if (!buses.data) {
+      const response = await fetch("/bus-routes");
+      if (!response.ok) throw new Error(`The server answered ${response.status}`);
+      buses.data = await response.json();
+    }
+  } catch (error) {
+    console.warn("Bus routes unavailable:", error);
+    return;
+  }
+  if (!$("transit-layer").checked || buses.lines.length) return; // turned off, or drawn, while waiting
+  for (const route of buses.data.routes) {
+    for (const path of route.paths) {
+      buses.lines.push(state.view.line(decodePolyline(path), { color: route.color, weight: 3, opacity: 0.7, zIndex: 1, under: true }));
+    }
+  }
+  if (buses.data.attribution) state.view.credit(buses.data.attribution, true);
 }
 
 // ---- Visitors' answers, and the best time to leave
@@ -1357,8 +1599,8 @@ async function showPhoneLink() {
     );
     return;
   }
-  const code = accessCode();
-  const link = `${window.location.origin}${window.location.pathname}${code ? `?code=${encodeURIComponent(code)}` : ""}`;
+  const link = tripLink();
+  const withTrip = Boolean(state.origin && state.destination);
   body.replaceChildren(element("p", { className: "status" }, "Making the code…"));
   try {
     if (!window.qrcode) await loadScript(QR_LIBRARY);
@@ -1371,10 +1613,46 @@ async function showPhoneLink() {
       window.location.protocol === "https:"
         ? element("p", { className: "hint" }, "Point the phone's camera at the code, then tap the link it shows.")
         : element("p", { className: "hint" }, "Driving mode on a phone needs the secure https link from the tunnel."),
+      ...(withTrip ? [element("p", { className: "hint" }, "The trip on the map comes with it, ready to drive.")] : []),
     );
   } catch {
     body.replaceChildren(element("p", {}, "The code couldn't be made. Visitors can type this address:"), element("p", { className: "qr__link" }, link));
   }
+}
+
+// This page's address with the access code and the trip on the map: start, destination and stops.
+// Names come along, except "My location", which is somewhere else on the phone.
+function tripLink() {
+  const params = new URLSearchParams();
+  const code = accessCode();
+  if (code) params.set("code", code);
+  const where = (point) => `${point.lat.toFixed(5)},${point.lng.toFixed(5)}`;
+  for (const [key, point] of [["from", state.origin], ["to", state.destination]]) {
+    if (!point) continue;
+    params.set(key, where(point));
+    if (point.label && !/^(My|Current) location$/.test(point.label)) params.set(`${key}Name`, point.label.slice(0, 80));
+  }
+  for (const stop of chosenStops()) params.append("stop", where(stop));
+  const query = params.toString();
+  return `${window.location.origin}${window.location.pathname}${query ? `?${query}` : ""}`;
+}
+
+// A trip in the page's address (tripLink, from "Open on your phone"): placed on the map and planned.
+function openTripFromLink() {
+  const params = new URLSearchParams(window.location.search);
+  const place = (text, label = null) => {
+    const [lat, lng] = (text || "").split(",").map(Number);
+    return text && Math.abs(lat) <= 90 && Math.abs(lng) <= 180 ? { lat, lng, label, countryCode: null } : null;
+  };
+  const from = place(params.get("from"), params.get("fromName"));
+  const to = place(params.get("to"), params.get("toName"));
+  if (from) setPoint("origin", from);
+  if (to) setPoint("destination", to);
+  for (const text of params.getAll("stop").slice(0, MAX_STOPS)) {
+    const stop = place(text);
+    if (stop) addStop({ point: stop });
+  }
+  if (from && to) findRoute();
 }
 
 // ---- Small helpers

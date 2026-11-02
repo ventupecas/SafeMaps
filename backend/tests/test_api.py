@@ -55,6 +55,7 @@ def make_settings(tmp_path, **overrides) -> Settings:
         traffic_fresh_for=timedelta(minutes=5),
         daily_limit=100,
         weather_alerts=False,  # tests that want them serve their own
+        bus_routes_url=None,
     )
     return Settings(**{**values, **overrides})
 
@@ -359,7 +360,7 @@ def test_routes_come_with_turn_by_turn_directions(api):
 def test_the_openstreetmap_map_never_asks_google(tmp_path, google):
     app = create_app(make_settings(tmp_path, map="osm"), http=httpx.Client(transport=httpx.MockTransport(google)))
     with TestClient(app) as client:
-        assert client.get("/app-config").json() == {"map": "osm", "traffic_tiles": False, "fuel_price": 3.25}  # no TomTom key
+        assert client.get("/app-config").json() == {"map": "osm", "traffic_tiles": False, "bus_routes": False, "fuel_price": 3.25}  # no TomTom key
         trip = client.post("/route", json={"origin": ORIGIN, "destination": DESTINATION, "live_traffic": True}).json()
     assert google.requests == []  # no Google: not even with live traffic asked for
     standard = [route for route in trip["plan"]["candidates"] if route["is_standard"]]
@@ -371,7 +372,7 @@ def test_the_openstreetmap_map_never_asks_google(tmp_path, google):
 def test_googles_default_is_the_standard_route_on_the_google_map(api):
     trip = api.post("/route", json={"origin": ORIGIN, "destination": DESTINATION}).json()
     assert [r["id"] for r in trip["plan"]["candidates"] if r["is_standard"]] == ["google-1"]
-    assert api.get("/app-config").json() == {"map": "google", "traffic_tiles": False, "fuel_price": 3.25}
+    assert api.get("/app-config").json() == {"map": "google", "traffic_tiles": False, "bus_routes": False, "fuel_price": 3.25}
 
 
 class FakeTomTom:
@@ -400,7 +401,7 @@ def test_tomtom_traffic_on_the_openstreetmap_map(tmp_path, google):
     tomtom = FakeTomTom(main_st_closed_both_ways(), google)
     settings = make_settings(tmp_path, map="osm", tomtom_api_key="tt-key")
     with TestClient(create_app(settings, http=httpx.Client(transport=httpx.MockTransport(tomtom)))) as client:
-        assert client.get("/app-config").json() == {"map": "osm", "traffic_tiles": True, "fuel_price": 3.25}
+        assert client.get("/app-config").json() == {"map": "osm", "traffic_tiles": True, "bus_routes": False, "fuel_price": 3.25}
         trip = client.post("/route", json={"origin": ORIGIN, "destination": DESTINATION}).json()
         first = client.get("/traffic-tiles/12/1047/1504.png")
         again = client.get("/traffic-tiles/12/1047/1504.png")
@@ -447,3 +448,21 @@ def test_an_access_code_guards_the_traffic_map_too(tmp_path, google):
         assert client.get("/traffic-tiles/12/1047/1504.png").status_code == 401
         assert client.get("/traffic-tiles/12/1047/1504.png?code=expo-2026").status_code == 200
     assert len(tomtom.requests) == 1
+
+
+def test_bus_routes_for_the_openstreetmap_maps_transit_layer(tmp_path, google):
+    from tests.test_transit import feed
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, content=feed()) if request.url.host == "transit.example" else google(request)
+
+    settings = make_settings(tmp_path, map="osm", bus_routes_url="https://transit.example/gtfs.zip")
+    with TestClient(create_app(settings, http=httpx.Client(transport=httpx.MockTransport(handler)))) as client:
+        assert client.get("/app-config").json()["bus_routes"] is True
+        body = client.get("/bus-routes").json()
+    assert [route["name"] for route in body["routes"]] == ["4", "30"]
+    assert body["attribution"] == "Bus routes: Milwaukee County Transit System"
+    # Google's map has its own transit layer.
+    google_map = create_app(make_settings(tmp_path, bus_routes_url="https://transit.example/gtfs.zip"), http=httpx.Client(transport=httpx.MockTransport(handler)))
+    with TestClient(google_map) as client:
+        assert client.get("/bus-routes").status_code == 404

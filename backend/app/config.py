@@ -15,6 +15,7 @@ BACKEND_DIR = Path(__file__).resolve().parent.parent
 ROAD_EVENT_SOURCES = ("wzdx", "wi511", "tomtom", "google", "apify")
 DEFAULT_ROAD_EVENT_SOURCES = "wzdx+wi511+tomtom,google"
 WZDX_FEED_URL = "https://511wi.gov/api/wzdx"
+BUS_ROUTES_URL = "https://kamino.mcts.org/gtfs/google_transit.zip"  # Milwaukee County Transit System's GTFS
 
 
 @dataclass(frozen=True)
@@ -55,6 +56,8 @@ class Settings:
     fuel_price: float = 3.25
     # Ask the National Weather Service for alerts where each trip starts (free, no key).
     weather_alerts: bool = True
+    # The bus routes the OpenStreetMap map's Transit layer draws: a GTFS feed's address. None: rail only.
+    bus_routes_url: str | None = BUS_ROUTES_URL
 
     @classmethod
     def from_env(cls) -> Settings:
@@ -126,6 +129,7 @@ class Settings:
             school_hours=school_hours,
             fuel_price=fuel_price,
             weather_alerts=(os.getenv("ROUTES_WEATHER_ALERTS") or "on").strip().lower() not in {"0", "false", "no", "off"},
+            bus_routes_url=_bus_routes_url(os.getenv("ROUTES_BUS_ROUTES")),
         )
 
 
@@ -141,6 +145,14 @@ def _time_windows(text: str) -> tuple[tuple[time, time], ...]:
             raise ValueError(f"ROUTES_SCHOOL_HOURS expects windows like 07:00-09:00; got {part.strip()!r}") from None
         windows.append((start, end))
     return tuple(windows)
+
+
+def _bus_routes_url(value: str | None) -> str | None:
+    """ROUTES_BUS_ROUTES: unset means MCTS's feed, off means none, anything else is another GTFS feed's address."""
+    value = (value or "").strip()
+    if not value:
+        return BUS_ROUTES_URL
+    return None if value.lower() in {"0", "false", "no", "off"} else value
 
 
 def _backend_path(value: str) -> Path:
