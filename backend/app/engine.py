@@ -42,7 +42,7 @@ from app.road_events import RoadEvent, delay_on_route, jams_on_routes
 from app.roadgraph import RoadGraph
 from app.router import OutsideGraphError, RoutedPath, Router
 from app.routes_client import RoutesApiError
-from app.scoring import rank_candidates, safety_score
+from app.scoring import rank_candidates, safety_risks, safety_score
 from app.sun import Sun, sun_position
 
 # A route is left out of the plan when more than this share of it runs along a
@@ -396,6 +396,7 @@ def _joined(legs: Sequence[ScoredRoute], stops: Sequence[LatLng], route_id: str,
         eligible=all(leg.eligible for leg in legs),
         reason=reason,
         safety_score=safety_score(features),
+        safety_risks=safety_risks(features),
     )
 
 

@@ -9,6 +9,9 @@
       rel="icon"
       href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='9' fill='%230b7a53'/%3E%3Cpath d='M10.5 22.5c0-4.2 3.2-5.3 5.5-6s5.5-1.8 5.5-6' fill='none' stroke='white' stroke-width='2.4' stroke-linecap='round'/%3E%3Ccircle cx='10.5' cy='22.5' r='2.7' fill='white'/%3E%3Ccircle cx='21.5' cy='10.5' r='2.7' fill='white'/%3E%3C/svg%3E"
     />
+    <link rel="manifest" href="manifest.json" />
+    <link rel="apple-touch-icon" href="icons/icon-180.png" />
+    <meta name="apple-mobile-web-app-title" content="Safe Routes" />
     <link rel="stylesheet" href="styles.css" />
   </head>
   <body>
@@ -65,6 +68,11 @@
             press and hold) to add a stop. Drag a pin to move it, click it to remove it; <strong>Undo</strong> on the map
             takes a change back.
           </p>
+          <details id="recent" class="recent" hidden>
+            <summary>Recent trips</summary>
+            <ul id="recent-list" class="recent__list"></ul>
+            <button id="recent-clear" class="link-button" type="button">Forget these trips</button>
+          </details>
 
           <div class="prefs">
             <div class="field">
@@ -121,6 +129,9 @@
               <label class="switch"><input type="checkbox" id="use-router" checked /><span class="switch__track"></span>Our router</label>
             </div>
             <label class="switch demo-switch">
+              <input type="checkbox" id="auto-replan" /><span class="switch__track"></span>Plan again after each change on the map
+            </label>
+            <label class="switch demo-switch">
               <input type="checkbox" id="demo-mode" /><span class="switch__track"></span>Demo mode: show sample trips when no one's using it
             </label>
           </details>
@@ -148,6 +159,10 @@
               <label class="switch"><input type="checkbox" id="traffic-layer" /><span class="switch__track"></span>Traffic</label>
               <label class="switch"><input type="checkbox" id="transit-layer" /><span class="switch__track"></span>Transit</label>
               <label class="switch"><input type="checkbox" id="biking-layer" /><span class="switch__track"></span>Biking</label>
+              <label class="switch osm-only"><input type="checkbox" id="buses-near" checked /><span class="switch__track"></span>Only buses near the trip</label>
+              <label class="switch">
+                <input type="checkbox" id="dark-at-night" checked /><span class="switch__track"></span>Dark map at night
+              </label>
             </div>
           </div>
         </details>
@@ -162,6 +177,7 @@
             <li class="osm-only"><span class="key key--hazard"></span>Weather hazard: fog, ice, flooding</li>
             <li class="osm-only"><span class="key key--cluster">3</span>Several closures: zoom in</li>
             <li><span class="key key--turn"></span>Risky turn across traffic</li>
+            <li><span class="key key--turn key--avoided"></span>Risky turn the recommended route avoids</li>
             <li id="legend-traffic" hidden><span class="key key--traffic"></span>Traffic: flowing → jammed</li>
             <li id="legend-buses" class="osm-only" hidden><span class="key key--buses"></span>Bus routes, each its own color</li>
           </ul>

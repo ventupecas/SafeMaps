@@ -253,6 +253,12 @@ class ScoredRoute(CandidateRoute):
         description="0-100, higher is safer: the route's risks (risky turns, closures, lane closures, school zones, "
         "railroad crossings, weather hazards, sun glare) weighed the same way whatever the profile.",
     )
+    safety_risks: dict[str, float] = Field(
+        default_factory=dict,
+        description="The risk points behind safety_score, by kind (busy_crossings, hotspot_crossings, closures, "
+        "lane_closures, school_zones, rail_crossings, weather_hazards, sun_glare): only the kinds the route has. "
+        "The score is 100 / (1 + their sum / 10).",
+    )
 
 
 class RoutePlan(BaseModel):

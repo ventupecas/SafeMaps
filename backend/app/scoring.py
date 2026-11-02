@@ -78,8 +78,27 @@ CLOSURE_RISK = 30.0
 
 def safety_score(features: RouteFeatures) -> int:
     """0-100, higher is safer: one number for a route's risks, comparable across routes and trips."""
-    points = _risk_terms(score_route(features, SAFETY_REFERENCE)) + CLOSURE_RISK * features.closures
+    points = sum(_safety_points(features).values())
     return round(100 / (1 + points / SAFETY_SCALE))
+
+
+def safety_risks(features: RouteFeatures) -> dict[str, float]:
+    """The risk points behind a route's safety score, by kind: only the kinds the route has."""
+    return {kind: round(points, 2) for kind, points in _safety_points(features).items() if points > _EPSILON}
+
+
+def _safety_points(features: RouteFeatures) -> dict[str, float]:
+    b = score_route(features, SAFETY_REFERENCE)
+    return {
+        "busy_crossings": b.busy_crossings,
+        "hotspot_crossings": b.hotspot_crossings,
+        "closures": CLOSURE_RISK * features.closures,
+        "lane_closures": b.lane_closures,
+        "school_zones": b.school_zones,
+        "rail_crossings": b.rail_crossings,
+        "weather_hazards": b.weather_hazards,
+        "sun_glare": b.sun_glare,
+    }
 
 
 # How reasons name the risks, for the kinds any candidate has.
@@ -117,6 +136,7 @@ def rank_candidates(candidates: Sequence[CandidateRoute], profile: ScoringProfil
             breakdown=score_route(candidate.features, profile),
             eligible=candidate in open_routes and candidate.features.duration_min <= ceiling,
             safety_score=safety_score(candidate.features),
+            safety_risks=safety_risks(candidate.features),
         )
         for candidate in candidates
     ]

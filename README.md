@@ -54,6 +54,8 @@ Copy-Item .env.example .env   # then set GOOGLE_MAPS_API_KEY
 pytest
 ```
 
+`pytest` includes browser tests of the web map (`tests/test_browser.py`): clicks, drags, right-clicks, Undo and Swap, against the app on a small test city. They need a browser: `python -m playwright install chromium`, or set `$env:ROUTES_TEST_BROWSER = "msedge"` to use Edge. Without one they're skipped. CI installs Chromium and runs them.
+
 ## Google Cloud setup for $0
 
 1. Create a Cloud project and attach a billing account. Google requires one even when usage stays inside the free allowance.
@@ -94,14 +96,17 @@ Errors come back as: 422 bad input, 404 no route, 429 the daily Google limit is 
 
 Until then, the page shows these steps in place of the map. On the page:
 - Search for the start and destination, or click the map: the first click sets the start, the next the destination. **Use my location** sets the start from the device. A clicked spot is named by the nearest address (Photon on the OpenStreetMap map; on Google's map, the Geocoding API if the key allows it). **Swap** turns the trip around.
-- Right-click the map (or press and hold on a phone) to add a stop where it fits the trip best. Drag any pin to move it; click a pin to remove it. **Undo** on the map takes back the last change made on it. With routes drawn, a change plans the trip again.
-- **Map layers** (top left of the map): Default, Satellite or Terrain, and Traffic, Transit and Biking over it. The choice is remembered in the browser. On satellite imagery the gray and black lines get a white edge.
-- **Open on your phone** carries the trip: the phone opens with the same start, destination and stops, and plans it.
-- The recommended route is drawn bold green, the standard route (Google's own choice, or our fastest on the OpenStreetMap map) dashed, and the other options in gray. Red dots mark risky turns on the recommended route. The **Map key** in the corner says what each line and marker means; it starts folded on a phone.
+- Right-click the map (or press and hold on a phone) to add a stop where it fits the trip best. Drag any pin to move it; click a pin to remove it. **Undo** on the map (or Ctrl+Z) takes back the last change made on it.
+- With routes drawn, a change plans the trip again (**Plan again after each change on the map**, under Advanced). It's on for the OpenStreetMap map and off for Google's, where each plan is a paid request: there a note says the routes are out of date until **Find route** is pressed.
+- **Map layers** (top left of the map): Default, Satellite or Terrain, and Traffic, Transit and Biking over it. The choice is remembered in the browser. On satellite imagery and the dark map the gray and black lines get a white edge.
+- **Dark map at night** (on by default): from dusk to dawn, worked out from the sun's position in the browser, Default turns dark (CARTO's dark map on the OpenStreetMap map). Google's map can only be made dark when the page opens, so there it's decided on opening.
+- **Recent trips:** the last 5 trips planned with **Find route** in this browser, under the hint, one click to plan again; **Forget these trips** clears them. None are kept with **Demo mode** on, so a shared expo screen doesn't show one visitor's trips to the next.
+- **Open on your phone** carries the trip: the phone opens with the same start, destination and stops, and plans it. The page can be added to a phone's home screen (`manifest.json`, icons in `frontend/icons/`).
+- The recommended route is drawn bold green, the standard route (Google's own choice, or our fastest on the OpenStreetMap map) dashed, and the other options in gray. Red dots mark risky turns on the recommended route; red rings mark the standard route's risky turns that the recommended route avoids. The **Map key** in the corner says what each line and marker means; it starts folded on a phone.
 - Closed roads are black and lane closures dashed orange. Tap a closure's marker (or a risky turn's) for the details. On the OpenStreetMap map, closure markers close together merge into a numbered circle that splits apart as you zoom in. **Show closures** hides them all.
 - Routes are named by their main road, "Via W Wisconsin Ave", from our road map: each route's longest road that no better route already goes by. Below the name: what it is ("Our safer design 2", "Standard route") and the reason for its place.
 - **Extra time you'd accept for a safer route:** no fixed limit (a route up to 1.6× the fastest can win), or at most 5, 10 or 15 minutes more. The reasons say which limit applied.
-- **Safety score:** every route gets one, 0 to 100, higher is safer: a ring on the recommendation and a pill on each route. It weighs the same risks for every profile (the default's weights: a busy risky turn 3 points, a crash-prone one 9, a lane closure 3, a school zone 3, a rail crossing 1, a weather hazard 3, a minute of sun glare 1, a closed road 30), and 10 points halve it: score = 100 / (1 + points / 10).
+- **Safety score:** every route gets one, 0 to 100, higher is safer: a ring on the recommendation and a pill on each route. It weighs the same risks for every profile (the default's weights: a busy risky turn 3 points, a crash-prone one 9, a lane closure 3, a school zone 3, a rail crossing 1, a weather hazard 3, a minute of sun glare 1, a closed road 30), and 10 points halve it: score = 100 / (1 + points / 10). **What the safety score counts**, under the recommendation, lists each kind's points beside the standard route's (`safety_risks` on each route in the API).
 - **Cost and emissions:** fuel shows in gallons and dollars (`ROUTES_FUEL_PRICE`, default $3.25 a gallon) and CO₂ (8.9 kg a gallon, the EPA's figure).
 - **Stops:** **Add a stop** (up to 3). The trip is planned leg by leg, and the plan joins each leg's recommended route, and each leg's standard route; the directions say "Arrive at stop N". While driving, a stop reached is left out of new routes.
 - **Leave:** now, or in 15, 30 or 60 minutes: school zones and sun glare are judged at that time (traffic and closures stay as they are now). **Best time to leave?** under the routes compares the four and marks the safest; pick one to plan it.
@@ -132,7 +137,7 @@ Until then, the page shows these steps in place of the map. On the page:
   - **Our router designs every route.** The "standard route" to compare with is its fastest one.
   - **Live traffic comes from TomTom and Wisconsin 511 instead** (with `TOMTOM_API_KEY` and `WI511_API_KEY`): see "TomTom: traffic on every street" and "511 travel times" below. Google's Live traffic toggle is hidden.
   - The **Traffic** map layer shows TomTom's traffic map: every street colored green to red by speed, credited "Traffic © TomTom". Without a TomTom key it draws the 511 slowdowns instead.
-  - The other layers come from free map services, each credited on the map: satellite imagery from Esri, terrain from OpenTopoMap, bike lanes from CyclOSM and rail lines from OpenRailwayMap. **Transit** also draws Milwaukee County Transit System's bus routes, each in its color, from MCTS's published schedule (GTFS, free, no key): the server fetches it at most once a week and keeps the lines in the cache folder (`GET /bus-routes`). `ROUTES_BUS_ROUTES=off` leaves them out; any other value is another GTFS feed's address.
+  - The other layers come from free map services, each credited on the map: satellite imagery from Esri, terrain from OpenTopoMap, bike lanes from CyclOSM and rail lines from OpenRailwayMap. **Transit** also draws Milwaukee County Transit System's bus routes, each in its color (click one for its name; **Only buses near the trip** keeps those within 400 m of the route followed), from MCTS's published schedule (GTFS, free, no key): the server fetches it at most once a week and keeps the lines in the cache folder (`GET /bus-routes`). `ROUTES_BUS_ROUTES=off` leaves them out; any other value is another GTFS feed's address.
   - **Still on:** work zones, 511, crash data, school zones and rail crossings.
   - **Keys:** neither Google key is needed, any port works, and the page credits "© OpenStreetMap contributors".
 

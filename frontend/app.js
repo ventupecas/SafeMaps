@@ -44,6 +44,21 @@ const COLORS = {
 const CO2_KG_PER_GALLON = 8.887; // burning a gallon of gasoline (US EPA)
 const MAX_STOPS = 3;
 const LAYERS_KEY = "routes-layers"; // the map layers chosen, remembered in this browser
+const RECENT_KEY = "routes-recent"; // the last trips planned in this browser
+const MAX_RECENT = 5;
+const NIGHT_SUN_DEG = -6; // the dark map from dusk (the sun this far below the horizon) to dawn
+const NEAR_TRIP_M = 400; // "Only buses near the trip": routes running within this of the route followed
+// What each kind of risk is called in the safety score's breakdown, by the server's names.
+const RISK_LABELS = {
+  busy_crossings: "Turns across traffic at busy junctions",
+  hotspot_crossings: "Turns across traffic where crashes happened",
+  closures: "Closed roads",
+  lane_closures: "Lane closures",
+  school_zones: "School zones",
+  rail_crossings: "Railroad crossings",
+  weather_hazards: "Weather hazards",
+  sun_glare: "Driving into a low sun",
+};
 // Demo mode: after DEMO.idleMs with no one touching the page, it plans these trips in turn.
 const DEMO = {
   idleMs: 45000,
@@ -83,6 +98,7 @@ const state = {
   pins: { origin: null, destination: null },
   undo: [], // changes made on the map, newest last: { kind, what, undo() }
   baseMap: "roadmap", // the map's look: "roadmap", "satellite" or "terrain"
+  dark: false, // the dark map is showing (at night, with Default chosen)
   buses: { available: false, data: null, lines: [] }, // the Transit layer's bus routes (OpenStreetMap map)
   findTicket: 0, // the latest route request: answers to older ones are dropped
   refreshTimer: null, // planning the trip again after a change on the map
@@ -145,6 +161,8 @@ async function boot() {
   }
   if (state.mapKind === "osm") useOsmControls();
   else $("road-events").querySelector('option[value="tomtom"]').remove(); // TomTom's traffic is for the other map
+  // Each plan on Google's map is a paid request: there, routes are planned again only when asked.
+  $("auto-replan").checked = state.mapKind === "osm";
   state.view = createMapView(state.mapKind, {
     mapsApiKey: config.mapsApiKey,
     mapId: config.mapId,
@@ -160,8 +178,10 @@ async function boot() {
   }
   await initMap();
   restoreLayers();
-  openTripFromLink();
+  setInterval(applyBaseMap, 5 * 60 * 1000); // dusk and dawn come while the page is open
   setUpDemo();
+  showRecentTrips();
+  openTripFromLink();
 }
 
 // The OpenStreetMap map has no Google behind it: no Google live traffic or traffic
@@ -182,9 +202,13 @@ function trafficTileUrl() {
 }
 
 async function initMap() {
+  // Google's map can only be dark from the start, so the night map is decided before it's made.
+  const saved = savedLayers();
+  state.dark = (!saved || saved["dark-at-night"] !== false) && (!saved || !saved.base || saved.base === "roadmap") && isNight();
   await state.view.create($("map"), {
     center: MILWAUKEE,
     zoom: 11,
+    dark: state.dark,
     onClick: (point) => {
       if (!mapTouchAllowed()) return;
       // First click sets the start; after that, clicks move the destination.
@@ -349,12 +373,21 @@ function wireControls() {
   for (const radio of document.querySelectorAll('input[name="base-map"]')) {
     radio.addEventListener("change", () => {
       state.baseMap = radio.value;
-      if (!state.view) return;
-      state.view.baseMap(radio.value);
-      redrawLines();
+      applyBaseMap({ always: true });
     });
   }
+  $("dark-at-night").addEventListener("change", () => applyBaseMap());
   $("transit-layer").addEventListener("change", (event) => showTransit(event.target.checked));
+  $("buses-near").addEventListener("change", drawBuses);
+  $("recent-clear").addEventListener("click", forgetRecentTrips);
+  $("demo-mode").addEventListener("change", showRecentTrips);
+  // Ctrl+Z (⌘Z on a Mac) takes back the last change on the map, except while typing in a box.
+  document.addEventListener("keydown", (event) => {
+    if (!(event.ctrlKey || event.metaKey) || event.shiftKey || event.altKey || event.key.toLowerCase() !== "z") return;
+    if (!state.undo.length || event.target.closest("input, textarea, select, [contenteditable], gmp-place-autocomplete")) return;
+    event.preventDefault();
+    undoMapChange();
+  });
   $("biking-layer").addEventListener("change", (event) => state.view && state.view.biking(event.target.checked));
   for (const input of document.querySelectorAll("#layers input")) input.addEventListener("change", rememberLayers);
   $("closures-layer").addEventListener("change", drawClosures);
@@ -401,6 +434,7 @@ function clearTrip() {
   clearTimeout(state.refreshTimer);
   setFinding(false);
   clearRoutes();
+  drawBuses(); // all of them again, with no trip to be near
   state.trafficEvents = [];
   drawTraffic();
   state.plan = null;
@@ -413,15 +447,18 @@ function clearTrip() {
 
 // ---- Asking the backend
 
-// fit: zoom the map to the routes. A trip planned again after a change on the map keeps the view.
-async function findRoute({ fit = true } = {}) {
+// fit: zoom the map to the routes. A trip planned again after a change on the map keeps the view,
+// and isn't added to the recent trips (asked for ones are).
+async function findRoute({ fit = true, again = false } = {}) {
   if (!state.origin || !state.destination) return;
   const ticket = ++state.findTicket;
   setFinding(true);
   showStatus("Comparing routes for safety, fuel and time…");
   try {
     const trip = await requestTrip(state.origin, state.destination);
-    if (ticket === state.findTicket) showTrip(trip, { fit });
+    if (ticket !== state.findTicket) return;
+    showTrip(trip, { fit });
+    if (!again) rememberTrip();
   } catch (error) {
     if (ticket === state.findTicket) showStatus(error.message, true);
   } finally {
@@ -438,10 +475,19 @@ function setFinding(on) {
 }
 
 // After the trip changes with its routes on the map, plan it again: once, for a burst of changes.
+// With "Plan again after each change" off, a note says the routes are out of date instead.
 function tripChanged() {
   clearTimeout(state.refreshTimer);
   if (!state.plan || state.nav.active || state.demo.running) return;
-  state.refreshTimer = setTimeout(() => findRoute({ fit: false }), 400);
+  if (!$("auto-replan").checked) {
+    if (!$("stale-note")) {
+      $("results").prepend(
+        element("p", { id: "stale-note", className: "status status--stale" }, "The trip changed since these routes. Find route plans it again."),
+      );
+    }
+    return;
+  }
+  state.refreshTimer = setTimeout(() => findRoute({ fit: false, again: true }), 400);
 }
 
 // The trip as the server takes it. heading: the direction a moving car is driving, so new
@@ -537,7 +583,7 @@ function showTrip(trip, { fit = true } = {}) {
   state.plan = plan;
   clearRoutes();
   drawRoutes(plan, fit);
-  drawRiskyTurns(plan.winner);
+  drawRiskyTurns(plan);
   state.closures = trip.road_events.filter((event) => !isTraffic(event));
   drawClosures();
   state.trafficEvents = trip.road_events.filter(isTraffic);
@@ -574,13 +620,18 @@ function showTrip(trip, { fit = true } = {}) {
         ]),
   );
   selectRoute(plan.winner.id);
+  drawBuses();
   $("drive").hidden = false;
 }
 
-// On satellite imagery, the gray and black lines get a white edge to stand out.
+// On satellite imagery and the night map, the gray and black lines get a white edge to stand out.
+function edgedLines() {
+  return state.baseMap === "satellite" || state.dark;
+}
+
 function drawRoutes(plan, fit) {
   const view = state.view;
-  const edged = state.baseMap === "satellite";
+  const edged = edgedLines();
   const everywhere = [];
   state.paths = {};
   // Losers first, so the winner is drawn on top.
@@ -647,7 +698,7 @@ function drawClosures() {
   if (!$("closures-layer").checked) return;
   for (const event of state.closures) {
     const path = decodePolyline(event.path);
-    if (path.length > 1 && event.kind === "closed" && state.baseMap === "satellite") {
+    if (path.length > 1 && event.kind === "closed" && edgedLines()) {
       state.closureLines.push(state.view.line(path, { color: "#ffffff", weight: 10, opacity: 0.85, zIndex: 24 }));
     }
     if (path.length > 1) {
@@ -697,14 +748,27 @@ function followablePath(points, route, plan) {
   return followable;
 }
 
-function drawRiskyTurns(route) {
-  for (const turn of route.features.crossing_turns) {
-    if (!(turn.busy || turn.hotspot) || !turn.location) continue;
-    const why = turn.hotspot ? "a crash-prone junction" : "a busy junction";
+// Red dots: the recommended route's risky turns. Red rings: the standard route's, where the
+// recommended route doesn't turn: what choosing it avoids.
+function drawRiskyTurns(plan) {
+  const risky = (route) => route.features.crossing_turns.filter((turn) => (turn.busy || turn.hotspot) && turn.location);
+  const why = (turn) => (turn.hotspot ? "a crash-prone junction" : "a busy junction");
+  const ours = risky(plan.winner);
+  for (const turn of ours) {
     const dot = element("div", { className: "turn-dot" });
-    const text = `The recommended route turns across oncoming traffic at ${why}${turn.hotspot ? ", where fatal crashes have happened" : ""}.`;
+    const text = `The recommended route turns across oncoming traffic at ${why(turn)}${turn.hotspot ? ", where fatal crashes have happened" : ""}.`;
     state.turnMarkers.push(
-      state.view.marker(turn.location, dot, { title: `Turn across traffic at ${why}`, zIndex: 30, popup: { heading: "Risky turn", text } }),
+      state.view.marker(turn.location, dot, { title: `Turn across traffic at ${why(turn)}`, zIndex: 30, popup: { heading: "Risky turn", text } }),
+    );
+  }
+  const standard = plan.candidates.find(isStandard);
+  if (!standard || standard.id === plan.winner.id) return;
+  for (const turn of risky(standard)) {
+    if (ours.some((mine) => distanceM(mine.location, turn.location) < 30)) continue; // both routes turn there
+    const ring = element("div", { className: "turn-dot turn-dot--avoided" });
+    const text = `The standard route turns across oncoming traffic here, at ${why(turn)}. The recommended route doesn't.`;
+    state.turnMarkers.push(
+      state.view.marker(turn.location, ring, { title: `Avoided: a turn across traffic at ${why(turn)}`, zIndex: 29, popup: { heading: "Risky turn avoided", text } }),
     );
   }
 }
@@ -753,7 +817,7 @@ function winnerCard(plan, standard) {
   if (standard && standard.id !== winner.id) {
     card.append(element("p", { className: "override" }, comparedWithStandard(winner, standard)));
   }
-  card.append(stats(winner), feedbackBlock(winner, standard));
+  card.append(stats(winner), safetyBreakdown(winner, standard), feedbackBlock(winner, standard));
   return card;
 }
 
@@ -765,6 +829,39 @@ function scoreRing(score) {
     { className: `score score--${band}`, style: `--score:${score}`, title: "Safety score: 0 to 100, higher is safer" },
     element("strong", {}, String(score)),
     element("span", {}, "safety"),
+  );
+}
+
+// What the safety score counts: each kind of risk's points, beside the standard route's when that's
+// a different route. Points add up and compare across routes; the score comes from their total.
+function safetyBreakdown(winner, standard) {
+  const compare = Boolean(standard && standard.id !== winner.id);
+  const ours = winner.safety_risks || {};
+  const theirs = compare ? standard.safety_risks || {} : {};
+  const kinds = Object.keys(RISK_LABELS).filter((kind) => ours[kind] || theirs[kind]);
+  if (!kinds.length) return element("p", { className: "breakdown__none" }, "No risks found on this route: a perfect 100.");
+  const points = (value) => (value ? (Math.round(value * 10) / 10).toString() : "–");
+  const total = (risks) => Object.values(risks).reduce((sum, value) => sum + value, 0);
+  const columns = (ourValue, theirValue) => [ourValue, ...(compare ? [theirValue] : [])];
+  const row = (label, cells, className = "") =>
+    element("tr", { className }, element("th", {}, label), ...cells.map((text) => element("td", {}, text)));
+  return element(
+    "details",
+    { className: "breakdown" },
+    element("summary", {}, "What the safety score counts"),
+    element(
+      "table",
+      { className: "breakdown__table" },
+      element("thead", {}, row("Risk points", columns("This route", "Standard"))),
+      element("tbody", {}, ...kinds.map((kind) => row(RISK_LABELS[kind], columns(points(ours[kind]), points(theirs[kind]))))),
+      element(
+        "tfoot",
+        {},
+        row("Total", columns(points(total(ours)), points(total(theirs))), "breakdown__total"),
+        row("Safety score", columns(String(winner.safety_score), compare ? String(standard.safety_score) : "")),
+      ),
+    ),
+    element("p", { className: "breakdown__note" }, "The score is 100 with no risks, and halves with every 10 risk points: 100 ÷ (1 + points ÷ 10)."),
   );
 }
 
@@ -1335,29 +1432,32 @@ function chosenStops() {
 // ---- Map layers: remembered in this browser; the OpenStreetMap map's buses
 
 function rememberLayers() {
-  const base = document.querySelector('input[name="base-map"]:checked').value;
-  const on = (name) => $(`${name}-layer`).checked;
+  const layers = { base: document.querySelector('input[name="base-map"]:checked').value };
+  for (const box of document.querySelectorAll('#layers input[type="checkbox"]')) layers[box.id] = box.checked;
   try {
-    localStorage.setItem(LAYERS_KEY, JSON.stringify({ base, traffic: on("traffic"), transit: on("transit"), biking: on("biking") }));
+    localStorage.setItem(LAYERS_KEY, JSON.stringify(layers));
   } catch {
     // Storage blocked: the layers start as they are next time.
   }
 }
 
+function savedLayers() {
+  try {
+    const saved = JSON.parse(localStorage.getItem(LAYERS_KEY));
+    return saved && typeof saved === "object" ? saved : null;
+  } catch {
+    return null;
+  }
+}
+
 // Set as last time, through the controls' own change handlers.
 function restoreLayers() {
-  let saved = null;
-  try {
-    saved = JSON.parse(localStorage.getItem(LAYERS_KEY));
-  } catch {
-    return;
-  }
-  if (!saved || typeof saved !== "object") return;
+  const saved = savedLayers();
+  if (!saved) return;
   const radio = [...document.querySelectorAll('input[name="base-map"]')].find((input) => input.value === saved.base);
   const changes = radio && !radio.checked ? [radio] : [];
-  for (const name of ["traffic", "transit", "biking"]) {
-    const box = $(`${name}-layer`);
-    if (typeof saved[name] === "boolean" && box.checked !== saved[name]) changes.push(box);
+  for (const box of document.querySelectorAll('#layers input[type="checkbox"]')) {
+    if (typeof saved[box.id] === "boolean" && box.checked !== saved[box.id]) changes.push(box);
   }
   for (const input of changes) {
     input.checked = input.type === "radio" || !input.checked;
@@ -1365,36 +1465,155 @@ function restoreLayers() {
   }
 }
 
+// The map's look: the type chosen, or the dark map at night when Default is chosen and "Dark map at
+// night" is on. always: show it even if it hasn't changed (a new type was picked). Google's map
+// can't switch to or from dark once made: there the switch counts from the next visit.
+function applyBaseMap({ always = false } = {}) {
+  if (!state.view) return;
+  const dark = state.view.switchesDark
+    ? $("dark-at-night").checked && state.baseMap === "roadmap" && isNight()
+    : state.dark;
+  if (dark === state.dark && !always) return;
+  state.dark = dark;
+  state.view.baseMap(dark && state.baseMap === "roadmap" ? "dark" : state.baseMap);
+  redrawLines();
+}
+
+// Whether the sun is down where the map is (or where the trip starts).
+function isNight() {
+  return sunAltitudeDeg(new Date(), state.origin || MILWAUKEE) < NIGHT_SUN_DEG;
+}
+
+// The sun's height above the horizon, in degrees (accurate to a fraction of a degree: plenty for dusk).
+function sunAltitudeDeg(when, { lat, lng }) {
+  const rad = Math.PI / 180;
+  const days = when.getTime() / 86400000 - 10957.5; // since noon, January 1, 2000 (UTC)
+  const anomaly = (357.529 + 0.98560028 * days) * rad;
+  const meanLongitude = 280.459 + 0.98564736 * days;
+  const longitude = (meanLongitude + 1.915 * Math.sin(anomaly) + 0.02 * Math.sin(2 * anomaly)) * rad;
+  const tilt = (23.439 - 0.00000036 * days) * rad;
+  const declination = Math.asin(Math.sin(tilt) * Math.sin(longitude));
+  const rightAscension = Math.atan2(Math.cos(tilt) * Math.sin(longitude), Math.cos(longitude));
+  const siderealDeg = (280.46061837 + 360.98564736629 * days) % 360;
+  const hourAngle = (siderealDeg + lng) * rad - rightAscension;
+  const altitude = Math.asin(
+    Math.sin(lat * rad) * Math.sin(declination) + Math.cos(lat * rad) * Math.cos(declination) * Math.cos(hourAngle),
+  );
+  return altitude / rad;
+}
+
 // Transit lines from the map itself, and on the OpenStreetMap map the county's bus routes from
-// our server, each in its own color, beneath the trip's routes.
+// our server (drawBuses).
 async function showTransit(on) {
   if (!state.view) return;
   state.view.transit(on);
   const buses = state.buses;
   if (!buses.available) return;
   $("legend-buses").hidden = !on;
-  if (!on) {
-    buses.lines.splice(0).forEach((line) => line.remove());
-    if (buses.data) state.view.credit(buses.data.attribution, false);
-    return;
-  }
-  try {
-    if (!buses.data) {
+  if (on && !buses.data) {
+    try {
       const response = await fetch("/bus-routes");
       if (!response.ok) throw new Error(`The server answered ${response.status}`);
       buses.data = await response.json();
+      for (const route of buses.data.routes) route.points = route.paths.map(decodePolyline);
+    } catch (error) {
+      console.warn("Bus routes unavailable:", error);
+      return;
     }
-  } catch (error) {
-    console.warn("Bus routes unavailable:", error);
+  }
+  if (buses.data && buses.data.attribution) state.view.credit(buses.data.attribution, on);
+  drawBuses();
+}
+
+// Each bus route in its own color, beneath the trip's routes; click one for its name. With "Only buses
+// near the trip" on and a trip drawn, just the routes that run near the route being followed.
+function drawBuses() {
+  const buses = state.buses;
+  buses.lines.splice(0).forEach((line) => line.remove());
+  if (!buses.data || !$("transit-layer").checked || !state.view) return;
+  const followed = state.paths[state.activeRouteId];
+  const near = $("buses-near").checked && followed ? nearPath(followed.points, NEAR_TRIP_M) : null;
+  for (const route of buses.data.routes) {
+    if (near && !route.points.some((path) => densify(path, NEAR_TRIP_M / 2).some(near))) continue;
+    const popup = { heading: `Route ${route.name}`, text: route.long_name };
+    for (const path of route.points) {
+      buses.lines.push(state.view.line(path, { color: route.color, weight: 3, opacity: 0.75, zIndex: 1, under: true, popup }));
+    }
+  }
+}
+
+// A test for "within about meters of the path", on a grid of cells that size.
+function nearPath(points, meters) {
+  const latStep = meters / M_PER_DEG_LAT;
+  const lngStep = meters / (M_PER_DEG_LAT * Math.cos((points[0].lat * Math.PI) / 180));
+  const cell = (p) => [Math.floor(p.lat / latStep), Math.floor(p.lng / lngStep)];
+  const cells = new Set();
+  for (const p of densify(points, meters / 2)) {
+    const [row, col] = cell(p);
+    for (let dr = -1; dr <= 1; dr++) for (let dc = -1; dc <= 1; dc++) cells.add(`${row + dr},${col + dc}`);
+  }
+  return (p) => cells.has(cell(p).join(","));
+}
+
+// The path's points, plus more so none are further apart than meters.
+function densify(points, meters) {
+  const dense = points.slice(0, 1);
+  for (let i = 1; i < points.length; i++) {
+    const [a, b] = [points[i - 1], points[i]];
+    const steps = Math.ceil(distanceM(a, b) / meters);
+    for (let k = 1; k < steps; k++) dense.push({ lat: a.lat + ((b.lat - a.lat) * k) / steps, lng: a.lng + ((b.lng - a.lng) * k) / steps });
+    dense.push(b);
+  }
+  return dense;
+}
+
+// ---- Recent trips: the last few planned in this browser, one click to plan again. Not kept on a
+// shared screen (demo mode), where the next visitor would see them.
+
+function recentTrips() {
+  try {
+    const trips = JSON.parse(localStorage.getItem(RECENT_KEY));
+    return Array.isArray(trips) ? trips.filter((trip) => trip && trip.from && trip.to) : [];
+  } catch {
+    return [];
+  }
+}
+
+function rememberTrip() {
+  if ($("demo-mode").checked || state.demo.running) return;
+  const keep = ({ lat, lng, label }) => ({ lat, lng, label: /^(My|Current) location$/.test(label || "") ? null : label });
+  const trip = { from: keep(state.origin), to: keep(state.destination), stops: chosenStops().map(keep) };
+  const key = (t) => JSON.stringify([t.from, t.to, t.stops].flat().map((p) => [p.lat.toFixed(4), p.lng.toFixed(4)]));
+  const trips = [trip, ...recentTrips().filter((other) => key(other) !== key(trip))].slice(0, MAX_RECENT);
+  try {
+    localStorage.setItem(RECENT_KEY, JSON.stringify(trips));
+  } catch {
     return;
   }
-  if (!$("transit-layer").checked || buses.lines.length) return; // turned off, or drawn, while waiting
-  for (const route of buses.data.routes) {
-    for (const path of route.paths) {
-      buses.lines.push(state.view.line(decodePolyline(path), { color: route.color, weight: 3, opacity: 0.7, zIndex: 1, under: true }));
-    }
+  showRecentTrips();
+}
+
+function forgetRecentTrips() {
+  try {
+    localStorage.removeItem(RECENT_KEY);
+  } catch {
+    // Nothing kept to forget.
   }
-  if (buses.data.attribution) state.view.credit(buses.data.attribution, true);
+  showRecentTrips();
+}
+
+function showRecentTrips() {
+  const trips = $("demo-mode").checked ? [] : recentTrips();
+  $("recent").hidden = trips.length === 0;
+  const name = (point) => (point.label ? point.label.split(",")[0] : `${point.lat.toFixed(3)}, ${point.lng.toFixed(3)}`);
+  $("recent-list").replaceChildren(
+    ...trips.map((trip) => {
+      const stops = trip.stops && trip.stops.length ? ` · ${trip.stops.length} stop${trip.stops.length === 1 ? "" : "s"}` : "";
+      const button = element("button", { className: "recent__trip", type: "button" }, `${name(trip.from)} → ${name(trip.to)}${stops}`);
+      button.addEventListener("click", () => loadTrip(trip));
+      return element("li", {}, button);
+    }),
+  );
 }
 
 // ---- Visitors' answers, and the best time to leave
@@ -1614,6 +1833,7 @@ async function showPhoneLink() {
         ? element("p", { className: "hint" }, "Point the phone's camera at the code, then tap the link it shows.")
         : element("p", { className: "hint" }, "Driving mode on a phone needs the secure https link from the tunnel."),
       ...(withTrip ? [element("p", { className: "hint" }, "The trip on the map comes with it, ready to drive.")] : []),
+      element("p", { className: "hint" }, "To find it again later, use the browser's “Add to Home Screen”."),
     );
   } catch {
     body.replaceChildren(element("p", {}, "The code couldn't be made. Visitors can type this address:"), element("p", { className: "qr__link" }, link));
@@ -1646,13 +1866,19 @@ function openTripFromLink() {
   };
   const from = place(params.get("from"), params.get("fromName"));
   const to = place(params.get("to"), params.get("toName"));
-  if (from) setPoint("origin", from);
-  if (to) setPoint("destination", to);
-  for (const text of params.getAll("stop").slice(0, MAX_STOPS)) {
-    const stop = place(text);
-    if (stop) addStop({ point: stop });
-  }
-  if (from && to) findRoute();
+  if (from && to) loadTrip({ from, to, stops: params.getAll("stop").map((text) => place(text)).filter(Boolean) });
+}
+
+// A whole trip in place of the one on the map, planned at once.
+function loadTrip({ from, to, stops = [] }) {
+  if (state.nav.active) return;
+  const copy = ({ lat, lng, label = null }) => ({ lat, lng, label, countryCode: null });
+  clearTrip();
+  for (const stop of [...state.stops]) removeStop(stop.id);
+  setPoint("origin", copy(from));
+  setPoint("destination", copy(to));
+  for (const stop of stops.slice(0, MAX_STOPS)) addStop({ point: copy(stop) });
+  findRoute();
 }
 
 // ---- Small helpers

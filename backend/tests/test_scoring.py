@@ -5,7 +5,7 @@ from app.driving_side import DrivingSide
 from app.features import TurnContext, extract_features
 from app.models import CandidateRoute, CrossingTurn, RouteFeatures, ScoringProfile
 from app.profiles import PRESETS, get_profile
-from app.scoring import rank_candidates, score_route
+from app.scoring import SAFETY_SCALE, rank_candidates, safety_risks, safety_score, score_route
 from tests.factories import highway_route, junction_route, local_route, winding_route
 
 
@@ -134,3 +134,11 @@ def test_get_profile_applies_validated_overrides():
         get_profile("scenic", {"no_such_weight": 1})
     with pytest.raises(ValueError, match="Unknown profile"):
         get_profile("nope")
+
+
+def test_the_safety_score_comes_from_the_risks_it_lists():
+    risky = features(rail_crossings=2, school_zones=1, closures=1)
+    risks = safety_risks(risky)
+    assert set(risks) == {"rail_crossings", "school_zones", "closures"}  # only the kinds the route has
+    assert safety_score(risky) == round(100 / (1 + sum(risks.values()) / SAFETY_SCALE))
+    assert safety_risks(features()) == {} and safety_score(features()) == 100

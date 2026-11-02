@@ -649,7 +649,7 @@ summary:focus-visible {
 }
 
 /* A progress message (not an error) spins. */
-.results > .status:not(.status--error)::before {
+.results > .status:not(.status--error, .status--stale)::before {
   content: "";
   flex: none;
   width: 16px;
@@ -660,9 +660,106 @@ summary:focus-visible {
   animation: spin 0.8s linear infinite;
 }
 
+/* The routes shown are for the trip before a change on the map. */
+.status--stale {
+  margin-top: 0;
+  background: #fff4e0;
+  color: #7a4a00;
+}
+
 .status--error {
   background: var(--risk-soft);
   color: #8a1c14;
+}
+
+/* What the safety score counts, folded under the recommendation. */
+.breakdown {
+  margin-top: 12px;
+  font-size: 0.85rem;
+}
+
+.breakdown summary {
+  cursor: pointer;
+  font-weight: 600;
+  color: var(--drive);
+}
+
+.breakdown__table {
+  width: 100%;
+  margin-top: 8px;
+  border-collapse: collapse;
+  font-variant-numeric: tabular-nums;
+}
+
+.breakdown__table th,
+.breakdown__table td {
+  padding: 5px 6px;
+  border-bottom: 1px solid var(--border);
+  text-align: right;
+}
+
+.breakdown__table tbody th,
+.breakdown__table tfoot th {
+  text-align: left;
+  font-weight: 500;
+}
+
+.breakdown__table thead th {
+  font-size: 0.72rem;
+  color: var(--muted);
+  font-weight: 600;
+}
+
+.breakdown__table tfoot th,
+.breakdown__table tfoot td {
+  border-bottom: none;
+  font-weight: 700;
+}
+
+.breakdown__total th,
+.breakdown__total td {
+  font-weight: 600;
+  color: var(--muted);
+}
+
+.breakdown__note,
+.breakdown__none {
+  margin: 8px 0 0;
+  font-size: 0.78rem;
+  color: var(--muted);
+}
+
+/* The last trips planned here, one click to plan again. */
+.recent summary {
+  cursor: pointer;
+  font-size: 0.85rem;
+  font-weight: 600;
+  color: var(--muted);
+}
+
+.recent__list {
+  display: grid;
+  gap: 6px;
+  margin: 8px 0;
+  padding: 0;
+  list-style: none;
+}
+
+.recent__trip {
+  width: 100%;
+  padding: 8px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface);
+  color: var(--text);
+  font: inherit;
+  font-size: 0.85rem;
+  text-align: left;
+  cursor: pointer;
+}
+
+.recent__trip:hover {
+  background: var(--surface-2);
 }
 
 .winner {
@@ -1205,6 +1302,14 @@ summary:focus-visible {
   cursor: grab;
 }
 
+/* The standard route's risky turns that the recommended route avoids: a ring, not a dot. */
+.turn-dot--avoided {
+  background: #fff;
+  border: 3px solid var(--risk);
+  box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.9), 0 1px 3px rgba(0, 0, 0, 0.3);
+  opacity: 0.9;
+}
+
 .car {
   position: relative;
   width: 22px;
@@ -1386,6 +1491,11 @@ summary:focus-visible {
 .key--buses {
   background: linear-gradient(90deg, #00b451 0 25%, #0055b8 25% 50%, #ff8300 50% 75%, #863399 75%);
   height: 4px;
+}
+
+.key--avoided {
+  background: #fff;
+  border: 2.5px solid var(--risk);
 }
 
 .key--traffic {

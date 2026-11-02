@@ -4,10 +4,13 @@
 // interface, so app.js never touches a map library directly:
 //
 //   await view.load()                     load the library
-//   await view.create(element, options)   { center, zoom, onClick(point), onContextMenu(point), onDragStart() }
+//   await view.create(element, options)   { center, zoom, dark, onClick(point), onContextMenu(point), onDragStart() }
 //                                         onContextMenu: a right-click, or a long press on a touch screen
-//   view.line(points, style)              { color, weight, opacity, dashed, under } -> { front(on), remove() }
+//                                         dark: start with the dark map (Google's can only be dark from the start)
+//   view.line(points, style)              { color, weight, opacity, dashed, under, popup } -> { front(on), remove() }
 //                                         under: beneath every other line (the OpenStreetMap map draws in order)
+//                                         popup: { heading, text }, opened by a click on the line, which then
+//                                         doesn't count as a map click
 //   view.marker(point, element, options)  { title, zIndex, popup, onClick, onDragEnd } -> { move(point), remove() }
 //                                         popup: { heading, text }, opened by a click or tap
 //                                         onClick: called on a click or tap instead (no popup)
@@ -16,7 +19,8 @@
 //                                         markers that cluster into a count where crowded (OpenStreetMap)
 //   view.fit(points), view.panTo(point), view.setZoom(zoom)
 //   view.traffic(on), view.hasTraffic     a traffic layer, when the map has one
-//   view.baseMap(kind)                    "roadmap", "satellite" or "terrain"
+//   view.baseMap(kind)                    "roadmap", "satellite", "terrain" or "dark"
+//   view.switchesDark                     whether baseMap("dark") works after create (not on Google's map)
 //   view.transit(on), view.biking(on)     transit lines, bike lanes and trails over the map
 //   await view.search(container, placeholder, onPick(place))   place search in a box
 //   await view.reverse(point)             the nearest address, { label, countryCode }, or null
@@ -39,6 +43,12 @@ const OSM_BASE_MAPS = {
     url: "https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}",
     maxNativeZoom: 18,
     attribution: "Imagery &copy; Esri, Maxar, Earthstar Geographics",
+  },
+  dark: {
+    url: "https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png",
+    subdomains: "abcd",
+    maxNativeZoom: 19,
+    attribution: `${OSM_CREDIT} &copy; <a href="https://carto.com/attributions">CARTO</a>`,
   },
   terrain: {
     url: "https://{s}.tile.opentopomap.org/{z}/{x}/{y}.png",
@@ -74,6 +84,7 @@ export function createMapView(kind, { mapsApiKey, mapId, onAuthFailure, trafficT
 
 class GoogleView {
   hasTraffic = true;
+  switchesDark = false;
 
   constructor(apiKey, mapId, onAuthFailure) {
     this.apiKey = apiKey;
@@ -101,10 +112,11 @@ class GoogleView {
     });
   }
 
-  async create(element, { center, zoom, onClick, onContextMenu, onDragStart }) {
+  async create(element, { center, zoom, dark = false, onClick, onContextMenu, onDragStart }) {
     this.map = new google.maps.Map(element, {
       center,
       zoom,
+      colorScheme: dark ? "DARK" : "LIGHT", // fixed once the map is made
       mapId: this.mapId,
       mapTypeControl: false,
       streetViewControl: false,
@@ -115,19 +127,47 @@ class GoogleView {
     this.bikingLayer = new google.maps.BicyclingLayer();
     ({ AdvancedMarkerElement: this.Marker } = await google.maps.importLibrary("marker"));
     this.map.addListener("click", (event) => onClick({ lat: event.latLng.lat(), lng: event.latLng.lng() }));
-    if (onContextMenu) this.map.addListener("contextmenu", (event) => onContextMenu({ lat: event.latLng.lat(), lng: event.latLng.lng() }));
+    if (onContextMenu) this.onContextMenu(element, onContextMenu);
     this.map.addListener("dragstart", onDragStart);
   }
 
+  // The browser's own contextmenu event (a right-click, or a long press on Android), turned into a
+  // spot on the map. The map's own contextmenu event didn't reliably come on this page.
+  onContextMenu(element, handler) {
+    const overlay = new google.maps.OverlayView(); // only for its projection: pixels to places
+    overlay.onAdd = overlay.draw = overlay.onRemove = () => {};
+    overlay.setMap(this.map);
+    element.addEventListener(
+      "contextmenu",
+      (event) => {
+        const projection = overlay.getProjection();
+        if (!projection) return;
+        event.preventDefault();
+        const box = element.getBoundingClientRect();
+        const at = projection.fromContainerPixelToLatLng(new google.maps.Point(event.clientX - box.left, event.clientY - box.top));
+        handler({ lat: at.lat(), lng: at.lng() });
+      },
+      true,
+    );
+  }
+
   // under: Google stacks lines by zIndex alone.
-  line(points, { color, weight = 5, opacity = 1, dashed = false, zIndex = 0 }) {
+  line(points, { color, weight = 5, opacity = 1, dashed = false, zIndex = 0, popup = null }) {
     const options = dashed
       ? {
           strokeOpacity: 0,
           icons: [{ icon: { path: "M 0,-1 0,1", strokeOpacity: 1, strokeColor: color, scale: 3 }, offset: "0", repeat: "14px" }],
         }
       : { strokeColor: color, strokeWeight: weight, strokeOpacity: opacity };
-    const line = new google.maps.Polyline({ map: this.map, path: points, clickable: false, zIndex, ...options });
+    const line = new google.maps.Polyline({ map: this.map, path: points, clickable: Boolean(popup), zIndex, ...options });
+    if (popup) {
+      line.addListener("click", (event) => {
+        this.info ||= new google.maps.InfoWindow();
+        this.info.setContent(popupContent(popup));
+        this.info.setPosition(event.latLng);
+        this.info.open({ map: this.map });
+      });
+    }
     return {
       front: (on) => line.setOptions({ zIndex: on ? zIndex + 100 : zIndex }),
       remove: () => line.setMap(null),
@@ -151,9 +191,9 @@ class GoogleView {
       });
     }
     if (onClick) {
-      marker.addListener("click", onClick);
+      marker.addEventListener("gmp-click", onClick);
     } else if (popup) {
-      marker.addListener("click", () => {
+      marker.addEventListener("gmp-click", () => {
         this.info ||= new google.maps.InfoWindow();
         this.info.setContent(popupContent(popup));
         this.info.open({ anchor: marker, map: this.map });
@@ -209,7 +249,7 @@ class GoogleView {
     this.trafficLayer.setMap(on ? this.map : null);
   }
 
-  // Satellite comes with street names on it (Google's "hybrid").
+  // Satellite comes with street names on it (Google's "hybrid"). Dark is set when the map is made.
   baseMap(kind) {
     this.map.setMapTypeId({ satellite: "hybrid", terrain: "terrain" }[kind] || "roadmap");
   }
@@ -281,6 +321,8 @@ class GoogleView {
 // ---- OpenStreetMap (Leaflet)
 
 class OsmView {
+  switchesDark = true;
+
   constructor(trafficTiles) {
     this.trafficTiles = trafficTiles;
     this.hasTraffic = Boolean(trafficTiles);
@@ -305,17 +347,17 @@ class OsmView {
     }
   }
 
-  async create(element, { center, zoom, onClick, onContextMenu, onDragStart }) {
+  async create(element, { center, zoom, dark = false, onClick, onContextMenu, onDragStart }) {
     this.map = L.map(element, { zoomControl: true }).setView([center.lat, center.lng], zoom);
     this.map.createPane("under").style.zIndex = 350; // between the map's tiles (200) and its lines (400)
-    this.baseMap("roadmap");
+    this.baseMap(dark ? "dark" : "roadmap");
     this.map.on("click", (event) => onClick({ lat: event.latlng.lat, lng: event.latlng.lng }));
     // Leaflet turns a long press into a contextmenu event on touch screens too.
     if (onContextMenu) this.map.on("contextmenu", (event) => onContextMenu({ lat: event.latlng.lat, lng: event.latlng.lng }));
     this.map.on("dragstart", onDragStart);
   }
 
-  line(points, { color, weight = 5, opacity = 1, dashed = false, under = false }) {
+  line(points, { color, weight = 5, opacity = 1, dashed = false, under = false, popup = null }) {
     const line = L.polyline(
       points.map((p) => [p.lat, p.lng]),
       {
@@ -323,10 +365,12 @@ class OsmView {
         weight: dashed ? 4 : weight,
         opacity,
         dashArray: dashed ? "2 10" : null,
-        interactive: false,
+        interactive: Boolean(popup),
+        bubblingMouseEvents: false, // a click on the line opens its popup, and doesn't set a trip point too
         pane: under ? "under" : "overlayPane",
       },
     ).addTo(this.map);
+    if (popup) line.bindPopup(popupContent(popup));
     // Leaflet draws in the order lines are added; bring one forward to raise it.
     return { front: (on) => on && line.bringToFront(), remove: () => line.remove() };
   }

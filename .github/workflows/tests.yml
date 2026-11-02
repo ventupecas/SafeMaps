@@ -1,6 +1,7 @@
-# Runs the backend tests on every push and pull request. They need no keys
-# and no network: every outside service is faked, and the road maps they use
-# are built in the tests.
+# Runs the tests on every push and pull request. They need no keys: every
+# outside service is faked, and the road maps they use are built in the tests.
+# The browser tests (tests/test_browser.py) drive the web map in Chromium; they
+# load the map library from unpkg, the only network they use.
 name: Tests
 
 on:
@@ -21,4 +22,5 @@ jobs:
           cache: pip
           cache-dependency-path: backend/requirements*.txt
       - run: python -m pip install -r requirements-dev.txt
+      - run: python -m playwright install --with-deps chromium
       - run: python -m pytest -q
