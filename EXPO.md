@@ -142,11 +142,24 @@ Open **http://127.0.0.1:3143** and run the 2–3 trips you plan to show.
 - **Good things to show:** the safety score ring; **Best time to leave?** near sunset (waiting until the sun is down often scores higher); a trip with a stop; the **New driver** profile.
 - **This also saves Google's answers** for those trips, which the zero-cost fallback below relies on.
 
+### Get the map ready for a Wi-Fi drop
+
+On the OpenStreetMap map (`ROUTES_MAP=osm`), the booth screen keeps a copy of the page and of every map image it shows, so it keeps working if the venue's internet drops. The server runs on the laptop, so planning still works too. Before doors open, on the booth screen:
+
+- Open the page once, then **reload it** (the copy starts with the second load).
+- **Pan and zoom over the area you'll show**, in each map type you'll use (Default, Satellite, the dark map at night). Only images you've looked at are kept: the map services don't allow downloading areas ahead.
+
+Without internet, place search, addresses for clicked spots, live traffic and new closures stop; clicking the map and the trips you rehearsed still work. Google's map isn't kept (its terms don't allow it), so it needs the internet.
+
 ## 4. During the expo
 
 ### Visitors' answers
 
 Under each recommendation the page asks "Would you take this route?". See the count at any time at **http://127.0.0.1:3143/feedback-summary**: yes and no, and how much safer and longer the routes were for each. No places are kept.
+
+### The stats screen
+
+Open **http://127.0.0.1:3143/stats.html** on a second screen: today's trips, how many got a safer route than the standard one, the risky turns, railroad crossings, school zones and closed roads they avoided, and the share who'd take the safer route. It updates every 20 seconds. Opened from the tunnel's https link, it also shows a QR code for phones. Sample trips (demo mode) and automatic re-plans aren't counted, and no places are kept (`backend/.cache/routes/trips.jsonl`).
 
 ### Watch usage
 
@@ -175,7 +188,7 @@ Remove-Item Env:ROUTES_CACHE_MODE
 
 ### Limits to know
 
-- **Internet is needed no matter what.** The map, place search and work-zone feed all come from the internet. Saved-answers mode only removes the cost of Google's routing.
+- **Internet:** Google's map, place search, live traffic and the work-zone feed all need it. On the OpenStreetMap map the booth screen keeps working without it (see "Get the map ready for a Wi-Fi drop"). Saved-answers mode only removes the cost of Google's routing.
 - **Fallback 3: no Google at all.** Set `ROUTES_MAP=osm` in `backend\.env` and restart the server. You get the OpenStreetMap map, live traffic from TomTom and Wisconsin 511 instead of Google, and no Google costs or Google key.
 - **Phones need the tunnel.** Driving mode (following your location) works in the laptop's browser. Visitors' phones need the https link from "Let visitors use their phones" below.
 - **Sound on.** Spoken directions come through the laptop's speakers; untick **Spoken directions while driving** for quiet.

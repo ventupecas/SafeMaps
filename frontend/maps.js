@@ -18,6 +18,7 @@
 //   view.markerGroup()                    -> { add(point, element, options), show(on), clear() }
 //                                         markers that cluster into a count where crowded (OpenStreetMap)
 //   view.fit(points), view.panTo(point), view.setZoom(zoom)
+//   view.center()                         the point at the middle of the map
 //   view.traffic(on), view.hasTraffic     a traffic layer, when the map has one
 //   view.baseMap(kind)                    "roadmap", "satellite", "terrain" or "dark"
 //   view.switchesDark                     whether baseMap("dark") works after create (not on Google's map)
@@ -30,8 +31,9 @@
 // map, so the OpenStreetMap page never loads Google at all. Its traffic layer
 // is TomTom's, served through our server (trafficTiles), which holds the key.
 
-const LEAFLET = "https://unpkg.com/leaflet@1.9.4/dist/";
-const MARKER_CLUSTER = "https://unpkg.com/leaflet.markercluster@1.5.3/dist/";
+// Served from here (frontend/vendor), so the map works without the internet once its images are kept (sw.js).
+const LEAFLET = "vendor/leaflet/"; // Leaflet 1.9.4
+const MARKER_CLUSTER = "vendor/markercluster/"; // Leaflet.markercluster 1.5.3
 const CLUSTER_RADIUS_PX = 40; // markers closer than this on screen share one count
 const OSM_TILES = "https://tile.openstreetmap.org/{z}/{x}/{y}.png";
 const OSM_CREDIT = '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors';
@@ -76,8 +78,9 @@ const PHOTON_REVERSE = "https://photon.komoot.io/reverse";
 const SEARCH_BIAS = { lat: 43.0389, lng: -87.9065 }; // prefer places around Milwaukee
 
 // trafficTiles: the OpenStreetMap map's traffic layer, a tile URL template ({z}/{x}/{y}); none means no layer.
-export function createMapView(kind, { mapsApiKey, mapId, onAuthFailure, trafficTiles = null } = {}) {
-  return kind === "osm" ? new OsmView(trafficTiles) : new GoogleView(mapsApiKey, mapId, onAuthFailure);
+// language: "en" or "es", for Google's map: its labels, controls and place search.
+export function createMapView(kind, { mapsApiKey, mapId, onAuthFailure, trafficTiles = null, language = "en" } = {}) {
+  return kind === "osm" ? new OsmView(trafficTiles) : new GoogleView(mapsApiKey, mapId, onAuthFailure, language);
 }
 
 // ---- Google
@@ -86,7 +89,8 @@ class GoogleView {
   hasTraffic = true;
   switchesDark = false;
 
-  constructor(apiKey, mapId, onAuthFailure) {
+  constructor(apiKey, mapId, onAuthFailure, language) {
+    this.language = language;
     this.apiKey = apiKey;
     this.mapId = mapId || "DEMO_MAP_ID";
     this.onAuthFailure = onAuthFailure;
@@ -102,6 +106,8 @@ class GoogleView {
         v: "weekly",
         loading: "async",
         libraries: "places,marker",
+        language: this.language,
+        region: "US",
         callback: "initMap",
       });
       const script = document.createElement("script");
@@ -141,7 +147,7 @@ class GoogleView {
       "contextmenu",
       (event) => {
         const projection = overlay.getProjection();
-        if (!projection) return;
+        if (!projection || event.target.closest("gmp-advanced-marker, .gm-style-iw-c, .gmnoprint, .gm-control-active, button, a")) return;
         event.preventDefault();
         const box = element.getBoundingClientRect();
         const at = projection.fromContainerPixelToLatLng(new google.maps.Point(event.clientX - box.left, event.clientY - box.top));
@@ -239,6 +245,11 @@ class GoogleView {
 
   panTo(point) {
     this.map.panTo(point);
+  }
+
+  center() {
+    const middle = this.map.getCenter();
+    return { lat: middle.lat(), lng: middle.lng() };
   }
 
   setZoom(zoom) {
@@ -428,6 +439,11 @@ class OsmView {
     this.map.panTo([point.lat, point.lng]);
   }
 
+  center() {
+    const { lat, lng } = this.map.getCenter();
+    return { lat, lng };
+  }
+
   setZoom(zoom) {
     this.map.setZoom(zoom);
   }
@@ -443,7 +459,8 @@ class OsmView {
   baseMap(kind) {
     const { url, ...options } = OSM_BASE_MAPS[kind] || OSM_BASE_MAPS.roadmap;
     if (this.base) this.base.remove();
-    this.base = L.tileLayer(url, { maxZoom: 19, zIndex: Z_BASE, ...options }).addTo(this.map);
+    // crossOrigin: fetched so the page can keep them for offline use (sw.js); every one of these servers allows it.
+    this.base = L.tileLayer(url, { maxZoom: 19, zIndex: Z_BASE, crossOrigin: "anonymous", ...options }).addTo(this.map);
   }
 
   transit(on) {
@@ -455,8 +472,10 @@ class OsmView {
   }
 
   credit(text, on) {
-    if (on) this.map.attributionControl.addAttribution(text);
-    else this.map.attributionControl.removeAttribution(text);
+    this.credits ||= new Set(); // Leaflet counts each add, so a credit added twice needs two removes
+    if (on === this.credits.has(text)) return;
+    if (on) this.credits.add(text) && this.map.attributionControl.addAttribution(text);
+    else this.credits.delete(text) && this.map.attributionControl.removeAttribution(text);
   }
 
   async reverse(point) {
@@ -474,7 +493,7 @@ class OsmView {
 
   overlay(name, on) {
     const { url, attribution } = OSM_OVERLAYS[name];
-    this.overlays[name] ||= L.tileLayer(url, { maxZoom: 19, zIndex: Z_OVERLAY, attribution });
+    this.overlays[name] ||= L.tileLayer(url, { maxZoom: 19, zIndex: Z_OVERLAY, attribution, crossOrigin: "anonymous" });
     if (on) this.overlays[name].addTo(this.map);
     else this.overlays[name].remove();
   }

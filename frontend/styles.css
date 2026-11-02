@@ -1297,6 +1297,39 @@ summary:focus-visible {
   display: none;
 }
 
+/* The cross in the middle of the map, while it has keyboard focus: where Enter and S put points.
+   Not after a click: the map takes focus then too (data-input, set in app.js). */
+.crosshair {
+  display: none;
+  position: absolute;
+  z-index: 900;
+  left: 50%;
+  top: 50%;
+  width: 34px;
+  height: 34px;
+  transform: translate(-50%, -50%);
+  pointer-events: none;
+  background:
+    linear-gradient(var(--focus), var(--focus)) center / 3px 100% no-repeat,
+    linear-gradient(var(--focus), var(--focus)) center / 100% 3px no-repeat;
+  filter: drop-shadow(0 0 2px #fff) drop-shadow(0 0 1px #fff);
+}
+
+[data-input="keys"] .map-wrap:has(#map:focus, #map :focus) .crosshair {
+  display: block;
+}
+
+/* Read by screen readers, not shown. */
+.visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+}
+
 /* Pins move with a drag and come off the map with a click. */
 .map-pin {
   cursor: grab;
@@ -1308,6 +1341,53 @@ summary:focus-visible {
   border: 3px solid var(--risk);
   box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.9), 0 1px 3px rgba(0, 0, 0, 0.3);
   opacity: 0.9;
+}
+
+/* Railroad crossings (a crossbuck) and schools (a school sign's yellow) along the routes. */
+.spot {
+  display: grid;
+  place-items: center;
+  width: 18px;
+  height: 18px;
+  border: 2px solid #fff;
+  box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.35), 0 1px 3px rgba(0, 0, 0, 0.3);
+  color: #202124;
+  font-size: 11px;
+  font-weight: 800;
+  line-height: 1;
+  transform: translateY(50%); /* centered on the spot */
+}
+
+.spot--rail {
+  border-radius: 50%;
+  background: #fff;
+  border-color: #202124;
+}
+
+.spot--rail::before {
+  content: "✕";
+}
+
+.spot--school {
+  border-radius: 4px;
+  background: #f2c200;
+}
+
+.spot--school::before {
+  content: "S";
+}
+
+.spot--avoided {
+  opacity: 0.5;
+  border-style: dashed;
+}
+
+.legend .spot {
+  width: 16px;
+  height: 16px;
+  margin: 0 6px;
+  font-size: 9px;
+  transform: none;
 }
 
 .car {
@@ -1793,6 +1873,123 @@ body:not(.map-osm) .osm-only {
 .osm-suggestions li:hover,
 .osm-suggestions li[aria-selected="true"] {
   background: var(--accent-soft);
+}
+
+/* ---- The expo's stats screen (stats.html): big numbers for across the booth */
+
+.stats-page {
+  min-height: 100vh;
+  background: var(--bg);
+}
+
+.board {
+  display: grid;
+  gap: 28px;
+  max-width: 1400px;
+  margin: 0 auto;
+  padding: 36px 40px;
+}
+
+.board__header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.board .brand__mark {
+  width: 56px;
+  height: 56px;
+}
+
+.board h1 {
+  font-size: 2.2rem;
+}
+
+.board .tagline {
+  font-size: 1.1rem;
+}
+
+.board__updated {
+  margin: 0;
+  color: var(--muted);
+  font-size: 0.9rem;
+}
+
+.board__tiles {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 18px;
+}
+
+.tile {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 22px 24px;
+  border-radius: var(--radius-lg);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  box-shadow: var(--shadow-sm);
+}
+
+.tile strong {
+  font-size: clamp(2.4rem, 5vw, 4.2rem);
+  font-weight: 800;
+  line-height: 1;
+  color: var(--accent);
+  font-variant-numeric: tabular-nums;
+}
+
+.tile span {
+  font-size: 1.1rem;
+  color: var(--muted);
+}
+
+.tile--lead {
+  grid-column: span 2;
+  background: linear-gradient(180deg, var(--accent-soft), var(--surface) 80%);
+}
+
+.tile--lead strong {
+  font-size: clamp(3rem, 7vw, 5.6rem);
+}
+
+.tile--answers strong {
+  color: var(--drive);
+}
+
+.tile .tile__detail {
+  font-size: 0.95rem;
+}
+
+.board__footer {
+  display: flex;
+  align-items: center;
+  gap: 24px;
+  font-size: 1.2rem;
+  color: var(--muted);
+}
+
+.board__qr img {
+  display: block;
+  width: 140px;
+  height: 140px;
+  border-radius: var(--radius);
+}
+
+@media (max-width: 900px) {
+  .board {
+    padding: 20px 16px;
+  }
+
+  .board__tiles {
+    grid-template-columns: repeat(2, 1fr);
+  }
+
+  .board__header {
+    flex-wrap: wrap;
+  }
 }
 
 /* ---- Phones: the map on top, the panel below */

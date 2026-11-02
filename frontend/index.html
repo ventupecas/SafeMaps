@@ -33,6 +33,7 @@
           <nav class="header-links" aria-label="About this app">
             <button id="about-open" class="chip chip--info" type="button" aria-haspopup="dialog">How it works</button>
             <button id="phone-open" class="chip chip--phone" type="button" aria-haspopup="dialog">Open on your phone</button>
+            <button id="lang" class="chip chip--lang" type="button" translate="no" lang="es">Español</button>
           </nav>
         </header>
 
@@ -66,7 +67,7 @@
           <p class="hint">
             Search for a place, or click the map: the first click sets the start, the next the destination. Right-click (or
             press and hold) to add a stop. Drag a pin to move it, click it to remove it; <strong>Undo</strong> on the map
-            takes a change back.
+            takes a change back. With the keyboard, Tab to the map: Enter puts a point at the cross in the middle, S a stop.
           </p>
           <details id="recent" class="recent" hidden>
             <summary>Recent trips</summary>
@@ -141,7 +142,14 @@
       </aside>
 
       <section class="map-wrap">
-        <div id="map" class="map" role="application" aria-label="Map"></div>
+        <div
+          id="map"
+          class="map"
+          role="application"
+          aria-label="Map. Arrow keys move it, plus and minus zoom. Enter puts the start, then the destination, at the middle; S adds a stop there; Control Z undoes."
+        ></div>
+        <div class="crosshair" aria-hidden="true"></div>
+        <p id="map-status" class="visually-hidden" role="status"></p>
         <p id="nav-banner" class="nav-banner" role="status" hidden></p>
         <p id="demo-banner" class="demo-banner" role="status" hidden></p>
         <button id="recenter" class="button recenter" type="button" hidden>Re-center</button>
@@ -178,6 +186,8 @@
             <li class="osm-only"><span class="key key--cluster">3</span>Several closures: zoom in</li>
             <li><span class="key key--turn"></span>Risky turn across traffic</li>
             <li><span class="key key--turn key--avoided"></span>Risky turn the recommended route avoids</li>
+            <li><span class="key spot spot--rail"></span>Railroad crossing (faded: one it avoids)</li>
+            <li><span class="key spot spot--school"></span>School zone at school times (faded: one it avoids)</li>
             <li id="legend-traffic" hidden><span class="key key--traffic"></span>Traffic: flowing → jammed</li>
             <li id="legend-buses" class="osm-only" hidden><span class="key key--buses"></span>Bus routes, each its own color</li>
           </ul>

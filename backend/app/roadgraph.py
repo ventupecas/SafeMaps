@@ -278,15 +278,25 @@ class RoadGraph:
 
     def rail_crossings_along(self, stretches: Iterable[Sequence[Point]]) -> int:
         """Railroad crossings at grade the given stretches of road pass (within RAIL_MATCH_M)."""
+        return len(self.rail_crossings_at(stretches))
+
+    def rail_crossings_at(self, stretches: Iterable[Sequence[Point]]) -> list[Point]:
+        """Where the given stretches of road cross railroad tracks at grade, for the map."""
         return self._points_along("rail", self.rail_crossing_points, stretches, RAIL_MATCH_M)
 
     def schools_along(self, stretches: Iterable[Sequence[Point]]) -> int:
         """Schools within SCHOOL_ZONE_M of the given stretches of road: the school zones they pass."""
+        return len(self.schools_at(stretches))
+
+    def schools_at(self, stretches: Iterable[Sequence[Point]]) -> list[Point]:
+        """The schools whose zones the given stretches of road pass, for the map."""
         return self._points_along("school", self.school_points, stretches, SCHOOL_ZONE_M)
 
-    def _points_along(self, kind: str, points: Sequence[Point], stretches: Iterable[Sequence[Point]], within_m: float) -> int:
+    def _points_along(
+        self, kind: str, points: Sequence[Point], stretches: Iterable[Sequence[Point]], within_m: float
+    ) -> list[Point]:
         if not points:
-            return 0
+            return []
         cell_deg = within_m / _M_PER_DEG_LAT
         cells = self._point_cells.get(kind)
         if cells is None:
@@ -306,7 +316,7 @@ class RoadGraph:
                         for point in cells.get((i, j), ()):
                             if point not in found and haversine_m(sample, point) <= within_m:
                                 found.add(point)
-        return len(found)
+        return sorted(found)
 
     def _signal_index(self) -> dict[tuple[int, int], list[int]]:
         if self._signal_cells is None:

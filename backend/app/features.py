@@ -216,9 +216,13 @@ def extract_features(route: Mapping[str, Any], context: TurnContext = TurnContex
         counter = getattr(context.junctions, method, None)
         return counter(street_stretches) if counter is not None else 0
 
+    def spots(method: str) -> tuple[LatLng, ...]:
+        finder = getattr(context.junctions, method, None)
+        return tuple(LatLng(lat=lat, lng=lng) for lat, lng in finder(street_stretches)) if finder is not None else ()
+
     signals = along("signals_along")
-    rail_crossings = along("rail_crossings_along")
-    school_zones = along("schools_along") if context.school_hours else 0
+    rail_points = spots("rail_crossings_at")
+    school_points = spots("schools_at") if context.school_hours else ()
     fuel_l = cruise_l + maneuvers * TURN_L + signals * SIGNAL_L + delay_s / 3600 * CONGESTION_L_PER_HOUR
     route_points = decode_polyline(route.get("polyline", {}).get("encodedPolyline", "")) if context.events else []
     closures, lane_closures, with_workers = count_on_route(route_points, context.events) if context.events else (0, 0, 0)
@@ -239,8 +243,10 @@ def extract_features(route: Mapping[str, Any], context: TurnContext = TurnContex
         closures=closures,
         lane_closures=lane_closures,
         lane_closures_with_workers=with_workers,
-        school_zones=school_zones,
-        rail_crossings=rail_crossings,
+        school_zones=len(school_points),
+        rail_crossings=len(rail_points),
+        rail_crossing_points=rail_points,
+        school_points=school_points,
         weather_hazards=weather_hazards,
         sun_glare_min=glare_s / 60,
     )

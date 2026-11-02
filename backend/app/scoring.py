@@ -60,11 +60,20 @@ def risk(route: ScoredRoute) -> float:
     return _risk_terms(route.breakdown)
 
 
+# The ScoreBreakdown terms that are risks: ranking, the safety score and its breakdown all count these.
+_RISK_TERMS = (
+    "busy_crossings",
+    "hotspot_crossings",
+    "lane_closures",
+    "school_zones",
+    "rail_crossings",
+    "weather_hazards",
+    "sun_glare",
+)
+
+
 def _risk_terms(b: ScoreBreakdown) -> float:
-    return (
-        b.busy_crossings + b.hotspot_crossings + b.lane_closures + b.school_zones + b.rail_crossings
-        + b.weather_hazards + b.sun_glare
-    )  # fmt: skip
+    return sum(getattr(b, term) for term in _RISK_TERMS)
 
 
 # The safety score weighs risks the same way for every profile (the default's
@@ -89,16 +98,7 @@ def safety_risks(features: RouteFeatures) -> dict[str, float]:
 
 def _safety_points(features: RouteFeatures) -> dict[str, float]:
     b = score_route(features, SAFETY_REFERENCE)
-    return {
-        "busy_crossings": b.busy_crossings,
-        "hotspot_crossings": b.hotspot_crossings,
-        "closures": CLOSURE_RISK * features.closures,
-        "lane_closures": b.lane_closures,
-        "school_zones": b.school_zones,
-        "rail_crossings": b.rail_crossings,
-        "weather_hazards": b.weather_hazards,
-        "sun_glare": b.sun_glare,
-    }
+    return {**{term: getattr(b, term) for term in _RISK_TERMS}, "closures": CLOSURE_RISK * features.closures}
 
 
 # How reasons name the risks, for the kinds any candidate has.

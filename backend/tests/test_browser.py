@@ -1,8 +1,9 @@
 """The web map in a real browser: clicks, drags, right-clicks and Undo, against the app on the test city.
 
 The app runs here on a free port with the synthetic grid graph (as in test_api)
-and the OpenStreetMap map, so no keys are needed. Map tiles are blocked and the
-place lookups answered with nothing; the map library itself comes from unpkg.
+and the OpenStreetMap map, so no keys are needed. The map library is served with
+the page; map tiles are blocked and the place lookups answered with nothing, so
+nothing leaves this computer.
 
 Needs Playwright and a browser (python -m playwright install chromium). Set
 ROUTES_TEST_BROWSER=msedge (or chrome) to use an installed browser instead.
@@ -60,12 +61,13 @@ def browser():
 
 @pytest.fixture
 def page(browser, site):
-    context = browser.new_context(viewport={"width": 1280, "height": 860})
+    # The offline copy (sw.js) would answer requests out of the routes' sight; it has a test of its own.
+    context = browser.new_context(viewport={"width": 1280, "height": 860}, service_workers="block")
     page = context.new_page()
 
     def network(route):
         host = route.request.url.split("/")[2]
-        if host.startswith("127.0.0.1") or host == "unpkg.com":
+        if host.startswith("127.0.0.1"):
             route.continue_()
         elif host == "photon.komoot.io":
             route.fulfill(json={"type": "FeatureCollection", "features": []})  # no names: the spot's coordinates show
@@ -83,6 +85,7 @@ def page(browser, site):
 def open_map(page, url):
     page.goto(url)
     page.wait_for_selector("#origin-search input")
+    page.evaluate("document.getElementById('legend').open = false")  # the map key, folded off the pins
 
 
 def center(page, selector):
@@ -183,3 +186,66 @@ def test_map_layers_are_remembered(page, site):
     page.reload()
     page.wait_for_selector("#origin-search input")
     assert page.locator('input[value="satellite"]').is_checked() and page.locator("#transit-layer").is_checked()
+
+
+def test_routes_for_a_trip_changed_while_they_were_on_their_way_are_dropped(page, site):
+    held = []
+    page.route("**/route", lambda route: held.append(route))  # answered only after the trip changes
+    open_map(page, site + TRIP)
+    for _ in range(100):
+        if held:
+            break
+        page.wait_for_timeout(100)
+    page.mouse.click(*center(page, ".map-pin--origin"))  # a pin taken off (at this zoom, A and B overlap)
+    held[0].continue_()
+    page.wait_for_timeout(1500)
+    assert sum(pins(page)) == 1
+    assert page.locator(".route").count() == 0 and page.locator("#results .status--error").count() == 0
+    assert page.locator("#find").text_content() == "Find route"
+
+
+def test_the_page_opens_without_the_network_once_it_has_been_seen(browser, site):
+    context = browser.new_context()
+    context.route("**/*", lambda route: route.continue_() if "127.0.0.1" in route.request.url else route.abort())
+    page = context.new_page()
+    open_map(page, site)
+    page.evaluate("navigator.serviceWorker.ready")  # its copy of the page is kept by now
+    context.set_offline(True)
+    page.reload()
+    page.wait_for_selector("#origin-search input")  # the map library and the server's settings came from the copy
+    assert page.locator(".leaflet-container").count() == 1
+    context.close()
+
+
+def test_points_can_be_placed_from_the_keyboard(page, site):
+    open_map(page, site + TRIP)
+    wait_for_routes(page)
+    page.click("#clear")
+    page.focus("#map")
+    page.keyboard.press("Enter")  # the start, in the middle
+    page.keyboard.press("ArrowRight")  # the map moves
+    page.wait_for_timeout(400)
+    page.keyboard.press("Enter")  # the destination
+    assert pins(page) == [1, 1, 0] and page.locator("#map-status").text_content() == "Destination set."
+    page.keyboard.press("ArrowUp")
+    page.wait_for_timeout(400)
+    page.keyboard.press("s")
+    assert pins(page) == [1, 1, 1] and page.locator("#map-status").text_content() == "Stop 1 added."
+    page.keyboard.press("Control+z")
+    assert pins(page) == [1, 1, 0]
+
+
+def test_the_page_in_spanish_and_back_to_english_with_the_trip_kept(browser, site):
+    context = browser.new_context(locale="es-US", service_workers="block")
+    context.route("**/*", lambda route: route.continue_() if "127.0.0.1" in route.request.url else route.abort())
+    page = context.new_page()
+    open_map(page, site + TRIP)
+    wait_for_routes(page)
+    assert page.locator("html").get_attribute("lang") == "es"
+    assert page.locator("#find").text_content() == "Buscar ruta" and page.locator(".winner__badge").text_content() == "Recomendada"
+    assert page.locator("#origin-search input").get_attribute("placeholder") == "¿Desde dónde?"
+    with page.expect_navigation():
+        page.click("#lang")  # English, the same trip
+    page.wait_for_selector(".route")
+    assert page.locator("#find").text_content() == "Find route" and page.locator("#lang").text_content() == "Español"
+    context.close()

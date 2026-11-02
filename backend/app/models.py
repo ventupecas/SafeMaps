@@ -165,6 +165,8 @@ class RouteFeatures(BaseModel):
     lane_closures_with_workers: int = Field(0, description="Of those, how many have workers on site now.")
     school_zones: int = Field(0, description="Schools the route passes within their school zone, during school hours.")
     rail_crossings: int = Field(0, description="Railroad crossings at grade the route drives over.")
+    rail_crossing_points: tuple[LatLng, ...] = Field((), description="Where those railroad crossings are.")
+    school_points: tuple[LatLng, ...] = Field((), description="The schools whose zones count (school_zones).")
     weather_hazards: int = Field(0, description="Stretches with a reported weather hazard (fog, ice, flooding) driven through.")
     sun_glare_min: float = Field(0.0, description="Minutes driven toward a low sun, at the trip's departure time.")
 

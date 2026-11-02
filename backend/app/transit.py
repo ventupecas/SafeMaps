@@ -6,8 +6,9 @@ hands the page each route's line. A route is drawn by its most-run shape in each
 direction, simplified to within SIMPLIFY_M: about 100 lines for the county.
 
 The feed is about 9 MB, so it's fetched at most once a REFRESH and the lines kept
-in the cache folder: a restart reads them back instead of fetching again. When
-the feed can't be fetched, the last lines saved are served, however old.
+in the cache folder: a restart reads them back instead of fetching again. Old
+lines are served while new ones are fetched in the background, and stay when the
+feed can't be fetched. Only the very first fetch, with nothing saved, is waited for.
 """
 
 from __future__ import annotations
@@ -24,7 +25,7 @@ from collections.abc import Callable, Iterator
 from dataclasses import asdict, dataclass
 from datetime import timedelta
 from pathlib import Path
-from threading import Lock
+from threading import Event, Lock, Thread
 
 import httpx
 
@@ -32,8 +33,6 @@ from app.geo import encode_polyline, simplify
 
 logger = logging.getLogger(__name__)
 
-MCTS_GTFS_URL = "https://kamino.mcts.org/gtfs/google_transit.zip"
-ATTRIBUTION = "Bus routes: Milwaukee County Transit System"
 REFRESH = timedelta(days=7)
 RETRY = timedelta(minutes=10)  # after a failed fetch with nothing saved
 SIMPLIFY_M = 6.0
@@ -87,6 +86,15 @@ def read_gtfs(data: bytes) -> list[BusRoute]:
     return sorted(found, key=lambda route: _number_order(route.name))
 
 
+def read_agency(data: bytes) -> str | None:
+    """Who runs the buses in a GTFS feed (agency.txt), to credit on the map."""
+    with zipfile.ZipFile(io.BytesIO(data)) as feed:
+        if "agency.txt" not in feed.namelist():
+            return None
+        names = [row.get("agency_name", "").strip() for row in _rows(feed, "agency.txt")]
+    return " and ".join(name for name in names if name) or None
+
+
 def _rows(feed: zipfile.ZipFile, name: str) -> Iterator[dict[str, str]]:
     with feed.open(name) as raw:
         yield from csv.DictReader(io.TextIOWrapper(raw, encoding="utf-8-sig"))
@@ -109,43 +117,70 @@ class BusRoutes:
         self._saved = saved
         self._clock = clock
         self._routes: list[BusRoute] | None = None
+        self._agency: str | None = None
         self._checked_at = float("-inf")
-        self._lock = Lock()  # one fetch at a time: the feed is large
+        self._refreshing = False
+        self._fetched = Event()  # set whenever no fetch is under way
+        self._fetched.set()
+        self._lock = Lock()
+
+    @property
+    def attribution(self) -> str:
+        return f"Bus routes: {self._agency or 'the transit agency'}"
 
     def routes(self) -> list[BusRoute]:
         with self._lock:
-            now = self._clock()
-            if self._routes is not None and now - self._checked_at < REFRESH.total_seconds():
-                return self._routes
-            if self._routes is None and self._saved.exists() and now - self._saved.stat().st_mtime < REFRESH.total_seconds():
-                self._routes, self._checked_at = self._read_saved(), self._saved.stat().st_mtime
-                if self._routes:
-                    return self._routes
-            try:
-                response = self._http.get(self._url, timeout=60.0, follow_redirects=True)
-                response.raise_for_status()
-                routes = read_gtfs(response.content)
-            except (httpx.HTTPError, zipfile.BadZipFile, KeyError, ValueError) as exc:
-                logger.warning("Bus routes unavailable: %s", type(exc).__name__)
-                self._routes = self._routes or self._read_saved()
-                # Nothing at all: try again soon. Old lines: keep them a while before trying again.
-                self._checked_at = now - REFRESH.total_seconds() + RETRY.total_seconds()
-                return self._routes
-            self._routes, self._checked_at = routes, now
-            self._save(routes)
-            logger.info("Bus routes: %d from %s", len(routes), self._url)
-            return routes
+            if self._routes is None:
+                self._read_saved()
+            first_fetch_under_way = self._refreshing and not self._routes
+            if not first_fetch_under_way and (self._refreshing or self._clock() - self._checked_at < REFRESH.total_seconds()):
+                return self._routes or []
+            if not first_fetch_under_way:
+                self._refreshing = True
+                self._fetched.clear()
+            waiting = not self._routes
+        if first_fetch_under_way:
+            self._fetched.wait(timeout=90)  # the first fetch, started by another request: wait for it too
+        elif waiting:
+            self._refresh()  # nothing to show yet: this request waits for the feed
+        else:
+            Thread(target=self._refresh, name="bus-routes-refresh", daemon=True).start()
+        return self._routes or []
 
-    def _read_saved(self) -> list[BusRoute]:
+    def _refresh(self) -> None:
         try:
-            rows = json.loads(self._saved.read_text(encoding="utf-8"))
-            return [BusRoute(**{**row, "paths": tuple(row["paths"])}) for row in rows]
-        except (OSError, ValueError, TypeError, KeyError):
-            return []
+            response = self._http.get(self._url, timeout=60.0, follow_redirects=True)
+            response.raise_for_status()
+            routes, agency = read_gtfs(response.content), read_agency(response.content)
+        except (httpx.HTTPError, zipfile.BadZipFile, KeyError, ValueError) as exc:
+            logger.warning("Bus routes unavailable: %s", type(exc).__name__)
+            with self._lock:
+                # Try again after RETRY, keeping whatever lines there are meanwhile.
+                self._checked_at = self._clock() - REFRESH.total_seconds() + RETRY.total_seconds()
+                self._refreshing = False
+            self._fetched.set()
+            return
+        self._save(routes, agency)
+        with self._lock:
+            self._routes, self._agency, self._checked_at, self._refreshing = routes, agency, self._clock(), False
+        self._fetched.set()
+        logger.info("Bus routes: %d from %s", len(routes), self._url)
 
-    def _save(self, routes: list[BusRoute]) -> None:
+    def _read_saved(self) -> None:
+        """The lines saved last time, as fresh as the file: none (and due now) without one."""
+        self._routes = []
+        try:
+            saved = json.loads(self._saved.read_text(encoding="utf-8"))
+            self._routes = [BusRoute(**{**row, "paths": tuple(row["paths"])}) for row in saved["routes"]]
+            self._agency = saved.get("agency")
+            self._checked_at = self._saved.stat().st_mtime
+        except (OSError, ValueError, TypeError, KeyError, AttributeError):
+            self._routes = []
+
+    def _save(self, routes: list[BusRoute], agency: str | None) -> None:
         try:
             self._saved.parent.mkdir(parents=True, exist_ok=True)
-            self._saved.write_text(json.dumps([asdict(route) for route in routes]), encoding="utf-8")
+            data = {"agency": agency, "routes": [asdict(route) for route in routes]}
+            self._saved.write_text(json.dumps(data), encoding="utf-8")
         except OSError as exc:
             logger.warning("Bus routes not saved: %s", exc)

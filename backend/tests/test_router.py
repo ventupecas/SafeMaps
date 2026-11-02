@@ -266,3 +266,4 @@ def test_school_zones_cost_more_only_during_school_hours():
     assert drop_off > after_school + FASTEST.school_zone_weight - 0.01
     features = extract_features(router.to_route_json(path), TurnContext(junctions=graph, school_hours=True))
     assert features.school_zones == 1
+    assert [(p.lat, p.lng) for p in features.school_points] == graph.school_points  # where, for the map

@@ -1,0 +1,45 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Booth Stats</title>
+    <meta name="theme-color" content="#0b7a53" />
+    <link rel="icon" href="icons/icon.svg" type="image/svg+xml" />
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body class="stats-page">
+    <main class="board">
+      <header class="board__header">
+        <div class="brand">
+          <img class="brand__mark" src="icons/icon.svg" alt="" />
+          <div>
+            <h1>Safe Route Planner</h1>
+            <p class="tagline" id="board-day">Today at the booth</p>
+          </div>
+        </div>
+        <p class="board__updated" id="board-updated" aria-live="polite"></p>
+      </header>
+
+      <section class="board__tiles" aria-label="Today's numbers">
+        <div class="tile tile--lead"><strong id="stat-trips">–</strong><span>trips planned today</span></div>
+        <div class="tile tile--lead"><strong id="stat-safer">–</strong><span id="stat-safer-label">got a safer route than the standard one</span></div>
+        <div class="tile"><strong id="stat-turns">–</strong><span>risky turns across traffic avoided</span></div>
+        <div class="tile"><strong id="stat-rail">–</strong><span>railroad crossings avoided</span></div>
+        <div class="tile"><strong id="stat-schools">–</strong><span>school zones avoided at school times</span></div>
+        <div class="tile"><strong id="stat-closures">–</strong><span>closed roads avoided</span></div>
+        <div class="tile"><strong id="stat-gain">–</strong><span>points safer, on average, when the route changed</span></div>
+        <div class="tile tile--answers">
+          <strong id="stat-yes">–</strong><span>said they'd take the safer route</span>
+          <span class="tile__detail" id="stat-answers"></span>
+        </div>
+      </section>
+
+      <footer class="board__footer">
+        <div id="board-qr" class="board__qr"></div>
+        <p>Plan a trip on the screen next to this one, or on your phone. Each route avoids the risks it can.</p>
+      </footer>
+    </main>
+    <script src="stats.js" type="module"></script>
+  </body>
+</html>
