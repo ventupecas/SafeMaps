@@ -32,6 +32,8 @@
   --icon-info: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2.2' stroke-linecap='round'%3E%3Ccircle cx='12' cy='12' r='9.5'/%3E%3Cpath d='M12 11v6'/%3E%3Ccircle cx='12' cy='7.5' r='1.2' fill='black' stroke='none'/%3E%3C/svg%3E");
   --icon-phone: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2.2' stroke-linecap='round'%3E%3Crect x='6' y='2.5' width='12' height='19' rx='3'/%3E%3Cpath d='M11 18h2'/%3E%3C/svg%3E");
   --icon-shield: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2.2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M12 2.5 4.5 5.5v6c0 4.6 3.2 8.4 7.5 10 4.3-1.6 7.5-5.4 7.5-10v-6z'/%3E%3Cpath d='m8.8 12 2.2 2.2 4.3-4.4'/%3E%3C/svg%3E");
+  --icon-undo: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2.4' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M9 14 4 9l5-5'/%3E%3Cpath d='M4 9h10.5a5.5 5.5 0 0 1 0 11H11'/%3E%3C/svg%3E");
+  --icon-layers: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2.2' stroke-linejoin='round'%3E%3Cpath d='m12 3 9 5-9 5-9-5z'/%3E%3Cpath d='m3 13 9 5 9-5'/%3E%3C/svg%3E");
   --icon-plus: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2.6' stroke-linecap='round'%3E%3Cpath d='M12 5v14M5 12h14'/%3E%3C/svg%3E");
   --icon-clock: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2.2' stroke-linecap='round'%3E%3Ccircle cx='12' cy='12' r='9.5'/%3E%3Cpath d='M12 7v5l3 2'/%3E%3C/svg%3E");
   --icon-thumb: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2.1' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M7 10v11H3V10zM7 10l4-7c1.7 0 2.8 1.4 2.4 3L12.8 10H19a2 2 0 0 1 2 2.3l-1.2 7A2 2 0 0 1 17.8 21H7'/%3E%3C/svg%3E");
@@ -415,7 +417,8 @@ select:focus-visible,
 
 .button--primary::before,
 .button--drive::before,
-.recenter::before {
+.recenter::before,
+.undo::before {
   content: "";
 }
 
@@ -568,7 +571,8 @@ summary:focus-visible {
 }
 
 .advanced summary,
-.legend summary {
+.legend summary,
+.layers summary {
   display: flex;
   align-items: center;
   gap: 6px;
@@ -577,7 +581,8 @@ summary:focus-visible {
 }
 
 .advanced summary::-webkit-details-marker,
-.legend summary::-webkit-details-marker {
+.legend summary::-webkit-details-marker,
+.layers summary::-webkit-details-marker {
   display: none;
 }
 
@@ -588,7 +593,8 @@ summary:focus-visible {
 }
 
 .advanced summary::after,
-.legend summary::after {
+.legend summary::after,
+.layers summary::after {
   content: "";
   width: 16px;
   height: 16px;
@@ -597,7 +603,8 @@ summary:focus-visible {
 }
 
 .advanced[open] summary::after,
-.legend[open] summary::after {
+.legend[open] summary::after,
+.layers[open] summary::after {
   transform: rotate(180deg);
 }
 
@@ -1054,8 +1061,10 @@ summary:focus-visible {
 
 /* Floating cards over the map: white, slightly see-through, softly shadowed. */
 .legend,
+.layers,
 .nav-banner,
 .recenter,
+.undo,
 .credit {
   backdrop-filter: blur(8px);
   -webkit-backdrop-filter: blur(8px);
@@ -1160,6 +1169,34 @@ summary:focus-visible {
   background: rgba(255, 255, 255, 0.94);
   color: var(--drive);
   box-shadow: var(--shadow);
+}
+
+/* Takes back the last map click or removed pin. */
+.undo {
+  --icon: var(--icon-undo);
+  position: absolute;
+  z-index: 1000;
+  left: 50%;
+  bottom: 40px;
+  transform: translateX(-50%);
+  min-height: 42px;
+  border: none;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.94);
+  box-shadow: var(--shadow);
+}
+
+.undo:active:not(:disabled) {
+  transform: translateX(-50%) translateY(1px);
+}
+
+.driving .undo {
+  display: none;
+}
+
+/* Pins come off the map with a click. */
+.map-pin {
+  cursor: pointer;
 }
 
 .car {
@@ -1346,6 +1383,103 @@ summary:focus-visible {
 
 .driving .legend {
   display: none; /* the banner and the road come first while driving */
+}
+
+/* Map layers: the map's look, and what to show over it. Top left, clear of Leaflet's zoom buttons. */
+
+.layers {
+  position: absolute;
+  top: 14px;
+  left: 14px;
+  z-index: 1000;
+  max-width: calc(100% - 80px);
+  padding: 8px 12px;
+  border-radius: var(--radius);
+  background: rgba(255, 255, 255, 0.92);
+  box-shadow: var(--shadow);
+  font-size: 0.8rem;
+}
+
+.map-osm .layers {
+  left: 58px;
+}
+
+.layers summary {
+  font-weight: 650;
+}
+
+.layers summary::before {
+  content: "";
+  width: 15px;
+  height: 15px;
+  background: currentColor;
+  mask: var(--icon-layers) center / contain no-repeat;
+  -webkit-mask: var(--icon-layers) center / contain no-repeat;
+}
+
+.layers__body {
+  display: grid;
+  gap: 10px;
+  margin: 8px 0 2px;
+  padding-top: 8px;
+  border-top: 1px solid var(--border);
+}
+
+.layers__base {
+  display: flex;
+  margin: 0;
+  padding: 2px;
+  border: none;
+  border-radius: 999px;
+  background: var(--surface-2);
+}
+
+.layers__base legend {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+}
+
+.layers__base label {
+  position: relative;
+  flex: 1;
+  cursor: pointer;
+}
+
+.layers__base input {
+  position: absolute;
+  opacity: 0;
+}
+
+.layers__base span {
+  display: block;
+  padding: 5px 10px;
+  border-radius: 999px;
+  text-align: center;
+  font-weight: 600;
+  color: var(--muted);
+}
+
+.layers__base input:checked + span {
+  background: var(--surface);
+  color: var(--text);
+  box-shadow: var(--shadow-sm);
+}
+
+.layers__base input:focus-visible + span {
+  outline: 3px solid var(--focus);
+  outline-offset: 1px;
+}
+
+.layers__details {
+  display: grid;
+  gap: 8px;
+}
+
+.layers .switch {
+  font-size: 0.82rem;
 }
 
 /* Credits that only apply to the OpenStreetMap map (TomTom's traffic). */

@@ -6,12 +6,15 @@
 //   await view.load()                     load the library
 //   await view.create(element, options)   { center, zoom, onClick(point), onDragStart() }
 //   view.line(points, style)              { color, weight, opacity, dashed } -> { front(on), remove() }
-//   view.marker(point, element, options)  { title, zIndex, popup } -> { move(point), remove() }
+//   view.marker(point, element, options)  { title, zIndex, popup, onClick } -> { move(point), remove() }
 //                                         popup: { heading, text }, opened by a click or tap
+//                                         onClick: called on a click or tap instead (no popup)
 //   view.markerGroup()                    -> { add(point, element, options), show(on), clear() }
 //                                         markers that cluster into a count where crowded (OpenStreetMap)
 //   view.fit(points), view.panTo(point), view.setZoom(zoom)
 //   view.traffic(on), view.hasTraffic     a traffic layer, when the map has one
+//   view.baseMap(kind)                    "roadmap", "satellite" or "terrain"
+//   view.transit(on), view.biking(on)     transit lines, bike lanes and trails over the map
 //   await view.search(container, placeholder, onPick(place))   place search in a box
 //
 // Points are { lat, lng }. Google's terms don't allow its results on another
@@ -24,6 +27,35 @@ const CLUSTER_RADIUS_PX = 40; // markers closer than this on screen share one co
 const OSM_TILES = "https://tile.openstreetmap.org/{z}/{x}/{y}.png";
 const OSM_CREDIT = '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors';
 const TOMTOM_CREDIT = 'Traffic &copy; <a href="https://www.tomtom.com">TomTom</a>';
+// The OpenStreetMap map's other looks, all free with credit. maxNativeZoom: past it, tiles are enlarged.
+const OSM_BASE_MAPS = {
+  roadmap: { url: OSM_TILES, maxNativeZoom: 19, attribution: OSM_CREDIT },
+  satellite: {
+    url: "https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}",
+    maxNativeZoom: 18,
+    attribution: "Imagery &copy; Esri, Maxar, Earthstar Geographics",
+  },
+  terrain: {
+    url: "https://{s}.tile.opentopomap.org/{z}/{x}/{y}.png",
+    maxNativeZoom: 17,
+    attribution: `${OSM_CREDIT}, SRTM · Style &copy; <a href="https://opentopomap.org">OpenTopoMap</a> (CC-BY-SA)`,
+  },
+};
+// Transparent layers over it. OpenStreetMap has no free bus layer, so transit shows rail: trains, streetcar, light rail.
+const OSM_OVERLAYS = {
+  transit: {
+    url: "https://{s}.tiles.openrailwaymap.org/standard/{z}/{x}/{y}.png",
+    attribution: 'Rail &copy; <a href="https://www.openrailwaymap.org">OpenRailwayMap</a>',
+  },
+  biking: {
+    url: "https://{s}.tile-cyclosm.openstreetmap.fr/cyclosm-lite/{z}/{x}/{y}.png",
+    attribution: 'Bike lanes &copy; <a href="https://www.cyclosm.org">CyclOSM</a>',
+  },
+};
+// Tile layers stack by zIndex: the base map, then transit and bike lanes, then traffic on top.
+const Z_BASE = 0;
+const Z_OVERLAY = 2;
+const Z_TRAFFIC = 3;
 const PHOTON = "https://photon.komoot.io/api/";
 const SEARCH_BIAS = { lat: 43.0389, lng: -87.9065 }; // prefer places around Milwaukee
 
@@ -73,6 +105,8 @@ class GoogleView {
       fullscreenControl: false,
     });
     this.trafficLayer = new google.maps.TrafficLayer();
+    this.transitLayer = new google.maps.TransitLayer();
+    this.bikingLayer = new google.maps.BicyclingLayer();
     ({ AdvancedMarkerElement: this.Marker } = await google.maps.importLibrary("marker"));
     this.map.addListener("click", (event) => onClick({ lat: event.latLng.lat(), lng: event.latLng.lng() }));
     this.map.addListener("dragstart", onDragStart);
@@ -92,9 +126,11 @@ class GoogleView {
     };
   }
 
-  marker(point, element, { title = "", zIndex, popup = null } = {}) {
-    const marker = new this.Marker({ map: this.map, position: point, content: element, title, zIndex, gmpClickable: Boolean(popup) });
-    if (popup) {
+  marker(point, element, { title = "", zIndex, popup = null, onClick = null } = {}) {
+    const marker = new this.Marker({ map: this.map, position: point, content: element, title, zIndex, gmpClickable: Boolean(popup || onClick) });
+    if (onClick) {
+      marker.addListener("click", onClick);
+    } else if (popup) {
       marker.addListener("click", () => {
         this.info ||= new google.maps.InfoWindow();
         this.info.setContent(popupContent(popup));
@@ -151,6 +187,19 @@ class GoogleView {
     this.trafficLayer.setMap(on ? this.map : null);
   }
 
+  // Satellite comes with street names on it (Google's "hybrid").
+  baseMap(kind) {
+    this.map.setMapTypeId({ satellite: "hybrid", terrain: "terrain" }[kind] || "roadmap");
+  }
+
+  transit(on) {
+    this.transitLayer.setMap(on ? this.map : null);
+  }
+
+  biking(on) {
+    this.bikingLayer.setMap(on ? this.map : null);
+  }
+
   async search(container, placeholder, onPick) {
     try {
       const { PlaceAutocompleteElement } = await google.maps.importLibrary("places");
@@ -193,6 +242,8 @@ class OsmView {
     this.trafficTiles = trafficTiles;
     this.hasTraffic = Boolean(trafficTiles);
     this.trafficLayer = null;
+    this.base = null;
+    this.overlays = {};
   }
 
   async load() {
@@ -213,7 +264,7 @@ class OsmView {
 
   async create(element, { center, zoom, onClick, onDragStart }) {
     this.map = L.map(element, { zoomControl: true }).setView([center.lat, center.lng], zoom);
-    L.tileLayer(OSM_TILES, { maxZoom: 19, attribution: OSM_CREDIT }).addTo(this.map);
+    this.baseMap("roadmap");
     this.map.on("click", (event) => onClick({ lat: event.latlng.lat, lng: event.latlng.lng }));
     this.map.on("dragstart", onDragStart);
   }
@@ -228,7 +279,7 @@ class OsmView {
   }
 
   // layer: a marker group's layer to add it to, instead of the map.
-  marker(point, element, { title = "", zIndex = 0, popup = null, layer = null } = {}) {
+  marker(point, element, { title = "", zIndex = 0, popup = null, onClick = null, layer = null } = {}) {
     // Anchored at the bottom middle, like Google's markers, so the same styles fit both.
     const anchor = document.createElement("div");
     anchor.className = "lf-anchor";
@@ -237,10 +288,12 @@ class OsmView {
       icon: L.divIcon({ html: anchor, className: "lf-icon", iconSize: [0, 0] }),
       title,
       zIndexOffset: zIndex * 100,
-      interactive: Boolean(title || popup),
-      keyboard: Boolean(popup),
+      interactive: Boolean(title || popup || onClick),
+      keyboard: Boolean(popup || onClick),
     });
-    if (popup) marker.bindPopup(popupContent(popup), { offset: [0, -6] });
+    // A marker's click doesn't reach the map, so it never counts as a map click too.
+    if (onClick) marker.on("click", onClick);
+    else if (popup) marker.bindPopup(popupContent(popup), { offset: [0, -6] });
     marker.addTo(layer || this.map);
     return {
       move: (to) => marker.setLatLng([to.lat, to.lng]),
@@ -282,9 +335,30 @@ class OsmView {
   // TomTom's traffic map over the streets: green, orange and red by speed. Routes stay on top.
   traffic(on) {
     if (!this.trafficTiles) return;
-    this.trafficLayer ||= L.tileLayer(this.trafficTiles, { maxZoom: 19, opacity: 0.85, attribution: TOMTOM_CREDIT });
+    this.trafficLayer ||= L.tileLayer(this.trafficTiles, { maxZoom: 19, opacity: 0.85, zIndex: Z_TRAFFIC, attribution: TOMTOM_CREDIT });
     if (on) this.trafficLayer.addTo(this.map);
     else this.trafficLayer.remove();
+  }
+
+  baseMap(kind) {
+    const { url, ...options } = OSM_BASE_MAPS[kind] || OSM_BASE_MAPS.roadmap;
+    if (this.base) this.base.remove();
+    this.base = L.tileLayer(url, { maxZoom: 19, zIndex: Z_BASE, ...options }).addTo(this.map);
+  }
+
+  transit(on) {
+    this.overlay("transit", on);
+  }
+
+  biking(on) {
+    this.overlay("biking", on);
+  }
+
+  overlay(name, on) {
+    const { url, attribution } = OSM_OVERLAYS[name];
+    this.overlays[name] ||= L.tileLayer(url, { maxZoom: 19, zIndex: Z_OVERLAY, attribution });
+    if (on) this.overlays[name].addTo(this.map);
+    else this.overlays[name].remove();
   }
 
   // Place search through Photon, built on OpenStreetMap data (free, fair use). Arrow keys move

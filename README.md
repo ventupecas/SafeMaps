@@ -128,7 +128,7 @@ Until then, the page shows these steps in place of the map. On the page:
   - **Place search** uses [Photon](https://photon.komoot.io), which is built on OpenStreetMap data.
   - **Our router designs every route.** The "standard route" to compare with is its fastest one.
   - **Live traffic comes from TomTom and Wisconsin 511 instead** (with `TOMTOM_API_KEY` and `WI511_API_KEY`): see "TomTom: traffic on every street" and "511 travel times" below. Google's Live traffic toggle is hidden.
-  - **Show traffic** shows TomTom's traffic map: every street colored green to red by speed, credited "Traffic © TomTom". Without a TomTom key it draws the 511 slowdowns instead.
+  - The **Traffic** map layer shows TomTom's traffic map: every street colored green to red by speed, credited "Traffic © TomTom". Without a TomTom key it draws the 511 slowdowns instead.
   - **Still on:** work zones, 511, crash data, school zones and rail crossings.
   - **Keys:** neither Google key is needed, any port works, and the page credits "© OpenStreetMap contributors".
 
@@ -271,7 +271,7 @@ What each kind of event does:
 - **Which segments count:** one taking 1.25× its normal time or more is slow, and 2× or more is jammed. Slowdowns are capped at 6×, since higher readings tend to be a detour sign's time rather than traffic.
 - **Router:** it slows each segment by its measured factor, so designs go around jams.
 - **Trip times:** routes not priced with Google's live traffic (the OpenStreetMap map, or Live traffic off) get the measured delay for the share of each slow segment they drive, and the fuel it burns. TomTom's jams add their delay the same way.
-- **Map:** each segment is matched to the road through its waypoints, one to the next. Segments no road matches are left out (about 1 in 5), and the rest draw orange (slow) or red (jammed) under **Show traffic** on the OpenStreetMap map, when there's no TomTom key.
+- **Map:** each segment is matched to the road through its waypoints, one to the next. Segments no road matches are left out (about 1 in 5), and the rest draw orange (slow) or red (jammed) under the **Traffic** map layer on the OpenStreetMap map, when there's no TomTom key.
 - **With TomTom:** TomTom's jams cover the same freeways and every street besides, so the travel times are left out and 511 gives its closures and incidents only.
 
 **TomTom: traffic on every street.** 511's travel times cover freeways and main highways only. TomTom's traffic incidents cover city streets too. On a weekday afternoon in October 2026 they listed 368 incidents in the metro, 312 of them on streets without a highway number.
@@ -283,7 +283,7 @@ What each kind of event does:
   - **One source of traffic:** with TomTom, 511's travel times are left out, so a jam isn't counted twice.
 
   On that afternoon: 368 incidents, 293 events after the first two rules, 265 on our map, and 29 more already reported by the work zone feed.
-- **Traffic map:** with `ROUTES_MAP=osm`, **Show traffic** shows TomTom's traffic tiles. The page asks this server for them (`/traffic-tiles/{z}/{x}/{y}.png`), which fetches each from TomTom with the key and keeps it for 3 minutes for everyone looking at that spot. At most `ROUTES_TOMTOM_DAILY_TILES` (6,000) are fetched a day; a map view takes about 20. With an access code set, the tiles need it too.
+- **Traffic map:** with `ROUTES_MAP=osm`, the **Traffic** map layer shows TomTom's traffic tiles. The page asks this server for them (`/traffic-tiles/{z}/{x}/{y}.png`), which fetches each from TomTom with the key and keeps it for 3 minutes for everyone looking at that spot. At most `ROUTES_TOMTOM_DAILY_TILES` (6,000) are fetched a day; a map view takes about 20. With an access code set, the tiles need it too.
 - **Usage:** `/health` shows `tomtom_requests_today` and `tomtom_tiles_today`. The daily caps keep a month inside the free plan: 80 × 31 = 2,480 requests, 6,000 × 31 = 186,000 tiles. The last answer is also kept in `.cache/routes/tomtom-incidents.json`, so a server restarted within 10 minutes (with `--reload`, every saved code change restarts it) uses it instead of asking again.
 
 **Getting the TomTom key:**

@@ -80,6 +80,7 @@ const state = {
   origin: null, // { lat, lng, label, countryCode }
   destination: null,
   pins: { origin: null, destination: null },
+  undo: [], // changes made on the map (clicks, pins clicked away), newest last: { kind, before }
   stops: [], // places to stop at on the way: { id, point, pin }, in order
   nextStopId: 1,
   fuelPrice: 3.25, // US dollars a gallon (the server's ROUTES_FUEL_PRICE)
@@ -90,7 +91,7 @@ const state = {
   closureLines: [], // ...drawn, when "Show closures" is on
   closureMarkers: null, // their markers, a group that clusters where crowded
   trafficEvents: [], // slow and jammed stretches (511 travel times, TomTom's jams) from the last trip
-  trafficShapes: [], // ...drawn, when "Show traffic" is on and the map has no traffic layer of its own
+  trafficShapes: [], // ...drawn, when the Traffic layer is on and the map has no traffic layer of its own
   plan: null, // the last plan from the server
   paths: {}, // route id -> { points: [{ lat, lng }], cumulative: [m], lengthM, minutes, label }
   activeRouteId: null, // the route being followed: the winner, or one the driver picked
@@ -159,7 +160,7 @@ async function boot() {
 function useOsmControls() {
   $("live-traffic").checked = false;
   $("live-traffic").closest("label").hidden = true;
-  // "Show traffic" shows TomTom's traffic map, or without it draws the measured slowdowns.
+  // The Traffic layer shows TomTom's traffic map, or without it draws the measured slowdowns.
   $("traffic-layer").checked = false;
   for (const source of ["google", "apify"]) $("road-events").querySelector(`option[value="${source}"]`).remove();
 }
@@ -176,11 +177,10 @@ async function initMap() {
     center: MILWAUKEE,
     zoom: 11,
     onClick: (point) => {
-      if (state.nav.active) return; // no accidental trip changes while driving
-      if (Date.now() - (state.demo.stoppedAt || 0) < 800) return; // that touch was to stop the demo
+      if (!mapTouchAllowed()) return;
       // First click sets the start; after that, clicks move the destination.
       const kind = state.origin ? "destination" : "origin";
-      setPoint(kind, { ...point, label: null, countryCode: null });
+      changeOnMap(kind, { ...point, label: null, countryCode: null });
     },
     onDragStart: () => {
       if (!state.nav.active) return;
@@ -202,7 +202,9 @@ async function initMap() {
 
 // fromSearch: picked in the search box, which already shows its name. A map click or a
 // location is spelled out under the box instead, and clears the box (on the OpenStreetMap map).
-async function setPoint(kind, point, { fromSearch = false } = {}) {
+// onMap: a change "Undo" can take back; any other change to the point forgets those.
+async function setPoint(kind, point, { fromSearch = false, onMap = false } = {}) {
+  if (!onMap) forgetUndo(kind);
   state[kind] = point;
   $(`${kind}-picked`).textContent = fromSearch ? "" : point.label || `${point.lat.toFixed(5)}, ${point.lng.toFixed(5)}`;
   const box = $(`${kind}-search`).querySelector("input");
@@ -211,10 +213,65 @@ async function setPoint(kind, point, { fromSearch = false } = {}) {
   updateFindButton();
 }
 
+// The start or destination taken off the map. Routes drawn to it go too.
+function clearPoint(kind, { onMap = false } = {}) {
+  if (!onMap) forgetUndo(kind);
+  state[kind] = null;
+  if (state.pins[kind]) state.pins[kind].remove();
+  state.pins[kind] = null;
+  $(`${kind}-picked`).textContent = "";
+  const box = $(`${kind}-search`).querySelector("input");
+  if (box) box.value = "";
+  if (state.plan) clearTrip();
+  updateFindButton();
+}
+
+// Clicking a pin removes it.
 function placePin(kind, point) {
   if (state.pins[kind]) state.pins[kind].remove();
   const pin = element("div", { className: `map-pin map-pin--${kind}` }, element("span", {}, kind === "origin" ? "A" : "B"));
-  state.pins[kind] = state.view.marker(point, pin, { title: kind === "origin" ? "Start" : "Destination" });
+  state.pins[kind] = state.view.marker(point, pin, {
+    title: `${kind === "origin" ? "Start" : "Destination"}: click to remove`,
+    onClick: () => mapTouchAllowed() && changeOnMap(kind, null),
+  });
+}
+
+// No accidental trip changes while driving, or from the touch that stopped the demo.
+function mapTouchAllowed() {
+  return !state.nav.active && Date.now() - (state.demo.stoppedAt || 0) >= 800;
+}
+
+// ---- Undo: map clicks and removed pins, taken back newest first
+
+// point: where the start or destination goes, or null to remove it.
+function changeOnMap(kind, point) {
+  state.undo.push({ kind, before: state[kind] });
+  if (point) setPoint(kind, point, { onMap: true });
+  else clearPoint(kind, { onMap: true });
+  updateUndoButton();
+}
+
+function undoMapChange() {
+  const change = state.undo.pop();
+  if (change && !state.nav.active) {
+    if (change.before) setPoint(change.kind, change.before, { onMap: true });
+    else clearPoint(change.kind, { onMap: true });
+  }
+  updateUndoButton();
+}
+
+// A point set some other way (search, location, Clear) can't be undone back to an older click.
+function forgetUndo(kind) {
+  state.undo = state.undo.filter((change) => change.kind !== kind);
+  updateUndoButton();
+}
+
+function updateUndoButton() {
+  const last = state.undo[state.undo.length - 1];
+  $("undo").hidden = !last;
+  if (!last) return;
+  const name = last.kind === "origin" ? "start" : "destination";
+  $("undo").title = last.before ? `Put the ${name} back where it was` : `Take the ${name} off the map`;
 }
 
 function wireControls() {
@@ -223,11 +280,17 @@ function wireControls() {
   $("locate").addEventListener("click", useMyLocation);
   $("drive").addEventListener("click", () => (state.nav.active ? stopDriving() : startDriving()));
   $("recenter").addEventListener("click", recenter);
+  $("undo").addEventListener("click", undoMapChange);
   $("traffic-layer").addEventListener("change", (event) => {
     if (state.view && state.view.hasTraffic) state.view.traffic(event.target.checked);
     else drawTraffic(); // no traffic layer: the measured slowdowns from the last trip
     $("legend-traffic").hidden = !event.target.checked;
   });
+  for (const radio of document.querySelectorAll('input[name="base-map"]')) {
+    radio.addEventListener("change", () => state.view && state.view.baseMap(radio.value));
+  }
+  $("transit-layer").addEventListener("change", (event) => state.view && state.view.transit(event.target.checked));
+  $("biking-layer").addEventListener("change", (event) => state.view && state.view.biking(event.target.checked));
   $("closures-layer").addEventListener("change", drawClosures);
   $("about-open").addEventListener("click", showAbout);
   $("phone-open").addEventListener("click", showPhoneLink);
@@ -261,15 +324,13 @@ function updateFindButton() {
 
 function clearAll() {
   if (state.nav.active) stopDriving();
-  for (const kind of ["origin", "destination"]) {
-    state[kind] = null;
-    if (state.pins[kind]) state.pins[kind].remove();
-    state.pins[kind] = null;
-    $(`${kind}-picked`).textContent = "";
-    const box = $(`${kind}-search`).querySelector("input");
-    if (box) box.value = "";
-  }
+  for (const kind of ["origin", "destination"]) clearPoint(kind);
   for (const stop of [...state.stops]) removeStop(stop.id);
+  clearTrip();
+}
+
+// The drawn routes and their results, keeping the trip's places.
+function clearTrip() {
   clearRoutes();
   state.trafficEvents = [];
   drawTraffic();
@@ -479,7 +540,7 @@ function isTraffic(event) {
 }
 
 // Measured traffic (511 travel times, TomTom's jams): orange where slow, red where jammed,
-// under "Show traffic" on a map without a traffic layer of its own.
+// under the Traffic layer on a map without a traffic layer of its own.
 function drawTraffic() {
   for (const shape of state.trafficShapes) shape.remove();
   state.trafficShapes = [];
@@ -1082,7 +1143,10 @@ function renumberStops() {
     stop.row.querySelector(".stop__label").textContent = `Stop ${number}`;
     if (stop.pin) stop.pin.remove();
     stop.pin = stop.point
-      ? state.view.marker(stop.point, element("div", { className: "map-pin map-pin--stop" }, element("span", {}, number)), { title: `Stop ${number}` })
+      ? state.view.marker(stop.point, element("div", { className: "map-pin map-pin--stop" }, element("span", {}, number)), {
+          title: `Stop ${number}: click to remove`,
+          onClick: () => mapTouchAllowed() && removeStop(stop.id),
+        })
       : null;
   });
 }

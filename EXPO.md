@@ -83,11 +83,11 @@ All tests should pass. They don't call Google or cost anything. Run them after a
 | Setting | Value | Why |
 |---|---|---|
 | `WI511_API_KEY` | the key 511WI emails you | Adds crashes and incidents to the work zones. See the README's "Getting the Wisconsin 511 key". |
-| `TOMTOM_API_KEY` | your key from developer.tomtom.com | Live traffic on every street (jams, closures, lane closures, crashes) and the traffic map under **Show traffic**, on the OpenStreetMap map. Free plan; the server keeps each day under 80 requests and 6,000 map tiles (`ROUTES_TOMTOM_DAILY_REQUESTS`, `ROUTES_TOMTOM_DAILY_TILES`). |
+| `TOMTOM_API_KEY` | your key from developer.tomtom.com | Live traffic on every street (jams, closures, lane closures, crashes) and the traffic map under the **Traffic** map layer, on the OpenStreetMap map. Free plan; the server keeps each day under 80 requests and 6,000 map tiles (`ROUTES_TOMTOM_DAILY_REQUESTS`, `ROUTES_TOMTOM_DAILY_TILES`). |
 | `ROUTES_FUEL_PRICE` | today's price of a gallon, e.g. `3.19` | Each route's fuel cost on the page. Default $3.25. |
 | `ROUTES_DAILY_LIMIT` | 7 × the trips you expect, e.g. `700` for 100 trips | Each trip with Live traffic on costs about 4–7 Google requests. Google's free allowance for these is 5,000 a month. |
 | `ROUTES_CACHE_MODE` | `record` (leave as is) | Live answers, saved as they come. |
-| `ROUTES_MAP` | `google` or `osm` | `osm` shows an OpenStreetMap map with no Google logo and no Google calls at all, so no Google costs. Live traffic then comes from TomTom (every street) and Wisconsin 511, and **Show traffic** shows TomTom's traffic map. `google` keeps Google's map with Google's live traffic, and TomTom isn't used. Restart the server after changing it. |
+| `ROUTES_MAP` | `google` or `osm` | `osm` shows an OpenStreetMap map with no Google logo and no Google calls at all, so no Google costs. Live traffic then comes from TomTom (every street) and Wisconsin 511, and the **Traffic** map layer shows TomTom's traffic map. `google` keeps Google's map with Google's live traffic, and TomTom isn't used. Restart the server after changing it. |
 
 ### Do a test trip from the command line
 
@@ -150,7 +150,7 @@ Under each recommendation the page asks "Would you take this route?". See the co
 
 ### Watch usage
 
-Every hour or so, run the `/health` check above and look at `google_requests_today` (Google's map), or `tomtom_requests_today` and `tomtom_tiles_today` (the OpenStreetMap map). When TomTom's daily cap is reached, trips still work with work zones and 511, and **Show traffic** stops showing new map squares until midnight.
+Every hour or so, run the `/health` check above and look at `google_requests_today` (Google's map), or `tomtom_requests_today` and `tomtom_tiles_today` (the OpenStreetMap map). When TomTom's daily cap is reached, trips still work with work zones and 511, and the **Traffic** map layer stops showing new map squares until midnight.
 
 ### Fallback 1: Google limit used up, or Google not answering
 

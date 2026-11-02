@@ -57,7 +57,10 @@
             </div>
             <button id="add-stop" class="link-button add-stop" type="button">Add a stop</button>
           </div>
-          <p class="hint">Search for a place, or click the map: the first click sets the start, the next the destination.</p>
+          <p class="hint">
+            Search for a place, or click the map: the first click sets the start, the next the destination. Click a pin to
+            remove it; <strong>Undo</strong> on the map takes a click back.
+          </p>
 
           <div class="prefs">
             <div class="field">
@@ -85,7 +88,6 @@
           </div>
 
           <div class="toggles">
-            <label class="switch"><input type="checkbox" id="traffic-layer" /><span class="switch__track"></span>Show traffic</label>
             <label class="switch"><input type="checkbox" id="closures-layer" checked /><span class="switch__track"></span>Show closures</label>
           </div>
 
@@ -128,6 +130,23 @@
         <p id="nav-banner" class="nav-banner" role="status" hidden></p>
         <p id="demo-banner" class="demo-banner" role="status" hidden></p>
         <button id="recenter" class="button recenter" type="button" hidden>Re-center</button>
+        <button id="undo" class="button undo" type="button" hidden>Undo</button>
+        <details id="layers" class="layers">
+          <summary>Map layers</summary>
+          <div class="layers__body">
+            <fieldset class="layers__base">
+              <legend>Map type</legend>
+              <label><input type="radio" name="base-map" value="roadmap" checked /><span>Default</span></label>
+              <label><input type="radio" name="base-map" value="satellite" /><span>Satellite</span></label>
+              <label><input type="radio" name="base-map" value="terrain" /><span>Terrain</span></label>
+            </fieldset>
+            <div class="layers__details">
+              <label class="switch"><input type="checkbox" id="traffic-layer" /><span class="switch__track"></span>Traffic</label>
+              <label class="switch"><input type="checkbox" id="transit-layer" /><span class="switch__track"></span>Transit</label>
+              <label class="switch"><input type="checkbox" id="biking-layer" /><span class="switch__track"></span>Biking</label>
+            </div>
+          </div>
+        </details>
         <details id="legend" class="legend" open>
           <summary>Map key</summary>
           <ul class="legend__items">
