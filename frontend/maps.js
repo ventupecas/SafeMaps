@@ -19,6 +19,7 @@
 //                                         markers that cluster into a count where crowded (OpenStreetMap)
 //   view.fit(points), view.panTo(point), view.setZoom(zoom)
 //   view.center()                         the point at the middle of the map
+//   view.view(), view.onMoveEnd(handler)  what the map shows ({ south, west, north, east, zoom }), and when it moves
 //   view.traffic(on), view.hasTraffic     a traffic layer, when the map has one
 //   view.baseMap(kind)                    "roadmap", "satellite", "terrain" or "dark"
 //   view.switchesDark                     whether baseMap("dark") works after create (not on Google's map)
@@ -252,6 +253,17 @@ class GoogleView {
     return { lat: middle.lat(), lng: middle.lng() };
   }
 
+  view() {
+    const box = this.map.getBounds();
+    if (!box) return null;
+    const [sw, ne] = [box.getSouthWest(), box.getNorthEast()];
+    return { south: sw.lat(), west: sw.lng(), north: ne.lat(), east: ne.lng(), zoom: this.map.getZoom() };
+  }
+
+  onMoveEnd(handler) {
+    this.map.addListener("idle", handler);
+  }
+
   setZoom(zoom) {
     this.map.setZoom(zoom);
   }
@@ -442,6 +454,15 @@ class OsmView {
   center() {
     const { lat, lng } = this.map.getCenter();
     return { lat, lng };
+  }
+
+  view() {
+    const box = this.map.getBounds();
+    return { south: box.getSouth(), west: box.getWest(), north: box.getNorth(), east: box.getEast(), zoom: this.map.getZoom() };
+  }
+
+  onMoveEnd(handler) {
+    this.map.on("moveend", handler);
   }
 
   setZoom(zoom) {

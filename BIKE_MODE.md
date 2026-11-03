@@ -1,6 +1,28 @@
 # Plan: bike mode
 
-A plan for safe bicycle routes, not yet built. It covers what "safe" should mean for someone on a bike, the data it needs, how it fits the code that plans car trips today, how to check it works, and what to decide first.
+## Status
+
+Built: phases 1 to 3, and the cyclist crashes of phase 4. The decisions below were made as recommended:
+
+1. **Default rider:** most adults ("interested but concerned"), with Family, Confident and E-bike to choose from.
+2. **Sidewalks:** not used, until Milwaukee's ordinance is checked.
+3. **E-bikes:** the same routes, at a faster speed (the E-bike rider).
+4. **Winter:** a note from December to March that trails may not be cleared.
+5. **Google's bike directions:** not used; the shortest route is always our own.
+6. **Timeline:** phase by phase; the Bike stress layer (phase 1) can be shown on its own.
+
+One change from the plan: the bike map is a separate map, not bike columns on the car map. Adding columns would have touched every car code path that walks the map (snapping, junction kinds, closures, road names), with trails turning up in car routes. The separate bike map costs about 240 MB per server process, and only when it's built.
+
+Still to do:
+
+- **The trails download:** `python -m app.build_graph milwaukee-metro --bike` needs Overpass, which wasn't reachable when the bike map was first built; until it's rerun, the bike map has streets but no trails.
+- **The evaluation** (20 trips against the shortest route) and **the ride check**, then tuning the stress weights.
+- **Bike crashes from Wisconsin's Community Maps**, a "bike crashes only" filter on the importer.
+- **Stops on bike trips, lighting (`lit`), hills.**
+
+## The plan
+
+A plan for safe bicycle routes. It covers what "safe" should mean for someone on a bike, the data it needs, how it fits the code that plans car trips today, how to check it works, and what to decide first.
 
 ## The goal
 

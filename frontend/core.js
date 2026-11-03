@@ -97,6 +97,7 @@ export const PROFILE_LABELS = {
 export const state = {
   view: null, // the map (see maps.js)
   mapKind: "google", // or "osm": no Google at all; traffic from 511 and TomTom
+  mode: "car", // or "bike" (bike.js), when the server has the bike map
   origin: null, // { lat, lng, label, countryCode }
   destination: null,
   pins: { origin: null, destination: null },

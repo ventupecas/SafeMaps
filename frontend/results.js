@@ -61,7 +61,7 @@ function edgedLines() {
   return state.baseMap === "satellite" || state.dark;
 }
 
-function drawRoutes(plan, fit) {
+export function drawRoutes(plan, fit) {
   const view = state.view;
   const edged = edgedLines();
   const everywhere = [];
@@ -291,7 +291,7 @@ function winnerCard(plan, standard) {
 }
 
 // The safety score as a ring that fills to it: green when high, amber, then red.
-function scoreRing(score) {
+export function scoreRing(score) {
   const band = score >= 80 ? "high" : score >= 50 ? "mid" : "low";
   return element(
     "div",
@@ -334,7 +334,7 @@ function safetyBreakdown(winner, standard) {
   );
 }
 
-function scorePill(score) {
+export function scorePill(score) {
   const band = score >= 80 ? "high" : score >= 50 ? "mid" : "low";
   return element("span", { className: `score-pill score-pill--${band}`, title: "Safety score: 0 to 100, higher is safer" }, `${score}`);
 }
@@ -356,7 +356,7 @@ function weatherAlert(alert) {
 }
 
 // "3:45 PM" from an ISO time.
-function clockTime(iso) {
+export function clockTime(iso) {
   const moment = new Date(iso);
   return Number.isNaN(moment.getTime()) ? "" : moment.toLocaleTimeString(locale, { hour: "numeric", minute: "2-digit" });
 }
@@ -474,23 +474,23 @@ function comparedWithStandard(winner, standard) {
 
 // The standard route is the one a typical navigation app would suggest: the
 // map provider's own choice, or with the OpenStreetMap map, our fastest route.
-function isStandard(route) {
+export function isStandard(route) {
   return route.is_standard;
 }
 
 // What a route is called: by its road ("Via W Wisconsin Ave"), or else by what it is.
-function routeLabel(route, plan) {
+export function routeLabel(route, plan) {
   return route.via ? `Via ${route.via}` : routeKind(route, plan);
 }
 
 // What a route is: one of our designs, the standard route, or another alternative.
-function routeKind(route, plan) {
+export function routeKind(route, plan) {
   if (route.source === "own") {
     // Number our designs when there are several (ids are own-1, own-2, ...).
     const several = plan.candidates.filter((candidate) => candidate.source === "own").length > 1;
     return several ? `Our safer design ${route.id.split("-").pop()}` : "Our safer design";
   }
-  if (isStandard(route)) return "Standard route";
+  if (isStandard(route)) return state.mode === "bike" ? "Shortest route" : "Standard route";
   return "Alternative route";
 }
 

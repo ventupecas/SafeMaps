@@ -343,6 +343,45 @@ const PHRASES = [
   ],
   ["guessed the safer route in the game", "adivinaron la ruta más segura en el juego"],
 
+  // Bike mode
+  ["Car", "Auto"],
+  ["Bike", "Bicicleta"],
+  ["How you're going", "Cómo vas"],
+  ["Rider", "Ciclista"],
+  ["Most adults: some traffic is OK", "La mayoría de los adultos: algo de tráfico está bien"],
+  ["Family: the quietest streets, even if longer", "Familia: las calles más tranquilas, aunque sea más largo"],
+  ["Confident: busier streets are fine", "Con experiencia: calles más concurridas están bien"],
+  ["E-bike: like most adults, but faster", "Bici eléctrica: como la mayoría, pero más rápido"],
+  ["Start riding", "Empezar recorrido"],
+  ["Stop riding", "Terminar recorrido"],
+  ["Bike stress", "Estrés para ciclistas"],
+  ["Zoom in to see each street's stress.", "Acerca el mapa para ver el estrés de cada calle."],
+  ["Bike stress: low → very busy", "Estrés para ciclistas: poco → mucho"],
+  ["Shortest route", "Ruta más corta"],
+  ["Shortest", "La más corta"],
+  ["Busy crossings", "Cruces concurridos"],
+  ["Railroad tracks", "Vías del tren"],
+  ["Where cyclists were killed", "Donde murieron ciclistas"],
+  ["Minutes on very busy streets", "Minutos en calles muy concurridas"],
+  ["Minutes on busy streets", "Minutos en calles concurridas"],
+  ["Crossing busy roads without a signal", "Cruzar calles concurridas sin semáforo"],
+  ["Busy crossing", "Cruce concurrido"],
+  ["Busy crossing without a signal", "Cruce concurrido sin semáforo"],
+  ["Busy crossing the recommended route avoids", "Cruce concurrido que evita la ruta recomendada"],
+  ["Busy crossing avoided", "Cruce concurrido evitado"],
+  ["The recommended route crosses a busy road here without a signal. Take care.", "La ruta recomendada cruza aquí una calle concurrida sin semáforo. Ten cuidado."],
+  ["The shortest route crosses a busy road here without a signal. The recommended route doesn't.", "La ruta más corta cruza aquí una calle concurrida sin semáforo. La ruta recomendada no."],
+  ["Winter: trails may not be cleared of snow and ice. Check before you ride.", "Invierno: puede que los senderos no estén despejados de nieve y hielo. Revisa antes de salir."],
+  ["It's dark: crossing busy roads counts as riskier. Use lights.", "Ya es de noche: cruzar calles concurridas cuenta como más riesgoso. Usa luces."],
+  [
+    "Busy streets count by the minute; crossings of busy roads without a signal count each. The score is 100 with no risks, and halves with every 10 risk points.",
+    "Las calles concurridas cuentan por minuto; cada cruce de una calle concurrida sin semáforo cuenta aparte. La puntuación es 100 sin riesgos y se reduce a la mitad con cada 10 puntos de riesgo.",
+  ],
+  ["Low stress: anyone", "Poco estrés: para cualquiera"],
+  ["Some traffic: most adults", "Algo de tráfico: la mayoría de los adultos"],
+  ["Busy: confident riders", "Concurrida: ciclistas con experiencia"],
+  ["Very busy: few riders", "Muy concurrida: pocos ciclistas"],
+
   // The stats screen
   ["Booth Stats", "Estadísticas del stand"],
   ["Today at the booth", "Hoy en el stand"],
@@ -444,8 +483,24 @@ const REASONS = [
   [/^as safe and efficient, but slower$/i, () => "igual de segura y eficiente, pero más lenta"],
   [/^the recommended route on every leg$/i, () => "la ruta recomendada en cada tramo"],
   [/^the standard route on every leg$/i, () => "la ruta estándar en cada tramo"],
+  // Bike routes (app.bike)
+  [/^the shortest route is also the lowest-stress one$/i, () => "la ruta más corta también es la de menos estrés"],
+  [/^as low-stress, but slower$/i, () => "con el mismo estrés, pero más lenta"],
+  [
+    /^lowest stress within ([\d.]+)x the shortest time, at most ([\d.]+) min more: (\d+) min on busy streets instead of (\d+)$/i,
+    (_, ratio, extra, ours, theirs) => `la de menos estrés dentro de ${ratio} veces el tiempo más corto, con ${extra} min más como máximo: ${ours} min en calles concurridas en vez de ${theirs}`,
+  ],
+  [/^more stress: (\d+) min on busy streets$/i, (_, n) => `más estrés: ${n} min en calles concurridas`],
+  [/^too long a detour: over ([\d.]+)x the shortest time or ([\d.]+) min more$/i, (_, ratio, extra) => `un desvío demasiado largo: más de ${ratio} veces el tiempo más corto o ${extra} min más`],
 ];
 
+// The changes a bike route makes, in "Instead of the shortest route: ...".
+const BIKE_CHANGES = [
+  [/^safety score (\d+) → (\d+)$/, "puntuación de seguridad $1 → $2"],
+  [/^(\d+) min less on busy streets$/, "$1 min menos en calles concurridas"],
+  [/^(\d+) fewer busy crossings?$/, (_, n) => `${n} ${plural(n, "cruce concurrido", "cruces concurridos")} menos`],
+  [/^([\d.]+) min longer$/, "$1 min más"],
+];
 // One change the recommended route makes, in "Instead of the standard route: ...".
 const CHANGES = [
   [/^safety score (\d+) → (\d+)$/, "puntuación de seguridad $1 → $2"],
@@ -537,6 +592,10 @@ const PATTERNS = [
   [/^got a safer route than the standard one \((.+)\)$/, "obtuvieron una ruta más segura que la estándar ($1)"],
   [/^(.+) yes · (.+) no$/, "$1 sí · $2 no"],
   [/^Updated (.+)$/, "Actualizado $1"],
+  // Bike mode
+  [/^(Low stress: anyone|Some traffic: most adults|Busy: confident riders|Very busy: few riders)( · |: )(\d+) min$/, (_, name, joint, n) => `${translate(name)}${joint}${n} min`],
+  [/^(\d+) busy crossings?$/, (_, n) => `${n} ${plural(n, "cruce concurrido", "cruces concurridos")}`],
+  [/^Instead of the shortest route: (.+)$/, (_, changes) => `En lugar de la ruta más corta: ${changes.split(", ").map((part) => apply(BIKE_CHANGES, part)).join(", ")}`],
   [/^You: (\d+) of (\d+) right$/, "Tú: $1 de $2 correctas"],
   [/^guessed the safer route in the game \((.+) tries\)$/, "adivinaron la ruta más segura en el juego ($1 intentos)"],
   [/^Route design: map data (.+)$/, "Diseño de ruta: datos del mapa $1"],

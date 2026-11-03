@@ -28,6 +28,7 @@ import { applyBaseMap, drawBuses, isNight, rememberLayers, restoreLayers, savedL
 import { forgetRecentTrips, openTripFromLink, rememberTrip, showRecentTrips, tripLink } from "./trips.js";
 import { setUpDemo, showAbout, showPhoneLink } from "./expo.js";
 import { lang, startTranslating, switchLanguage } from "./i18n.js";
+import { requestBikeTrip, setUpBikeMode, showBikeTrip } from "./bike.js";
 
 boot();
 
@@ -45,6 +46,7 @@ async function boot() {
     state.mapKind = appConfig.map;
     trafficTiles = Boolean(appConfig.traffic_tiles);
     state.buses.available = Boolean(appConfig.bus_routes);
+    state.bikeAvailable = Boolean(appConfig.bike);
     if (Number.isFinite(appConfig.fuel_price)) state.fuelPrice = appConfig.fuel_price;
   } catch {
     state.mapKind = "google"; // an older server: it only knew Google's map
@@ -74,6 +76,7 @@ async function boot() {
     return;
   }
   await initMap();
+  setUpBikeMode(Boolean(state.bikeAvailable));
   restoreLayers();
   setInterval(applyBaseMap, 5 * 60 * 1000); // dusk and dawn come while the page is open
   setUpDemo();
@@ -259,9 +262,11 @@ export async function findRoute({ fit = true, again = false } = {}) {
   setFinding(true);
   showStatus("Comparing routes for safety, fuel and time…");
   try {
-    const trip = await requestTrip(state.origin, state.destination, { counted: !again });
+    const bike = state.mode === "bike";
+    const trip = bike ? await requestBikeTrip(state.origin, state.destination) : await requestTrip(state.origin, state.destination, { counted: !again });
     if (ticket !== state.findTicket) return;
-    showTrip(trip, { fit });
+    if (bike) showBikeTrip(trip, { fit });
+    else showTrip(trip, { fit });
     if (!again) rememberTrip();
   } catch (error) {
     if (ticket === state.findTicket) showStatus(error.message, true);

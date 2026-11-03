@@ -52,6 +52,15 @@ It takes a while.
 - **If the server is busy:** add `--endpoint https://overpass.kumi.systems/api/interpreter`.
 - **Afterwards:** restart the server so it loads the new map. `curl.exe http://127.0.0.1:3143/health` should then show `rail_crossings` and `schools` above 0 under `hazards`.
 
+### Build the bike map (for the Car / Bike switch)
+
+```powershell
+.\.venv\Scripts\python.exe -m app.build_graph milwaukee-metro --bike
+.\.venv\Scripts\python.exe -m app.crash_data milwaukee-metro --cyclists
+```
+
+The first downloads Milwaukee's trails and paths (on top of the road tiles above) and builds the bike map; the second picks the crashes where a cyclist died out of the crash files already downloaded and prints a line to add to `backend\.env`. Restart the server: the planner shows a **Car / Bike** switch, and `/health` shows `bike_map` with `trails` above 0. Without the trails download (if Overpass is unreachable), bike routes still work on streets, but miss the Oak Leaf, Hank Aaron and other trails.
+
 ### Optional: all reported crashes, not only fatal ones
 
 The crash-prone junction rule uses fatal crashes (NHTSA). Wisconsin's Community Maps has every reported crash: export the Milwaukee-area crashes as CSV from <https://transportal.cee.wisc.edu/partners/community-maps/crash/> (by hand: its terms forbid automated downloading), then:
