@@ -1992,6 +1992,143 @@ body:not(.map-osm) .osm-only {
   }
 }
 
+/* ---- The expo's control page (control.html) */
+
+.control-page {
+  min-height: 100vh;
+  background: var(--bg);
+}
+
+.control {
+  display: grid;
+  gap: 18px;
+  max-width: 860px;
+  margin: 0 auto;
+  padding: 28px 20px 40px;
+}
+
+.control .brand__mark {
+  width: 44px;
+  height: 44px;
+}
+
+.control__card {
+  padding: 18px 20px;
+  border-radius: var(--radius-lg);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  box-shadow: var(--shadow-sm);
+}
+
+.control__card h2 {
+  margin: 0 0 12px;
+  font-size: 1.05rem;
+}
+
+.control__checks {
+  display: grid;
+  gap: 8px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.control__check {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  color: var(--muted);
+}
+
+.control__check strong {
+  color: var(--text);
+}
+
+.control__check::before {
+  flex: none;
+  width: 1.2em;
+  font-weight: 800;
+}
+
+.control__check--ok::before {
+  content: "✓";
+  color: var(--accent);
+}
+
+.control__check--no::before {
+  content: "!";
+  color: var(--risk);
+}
+
+.control__usage {
+  display: grid;
+  gap: 14px;
+}
+
+.control__meter {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 6px 12px;
+}
+
+.control__meter-numbers {
+  font-variant-numeric: tabular-nums;
+  color: var(--muted);
+}
+
+.control__bar {
+  grid-column: 1 / -1;
+  height: 10px;
+  border-radius: 999px;
+  background: linear-gradient(90deg, var(--meter) calc(var(--share) * 100%), var(--surface-2) 0);
+  box-shadow: inset 0 0 0 1px var(--border);
+}
+
+.control__meter--low {
+  --meter: var(--accent);
+}
+
+.control__meter--mid {
+  --meter: #c47a00;
+}
+
+.control__meter--high {
+  --meter: var(--risk);
+}
+
+.control__today {
+  margin: 0 0 12px;
+}
+
+.control__actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+.control__message {
+  min-height: 1.2em;
+  margin: 10px 0;
+  color: var(--muted);
+}
+
+.control__code {
+  max-width: 320px;
+}
+
+.control__code input {
+  padding: 10px 12px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius);
+  font: inherit;
+}
+
+.control__links {
+  margin: 14px 0 0;
+  font-size: 0.9rem;
+  color: var(--muted);
+}
+
 /* ---- Phones: the map on top, the panel below */
 
 @media (max-width: 760px) {

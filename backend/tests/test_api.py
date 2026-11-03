@@ -246,7 +246,7 @@ def test_health_lists_the_road_event_sources(api):
         "wi511_key_set": False,
         "tomtom_key_set": False,
         "tomtom_requests_today": 0,
-        "tomtom_tiles_today": 0,
+        "tomtom_tiles_today": 0, "tomtom_daily_requests": 80, "tomtom_daily_tiles": 6000,
         "apify_enabled": False,
         "apify_tiles_today": 0,
     }
@@ -481,3 +481,23 @@ def test_the_expo_stats_count_todays_trips_without_places(tmp_path, google):
     assert stats["answers"]["yes"] == 1
     saved = (tmp_path / "cache" / "trips.jsonl").read_text(encoding="utf-8")
     assert "lat" not in saved and saved.count("\n") == 1
+
+
+def test_the_control_page_pauses_demo_mode_and_restarts_the_stats(tmp_path, google):
+    app = create_app(make_settings(tmp_path, map="osm"), http=httpx.Client(transport=httpx.MockTransport(google)))
+    with TestClient(app) as client:
+        assert client.get("/expo-control").json() == {"demo_paused": False, "stats_since": None}
+        client.post("/route", json={"origin": ORIGIN, "destination": DESTINATION})  # a rehearsal trip
+        through_the_tunnel = {"CF-Connecting-IP": "203.0.113.9"}
+        assert client.post("/expo-control", json={"demo_paused": True}, headers=through_the_tunnel).status_code == 403
+        assert client.post("/expo-control", json={"demo_paused": True}).status_code == 403  # the test client isn't this computer
+    app = create_app(make_settings(tmp_path, map="osm", admin_code="booth"), http=httpx.Client(transport=httpx.MockTransport(google)))
+    with TestClient(app) as client:
+        assert client.post("/expo-control", json={"reset_stats": True}).status_code == 401
+        state = client.post("/expo-control", json={"demo_paused": True, "reset_stats": True}, headers={"X-Admin-Code": "booth"}).json()
+        assert state["demo_paused"] and state["stats_since"]
+        assert client.get("/expo-stats").json()["trips"]["trips"] == 0  # the rehearsal no longer counts
+        assert client.get("/expo-stats").json()["trips_ever"] == 1
+    # A restart keeps what was set.
+    with TestClient(create_app(make_settings(tmp_path, map="osm"), http=httpx.Client(transport=httpx.MockTransport(google)))) as client:
+        assert client.get("/expo-control").json()["demo_paused"] is True

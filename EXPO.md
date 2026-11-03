@@ -157,6 +157,10 @@ Without internet, place search, addresses for clicked spots, live traffic and ne
 
 Under each recommendation the page asks "Would you take this route?". See the count at any time at **http://127.0.0.1:3143/feedback-summary**: yes and no, and how much safer and longer the routes were for each. No places are kept.
 
+### The control page
+
+Open **http://127.0.0.1:3143/control.html** on the expo computer: whether everything is ready (road map, closures matched, crash data, bus routes), how much of today's Google and TomTom allowances is used, and two switches: **Pause demo mode** (on every screen running it, within 30 seconds) and **Restart today's stats** (after a rehearsal: earlier trips stop counting, nothing is deleted). The switches only work from the expo computer itself; to use them from elsewhere (a phone, through the tunnel), set `ROUTES_ADMIN_CODE` in `backend\.env` and type it on the page.
+
 ### The stats screen
 
 Open **http://127.0.0.1:3143/stats.html** on a second screen: today's trips, how many got a safer route than the standard one, the risky turns, railroad crossings, school zones and closed roads they avoided, and the share who'd take the safer route. It updates every 20 seconds. Opened from the tunnel's https link, it also shows a QR code for phones. Sample trips (demo mode) and automatic re-plans aren't counted, and no places are kept (`backend/.cache/routes/trips.jsonl`).
