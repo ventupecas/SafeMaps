@@ -71,6 +71,8 @@ Without the router, each new trip costs 2 Essentials requests (plain + avoid-hig
 
 With the router (see below), each trip costs 1 live-traffic request for Google's own suggestions plus 1 per route our router designs: up to 4, all at the **Pro** tier. Live-traffic answers are only reused for 5 minutes in record mode. Size `ROUTES_DAILY_LIMIT` for the expo: 4 × the number of trips you expect.
 
+Planned next: safe bicycle routes, see [BIKE_MODE.md](BIKE_MODE.md).
+
 ## Web map and API
 
 From `backend/`:
