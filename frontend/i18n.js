@@ -318,6 +318,31 @@ const PHRASES = [
   ["The code couldn't be made. Visitors can type this address:", "No se pudo crear el código. Los visitantes pueden escribir esta dirección:"],
   ["Touch anywhere to plan your own", "Toca la pantalla para planificar el tuyo"],
 
+  // "Which route is safer?"
+  ["Which route is safer?", "¿Cuál ruta es más segura?"],
+  ["Which Is Safer", "¿Cuál Es Más Segura?"],
+  ["Two real routes across Milwaukee. Pick the safer one.", "Dos rutas reales por Milwaukee. Elige la más segura."],
+  ["Plan your own trip", "Planifica tu propio viaje"],
+  ["More", "Más"],
+  ["Finding two routes…", "Buscando dos rutas…"],
+  ["Route A is safer", "La ruta A es más segura"],
+  ["Route B is safer", "La ruta B es más segura"],
+  ["Route A", "Ruta A"],
+  ["Route B", "Ruta B"],
+  ["Next trip", "Siguiente viaje"],
+  ["Right!", "¡Correcto!"],
+  ["Not this time.", "Esta vez no."],
+  ["Route A is safer.", "La ruta A es más segura."],
+  ["Route B is safer.", "La ruta B es más segura."],
+  ["These routes are all equally safe. Try another trip.", "Estas rutas son igual de seguras. Prueba otro viaje."],
+  ["Can't reach the routing server.", "No se puede conectar con el servidor de rutas."],
+  ["Map of the two routes", "Mapa de las dos rutas"],
+  [
+    "The safety score counts turns across oncoming traffic at busy or crash-prone junctions, railroad crossings, school zones at school times, closed roads and lane closures, weather hazards and driving into a low sun.",
+    "La puntuación de seguridad cuenta las vueltas que cruzan el sentido contrario en cruces concurridos o propensos a choques, los cruces de ferrocarril, las zonas escolares en horario escolar, las calles y carriles cerrados, los peligros por clima y conducir con el sol bajo de frente.",
+  ],
+  ["guessed the safer route in the game", "adivinaron la ruta más segura en el juego"],
+
   // The stats screen
   ["Booth Stats", "Estadísticas del stand"],
   ["Today at the booth", "Hoy en el stand"],
@@ -512,6 +537,8 @@ const PATTERNS = [
   [/^got a safer route than the standard one \((.+)\)$/, "obtuvieron una ruta más segura que la estándar ($1)"],
   [/^(.+) yes · (.+) no$/, "$1 sí · $2 no"],
   [/^Updated (.+)$/, "Actualizado $1"],
+  [/^You: (\d+) of (\d+) right$/, "Tú: $1 de $2 correctas"],
+  [/^guessed the safer route in the game \((.+) tries\)$/, "adivinaron la ruta más segura en el juego ($1 intentos)"],
   [/^Route design: map data (.+)$/, "Diseño de ruta: datos del mapa $1"],
   // Last: parts joined with " · " ("3 min sun glare · 1 school zone"), when each part translates.
   [/^(.+ · .+)$/, (_, parts) => (parts.split(" · ").every((part) => translate(part) !== part) ? parts.split(" · ").map(translate).join(" · ") : parts)],

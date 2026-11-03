@@ -157,6 +157,10 @@ Without internet, place search, addresses for clicked spots, live traffic and ne
 
 Under each recommendation the page asks "Would you take this route?". See the count at any time at **http://127.0.0.1:3143/feedback-summary**: yes and no, and how much safer and longer the routes were for each. No places are kept.
 
+### The "Which route is safer?" game
+
+**http://127.0.0.1:3143/game.html** (also linked at the top of the planner): visitors see two real routes for a sample trip and guess which is safer, then see both scores. A good opener at the booth, and a second screen can run it. It costs no paid requests, and the stats screen shows how often visitors guess right.
+
 ### The control page
 
 Open **http://127.0.0.1:3143/control.html** on the expo computer: whether everything is ready (road map, closures matched, crash data, bus routes), how much of today's Google and TomTom allowances is used, and two switches: **Pause demo mode** (on every screen running it, within 30 seconds) and **Restart today's stats** (after a rehearsal: earlier trips stop counting, nothing is deleted). The switches only work from the expo computer itself; to use them from elsewhere (a phone, through the tunnel), set `ROUTES_ADMIN_CODE` in `backend\.env` and type it on the page.

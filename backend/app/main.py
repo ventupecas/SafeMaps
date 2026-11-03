@@ -14,6 +14,7 @@ try the API directly.
     GET  /traffic-tiles/{z}/{x}/{y}.png   TomTom's traffic map, for the OpenStreetMap page
     GET  /bus-routes  the county's bus routes, for the OpenStreetMap page's Transit layer
     GET  /expo-stats  today's trips and answers, for the expo's stats screen (stats.html)
+    POST /guess       a visitor's guess in the "Which route is safer?" game (game.html)
     GET  /expo-control, POST /expo-control   the expo's control page (control.html): pause demo mode, restart the stats
     GET  /            the web map (frontend/), when that folder exists
 
@@ -220,6 +221,19 @@ class ControlChange(BaseModel):
     reset_stats: bool = Field(False, description="Count the stats from now: earlier trips and answers are left out.")
 
 
+class Guess(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    right: bool = Field(description="The visitor picked the route with the higher safety score.")
+    picked_score: int = Field(ge=0, le=100)
+    other_score: int = Field(ge=0, le=100)
+
+
+def guess_summary(guesses: Sequence[dict[str, Any]]) -> dict[str, Any]:
+    right = sum(1 for guess in guesses if guess.get("right") is True)
+    return {"total": len(guesses), "right": right, "right_share": round(right / len(guesses), 3) if guesses else None}
+
+
 class Feedback(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -263,6 +277,7 @@ class Engine:
     buses: BusRoutes | None = None  # bus routes for the OpenStreetMap map's Transit layer
     trips: TripLog | None = None  # the trips visitors plan, for the expo's stats (no places)
     control: ExpoControl | None = None  # what the expo's control page set
+    guesses: FeedbackLog | None = None  # "Which route is safer?" guesses, right or wrong (no places)
     warmed_up: bool = False  # the road events across the map are matched to it (warm_up)
     _routers: dict[DrivingSide, Router] = field(default_factory=dict)
     _snapped: dict[tuple[Any, ...], list[RoadEvent]] = field(default_factory=dict)
@@ -436,6 +451,7 @@ def create_app(settings: Settings | None = None, *, http: httpx.Client | None = 
             feedback=FeedbackLog(settings.cache_dir / "feedback.jsonl"),
             trips=TripLog(settings.cache_dir / "trips.jsonl"),
             control=ExpoControl(settings.cache_dir / "expo-control.json"),
+            guesses=FeedbackLog(settings.cache_dir / "guesses.jsonl"),
             buses=BusRoutes(client, settings.bus_routes_url, settings.cache_dir / "bus-routes.json")
             if settings.bus_routes_url and settings.map == "osm"
             else None,
@@ -776,6 +792,7 @@ def create_app(settings: Settings | None = None, *, http: httpx.Client | None = 
             "since": since.isoformat(timespec="minutes") if since else None,
             "trips": engine.trips.summary(today, since),
             "answers": engine.feedback.summary(today, since),
+            "guesses": guess_summary(engine.guesses.answers(today, since)),
             "trips_ever": engine.trips.summary()["trips"],
         }
 
@@ -796,6 +813,15 @@ def create_app(settings: Settings | None = None, *, http: httpx.Client | None = 
         elif not from_this_computer(request):
             raise HTTPException(status_code=403, detail="Without ROUTES_ADMIN_CODE, only this computer can use the control page.")
         return request.app.state.engine.control.update(demo_paused=change.demo_paused, reset_stats=change.reset_stats)
+
+    @app.post("/guess", status_code=204)
+    def guess(
+        answer: Guess, request: Request, x_access_code: str | None = Header(None, include_in_schema=False)
+    ) -> Response:
+        """A visitor's guess in "Which route is safer?": right or not, and the two scores (no places)."""
+        check_access(x_access_code)
+        request.app.state.engine.guesses.add(answer.model_dump())
+        return Response(status_code=204)
 
     @app.get("/feedback-summary")
     def feedback_summary(request: Request) -> dict[str, Any]:

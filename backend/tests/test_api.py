@@ -501,3 +501,13 @@ def test_the_control_page_pauses_demo_mode_and_restarts_the_stats(tmp_path, goog
     # A restart keeps what was set.
     with TestClient(create_app(make_settings(tmp_path, map="osm"), http=httpx.Client(transport=httpx.MockTransport(google)))) as client:
         assert client.get("/expo-control").json()["demo_paused"] is True
+
+
+def test_guesses_in_the_safer_route_game_are_counted(tmp_path, google):
+    app = create_app(make_settings(tmp_path, map="osm"), http=httpx.Client(transport=httpx.MockTransport(google)))
+    with TestClient(app) as client:
+        assert client.post("/guess", json={"right": True, "picked_score": 80, "other_score": 40}).status_code == 204
+        assert client.post("/guess", json={"right": False, "picked_score": 40, "other_score": 80}).status_code == 204
+        assert client.post("/guess", json={"right": True, "picked_score": 180, "other_score": 4}).status_code == 422
+        guesses = client.get("/expo-stats").json()["guesses"]
+    assert guesses == {"total": 2, "right": 1, "right_share": 0.5}

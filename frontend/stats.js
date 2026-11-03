@@ -37,6 +37,9 @@ async function show() {
   $("stat-schools").textContent = number(trips.school_zones_avoided);
   $("stat-closures").textContent = number(trips.closures_avoided);
   $("stat-gain").textContent = trips.average_safety_gain === null ? "–" : `+${trips.average_safety_gain}`;
+  const guesses = stats.guesses || { total: 0, right_share: null };
+  $("stat-guesses").textContent = guesses.right_share === null ? "–" : `${Math.round(guesses.right_share * 100)}%`;
+  $("stat-guesses-label").textContent = guesses.total ? `guessed the safer route in the game (${number(guesses.total)} tries)` : "guessed the safer route in the game";
   $("stat-yes").textContent = answers.yes_share === null ? "–" : `${Math.round(answers.yes_share * 100)}%`;
   $("stat-answers").textContent = answers.total ? `${number(answers.yes)} yes · ${number(answers.no)} no` : "No answers yet today";
   $("board-updated").textContent = `Updated ${new Date().toLocaleTimeString(locale, { hour: "numeric", minute: "2-digit" })}`;
