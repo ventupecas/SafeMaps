@@ -601,6 +601,9 @@ const PATTERNS = [
   [/^You: (\d+) of (\d+) right$/, "Tú: $1 de $2 correctas"],
   [/^guessed the safer route in the game \((.+) tries\)$/, "adivinaron la ruta más segura en el juego ($1 intentos)"],
   [/^Route design: map data (.+)$/, "Diseño de ruta: datos del mapa $1"],
+  [/^Bike routes: map data (.+)$/, "Rutas en bici: datos del mapa $1"],
+  // A stress bar, read aloud: each level's minutes, joined.
+  [/^((?:Low stress|Some traffic|Busy|Very busy)[^,]*: \d+ min(?:, [^,]+: \d+ min)+)$/, (_, list) => list.split(", ").map(translate).join(", ")],
   // Last: parts joined with " · " ("3 min sun glare · 1 school zone"), when each part translates.
   [/^(.+ · .+)$/, (_, parts) => (parts.split(" · ").every((part) => translate(part) !== part) ? parts.split(" · ").map(translate).join(" · ") : parts)],
 ];
