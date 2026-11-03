@@ -232,6 +232,7 @@ class BikeTripRequest(BaseModel):
 
     origin: LatLng
     destination: LatLng
+    stops: list[LatLng] = Field(default_factory=list, max_length=MAX_STOPS, description="Places to stop at on the way, in order.")
     profile: str = Field(bike.DEFAULT_PROFILE, description="everyday, family, confident or ebike (app.bike.PROFILES).")
     departure_offset_min: int = Field(0, ge=0, le=24 * 60)
 
@@ -872,7 +873,7 @@ def create_app(settings: Settings | None = None, *, http: httpx.Client | None = 
         departure = datetime.now() + timedelta(minutes=trip.departure_offset_min)
         report = collect_road_events(
             sources_for_map(settings.road_event_sources, settings.map),
-            trip_area(trip.origin, trip.destination),
+            trip_area(trip.origin, *trip.stops, trip.destination),
             wzdx=engine.wzdx,
             wi511=engine.wi511,
             tomtom=engine.tomtom,
@@ -882,7 +883,8 @@ def create_app(settings: Settings | None = None, *, http: httpx.Client | None = 
         events = without_repeats(engine.snap(report.events))
         sun = make_turn_context(settings, None, None, None, now=departure, where=trip.origin).sun
         try:
-            result = bike.plan(engine.bike_router(), trip.origin, trip.destination, profile, events=events, sun=sun)
+            places = [trip.origin, *trip.stops, trip.destination]
+            result = bike.plan_with_stops(engine.bike_router(), places, profile, events=events, sun=sun)
         except (LookupError, ValueError) as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from None
         return {

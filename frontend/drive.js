@@ -157,7 +157,7 @@ async function reroute(here) {
   try {
     const bike = state.mode === "bike";
     const trip = bike
-      ? await requestBikeTrip(origin, state.destination)
+      ? await requestBikeTrip(origin, state.destination, { stops: nav.stopsLeft })
       : await requestTrip(origin, state.destination, { heading: nav.heading, stops: nav.stopsLeft, counted: false });
     if (!nav.active) return;
     state.origin = origin; // its pin returns when driving stops

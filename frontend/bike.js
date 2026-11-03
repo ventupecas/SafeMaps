@@ -8,6 +8,7 @@
 import { decodePolyline } from "./maps.js";
 import { $, KM_TO_MI, capitalize, element, state } from "./core.js";
 import { postJson } from "./app.js";
+import { chosenStops } from "./editing.js";
 import { clearRoutes, drawRoutes, isStandard, routeLabel, routeKind, scorePill, scoreRing, selectRoute } from "./results.js";
 
 export const STRESS_COLORS = { 1: "#1a9850", 2: "#8bbd2a", 3: "#f08c00", 4: "#d7191c" };
@@ -20,6 +21,7 @@ const RISK_LABELS = {
   busy_crossings: "Crossing busy roads without a signal",
   crash_spots: "Where cyclists were killed",
   rail_crossings: "Railroad tracks",
+  unlit_minutes: "Minutes on unlit stretches, after dark",
   lane_closures: "Lane closures",
   closures: "Closed roads",
 };
@@ -79,10 +81,12 @@ export function setMode(mode, { remember = false } = {}) {
   }
 }
 
-export async function requestBikeTrip(origin, destination) {
+// stops: places still to stop at (the chosen ones by default; while riding, those not reached yet).
+export async function requestBikeTrip(origin, destination, { stops = chosenStops() } = {}) {
   return postJson("/bike-route", {
     origin: { lat: origin.lat, lng: origin.lng },
     destination: { lat: destination.lat, lng: destination.lng },
+    stops: stops.map((point) => ({ lat: point.lat, lng: point.lng })),
     profile: $("bike-profile").value,
     departure_offset_min: Number($("leave").value) || 0,
   });

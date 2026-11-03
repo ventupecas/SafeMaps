@@ -18,7 +18,7 @@ Still to do:
 - **The trails download:** `python -m app.build_graph milwaukee-metro --bike` needs Overpass, which wasn't reachable when the bike map was first built; until it's rerun, the bike map has streets but no trails.
 - **The ride check**, then tuning the stress weights if routes feel wrong: rerun `python -m app.bike_evaluate` after any change.
 - **Bike crashes from Wisconsin's Community Maps:** export by hand, then `python -m app.crash_data import <file> --cyclists`.
-- **Stops on bike trips, lighting (`lit`), hills.**
+- **Hills:** they need elevation data, another download. (Stops on bike trips and lighting after dark are built.)
 
 ## The plan
 

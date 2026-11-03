@@ -159,6 +159,7 @@ class RoadGraph:
     # speeds are riding speeds, and it has trails and paths cars can't use.
     mode: str = "car"
     stress: list[int] = field(default_factory=list)  # per segment, bike map only: Level of Traffic Stress, 1-4
+    lit: list[bool] = field(default_factory=list)  # per segment, bike map only: lit at night (see _lit)
 
     time_s: list[float] = field(init=False, repr=False)
     out_edges: list[list[int]] = field(init=False, repr=False)
@@ -179,6 +180,7 @@ class RoadGraph:
         self.rail_crossings = self.rail_crossings or [0] * len(self.edge_from)
         self.school_zone = self.school_zone or [False] * len(self.edge_from)
         self.stress = self.stress or [0] * len(self.edge_from)
+        self.lit = self.lit or [True] * len(self.edge_from)
         self.time_s = [
             length / (speed / 3.6) + SIGNAL_DELAY_S * signals
             for length, speed, signals in zip(self.length_m, self.speed_kmh, self.signals, strict=True)
@@ -740,7 +742,7 @@ class RoadGraph:
                 "geometry": self.geometry,
                 "rail_crossings": self.rail_crossings,
                 "school": [int(x) for x in self.school_zone],
-                **({"stress": self.stress} if self.mode == "bike" else {}),
+                **({"stress": self.stress, "lit": [int(x) for x in self.lit]} if self.mode == "bike" else {}),
             },
             "banned": [[edge, other] for edge, others in sorted(self.banned.items()) for other in sorted(others)],
             "rail_crossing_points": [[round(lat, 7), round(lng, 7)] for lat, lng in self.rail_crossing_points],
@@ -796,6 +798,7 @@ class RoadGraph:
             school_points=[(lat, lng) for lat, lng in data.get("school_points", [])],
             mode=data.get("mode", "car"),
             stress=edges.get("stress", []),
+            lit=[bool(x) for x in edges.get("lit", [])],
         )
 
 
@@ -894,6 +897,7 @@ class _Road:
     forward: bool
     backward: bool
     stress: int = 0  # bike map only: Level of Traffic Stress, 1-4
+    lit: bool = True  # bike map only
 
     @classmethod
     def for_bikes(cls, way: Mapping[str, Any], coords: Mapping[int, Point]) -> _Road | None:
@@ -919,6 +923,7 @@ class _Road:
             forward=direction[0],
             backward=direction[1],
             stress=traffic_stress(tags),
+            lit=_lit(tags),
         )
 
     @classmethod
@@ -1023,6 +1028,7 @@ class _EdgeBuilder:
         e["bearing_end"].append(_departure_bearing(points[::-1], reverse=True))
         e["geometry"].append(encode_polyline(points))
         e["stress"].append(road.stress)
+        e["lit"].append(road.lit)
 
     def finish(self, area: str, bbox: BBox | None, banned: dict[int, set[int]], stats: Counter[str]) -> RoadGraph:
         e = self.edges
@@ -1066,6 +1072,7 @@ class _EdgeBuilder:
             rail_crossings=column("rail_crossings"),
             mode=self.mode,
             stress=column("stress") if self.mode == "bike" else [],
+            lit=column("lit") if self.mode == "bike" else [],
         )
         stats["junctions"] = graph.node_count
         stats["road_segments"] = graph.edge_count
@@ -1182,6 +1189,17 @@ def _bike_direction(tags: Mapping[str, str]) -> tuple[bool, bool] | None:
     if tags.get("highway") in OFF_STREET_HIGHWAYS and tags.get("oneway") not in ("yes", "-1"):
         return (True, True)
     return _direction(tags)
+
+
+def _lit(tags: Mapping[str, str]) -> bool:
+    """Lit at night: as OSM says, else streets are (city streets mostly have lights) and trails aren't
+    (most of Milwaukee's aren't lit): the cautious guess for a rider."""
+    value = tags.get("lit", "").lower()
+    if value in ("yes", "24/7", "automatic", "sunset-sunrise", "interval", "limited"):
+        return True
+    if value in ("no", "disused"):
+        return False
+    return tags.get("highway") not in OFF_STREET_HIGHWAYS
 
 
 def traffic_stress(tags: Mapping[str, str]) -> int:

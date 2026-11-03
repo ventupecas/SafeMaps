@@ -364,6 +364,7 @@ const PHRASES = [
   ["Where cyclists were killed", "Donde murieron ciclistas"],
   ["Minutes on very busy streets", "Minutos en calles muy concurridas"],
   ["Minutes on busy streets", "Minutos en calles concurridas"],
+  ["Minutes on unlit stretches, after dark", "Minutos en tramos sin luz, de noche"],
   ["Crossing busy roads without a signal", "Cruzar calles concurridas sin semáforo"],
   ["Busy crossing", "Cruce concurrido"],
   ["Busy crossing without a signal", "Cruce concurrido sin semáforo"],
@@ -483,6 +484,7 @@ const REASONS = [
   [/^as safe and efficient, but slower$/i, () => "igual de segura y eficiente, pero más lenta"],
   [/^the recommended route on every leg$/i, () => "la ruta recomendada en cada tramo"],
   [/^the standard route on every leg$/i, () => "la ruta estándar en cada tramo"],
+  [/^the shortest route on every leg$/i, () => "la ruta más corta en cada tramo"],
   // Bike routes (app.bike)
   [/^the shortest route is also the lowest-stress one$/i, () => "la ruta más corta también es la de menos estrés"],
   [/^as low-stress, but slower$/i, () => "con el mismo estrés, pero más lenta"],

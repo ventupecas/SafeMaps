@@ -95,3 +95,31 @@ def test_the_bike_safety_score_falls_with_stress_and_crossings():
     assert safety(calm) == (100, {})
     score, risks = safety(busy)
     assert score == round(100 / (1 + (4 * 0.5 + 6 * 1.5 + 4) / 10)) and set(risks) == {"stress_3_minutes", "stress_4_minutes", "busy_crossings"}
+
+
+def test_trails_count_as_unlit_and_streets_as_lit_unless_osm_says():
+    from app.roadgraph import _lit
+
+    assert _lit({"highway": "residential"}) and not _lit({"highway": "cycleway"})
+    assert _lit({"highway": "cycleway", "lit": "yes"}) and not _lit({"highway": "residential", "lit": "no"})
+
+
+def test_after_dark_unlit_minutes_count_in_the_score():
+    unlit = {"minutes_by_stress": [10, 0, 0, 0], "crossings": [], "crash_spots": 0, "rail_crossings": 0, "lane_closures": 0,
+             "closures": 0, "unlit_minutes": 10.0}  # fmt: skip
+    assert safety({**unlit, "after_dark": False})[0] == 100
+    score, risks = safety({**unlit, "after_dark": True})
+    assert score < 100 and set(risks) == {"unlit_minutes"}
+
+
+def test_a_bike_trip_with_a_stop_goes_through_it():
+    from app.bike import plan_with_stops
+    from app.geo import decode_polyline, haversine_m
+
+    graph = build_graph(grid_city().osm.elements, area="grid", mode="bike")
+    stop = point(2, 1)
+    places = [LatLng(lat=lat, lng=lng) for lat, lng in (point(1, 0), stop, point(1, 3))]
+    result = plan_with_stops(BikeRouter(graph), places, PROFILES["everyday"])
+    winner = result["winner"]
+    assert min(haversine_m(p, stop) for p in decode_polyline(winner["encoded_polyline"])) < 30
+    assert [m["instruction"] for m in winner["maneuvers"] if m["maneuver"] == "WAYPOINT"] == ["Arrive at stop 1"]

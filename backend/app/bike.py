@@ -39,19 +39,20 @@ class BikeProfile:
     crossing_minutes: tuple[float, float]  # crossing a stress 3 / 4 road without a signal feels like this many
     crash_minutes: float  # passing a spot where a cyclist was killed
     rail_minutes: float  # crossing railroad tracks (wheels catch at shallow angles)
+    unlit_weight: float  # after dark, a minute on an unlit stretch feels like this many more
     max_detour_ratio: float  # at most this many times the shortest route's time ...
     max_extra_min: float  # ... and at most this many minutes more
 
 
 PROFILES = {
-    "everyday": BikeProfile("everyday", 16.0, (1.0, 1.4, 3.0, 8.0), (3.0, 8.0), 5.0, 1.0, 1.5, 15.0),
-    "family": BikeProfile("family", 13.0, (1.0, 2.0, 8.0, 40.0), (8.0, 25.0), 10.0, 2.0, 2.0, 25.0),
-    "confident": BikeProfile("confident", 20.0, (1.0, 1.15, 1.6, 3.0), (1.0, 3.0), 3.0, 0.5, 1.3, 8.0),
-    "ebike": BikeProfile("ebike", 22.0, (1.0, 1.4, 3.0, 8.0), (3.0, 8.0), 5.0, 1.0, 1.5, 15.0),
+    "everyday": BikeProfile("everyday", 16.0, (1.0, 1.4, 3.0, 8.0), (3.0, 8.0), 5.0, 1.0, 0.5, 1.5, 15.0),
+    "family": BikeProfile("family", 13.0, (1.0, 2.0, 8.0, 40.0), (8.0, 25.0), 10.0, 2.0, 1.0, 2.0, 25.0),
+    "confident": BikeProfile("confident", 20.0, (1.0, 1.15, 1.6, 3.0), (1.0, 3.0), 3.0, 0.5, 0.3, 1.3, 8.0),
+    "ebike": BikeProfile("ebike", 22.0, (1.0, 1.4, 3.0, 8.0), (3.0, 8.0), 5.0, 1.0, 0.5, 1.5, 15.0),
 }
 DEFAULT_PROFILE = "everyday"
 # The standard route: the shortest ride, stress ignored.
-SHORTEST = BikeProfile("shortest", 16.0, (1.0, 1.0, 1.0, 1.0), (0.0, 0.0), 0.0, 0.0, math.inf, math.inf)
+SHORTEST = BikeProfile("shortest", 16.0, (1.0, 1.0, 1.0, 1.0), (0.0, 0.0), 0.0, 0.0, 0.0, math.inf, math.inf)
 
 # The safety score's risk points, the same for every rider so scores compare across routes and trips.
 RISK_POINTS = {
@@ -60,6 +61,7 @@ RISK_POINTS = {
     "busy_crossings": 2.0,  # per crossing of a stress 3 road without a signal; twice that for stress 4
     "crash_spots": 5.0,
     "rail_crossings": 1.0,
+    "unlit_minutes": 0.3,  # per minute on an unlit stretch, after dark
     "lane_closures": 3.0,
     "closures": 30.0,
 }
@@ -101,8 +103,10 @@ class BikeRouter(Router):
         g = self.graph
         slower = BIKE_SPEED_KMH / profile.speed_kmh  # the map's times are at BIKE_SPEED_KMH
         weights = profile.stress_weights
+        night = dark(sun)
         edges = [
-            g.time_s[edge] / 60 * slower * weights[max(1, g.stress[edge]) - 1] + g.rail_crossings[edge] * profile.rail_minutes
+            g.time_s[edge] / 60 * slower * (weights[max(1, g.stress[edge]) - 1] + (profile.unlit_weight if night and not g.lit[edge] else 0.0))
+            + g.rail_crossings[edge] * profile.rail_minutes
             for edge in range(g.edge_count)
         ]
         keep = set(keep)
@@ -171,8 +175,11 @@ def route_features(router: BikeRouter, path: RoutedPath, profile: BikeProfile, e
     g = router.graph
     slower = BIKE_SPEED_KMH / profile.speed_kmh
     minutes = [0.0, 0.0, 0.0, 0.0]
+    unlit = 0.0
     for edge in path.edges:
         minutes[max(1, g.stress[edge]) - 1] += g.time_s[edge] / 60 * slower
+        if not g.lit[edge]:
+            unlit += g.time_s[edge] / 60 * slower
     crossings = []
     crash_spots = 0
     for i in range(1, len(path.edges)):
@@ -195,6 +202,7 @@ def route_features(router: BikeRouter, path: RoutedPath, profile: BikeProfile, e
         "crash_spots": int(crash_spots),
         "lane_closures": lanes,
         "closures": closed,
+        "unlit_minutes": round(unlit, 2),
         "after_dark": after_dark,
         "crossings": crossings,
     }
@@ -210,6 +218,7 @@ def safety(features: dict) -> tuple[int, dict[str, float]]:
         "busy_crossings": crossing_points,
         "crash_spots": features["crash_spots"] * RISK_POINTS["crash_spots"],
         "rail_crossings": features["rail_crossings"] * RISK_POINTS["rail_crossings"],
+        "unlit_minutes": (features.get("unlit_minutes", 0.0) * RISK_POINTS["unlit_minutes"]) if features["after_dark"] else 0.0,
         "lane_closures": features["lane_closures"] * RISK_POINTS["lane_closures"],
         "closures": features["closures"] * RISK_POINTS["closures"],
     }
@@ -314,3 +323,62 @@ def _name_and_explain(candidates: list[dict], winner: dict, standard: dict | Non
             candidate["reason"] = f"more stress: {busy:.0f} min on busy streets"
         else:
             candidate["reason"] = "as low-stress, but slower"
+
+
+# ---- Trips with stops: leg by leg, joined (as car trips are, engine.combine_legs)
+
+
+def plan_with_stops(
+    router: BikeRouter,
+    places: Sequence[LatLng],
+    profile: BikeProfile,
+    *,
+    events: Sequence[RoadEvent] = (),
+    sun: Sun | None = None,
+) -> dict:
+    """A trip through stops (places: start, stops, destination): each leg planned on its own, then the
+    recommended route joined from each leg's recommendation and the shortest from each leg's shortest."""
+    legs = [plan(router, a, b, profile, events=events, sun=sun) for a, b in zip(places, places[1:])]
+    if len(legs) == 1:
+        return legs[0]
+    winner = _joined([leg["winner"] for leg in legs], places[1:-1], "trip-recommended", standard=False)
+    standards = [next((c for c in leg["candidates"] if c["is_standard"]), leg["winner"]) for leg in legs]
+    shortest = _joined(standards, places[1:-1], "trip-standard", standard=True)
+    winner["reason"] = "the recommended route on every leg"
+    shortest["reason"] = "the shortest route on every leg"
+    candidates = [winner] if winner["encoded_polyline"] == shortest["encoded_polyline"] else [winner, shortest]
+    return {"profile": profile.name, "winner": winner, "candidates": candidates}
+
+
+def _joined(legs: Sequence[dict], stops: Sequence[LatLng], route_id: str, *, standard: bool) -> dict:
+    from app.geo import decode_polyline
+
+    points: list[tuple[float, float]] = []
+    maneuvers: list[dict] = []
+    for number, leg in enumerate(legs):
+        leg_points = decode_polyline(leg["encoded_polyline"])
+        points += leg_points if not points else leg_points[1:]
+        if number:
+            stop = stops[number - 1]
+            maneuvers.append({"maneuver": "WAYPOINT", "instruction": f"Arrive at stop {number}", "location": {"lat": stop.lat, "lng": stop.lng}})
+        maneuvers += leg["maneuvers"]
+    added = ("duration_min", "distance_km", "busy_crossings", "rail_crossings", "crash_spots", "lane_closures", "closures", "unlit_minutes")
+    features = {key: round(sum(leg["features"].get(key, 0) for leg in legs), 2) for key in added}
+    features["minutes_by_stress"] = [round(sum(leg["features"]["minutes_by_stress"][i] for leg in legs), 2) for i in range(4)]
+    features["crossings"] = [c for leg in legs for c in leg["features"]["crossings"]]
+    features["after_dark"] = any(leg["features"]["after_dark"] for leg in legs)
+    score, risks = safety(features)
+    vias = list(dict.fromkeys(leg["via"] for leg in legs if leg["via"]))
+    return {
+        "id": route_id,
+        "source": "baseline" if standard else "own",
+        "is_standard": standard,
+        "encoded_polyline": encode_polyline(points),
+        "via": ", then ".join(vias[:3]),
+        "eligible": True,
+        "features": features,
+        "safety_score": score,
+        "safety_risks": risks,
+        "maneuvers": maneuvers,
+        "stress_segments": [segment for leg in legs for segment in leg["stress_segments"]],
+    }
