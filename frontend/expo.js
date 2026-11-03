@@ -34,6 +34,25 @@ export function setUpDemo() {
     document.addEventListener(type, (event) => event.isTrusted && userIsHere(), { capture: true, passive: true });
   }
   restartIdleTimer();
+  checkDemoPause();
+  setInterval(checkDemoPause, DEMO_PAUSE_CHECK_MS);
+}
+
+const DEMO_PAUSE_CHECK_MS = 30000;
+
+// The control page (control.html) can pause demo mode on the screens running it, without walking
+// to the booth. Only screens in demo mode ask; a failed check changes nothing.
+async function checkDemoPause() {
+  if (!state.demo.on) return;
+  try {
+    const response = await fetch("/expo-control", { cache: "no-store" });
+    if (!response.ok) return;
+    state.demo.paused = Boolean((await response.json()).demo_paused);
+  } catch {
+    return;
+  }
+  if (state.demo.paused) stopDemo();
+  else if (!state.demo.running) restartIdleTimer();
 }
 
 function userIsHere() {
@@ -47,7 +66,7 @@ function restartIdleTimer() {
 }
 
 function startDemo() {
-  if (!state.demo.on || state.nav.active || document.querySelector("dialog[open]")) return restartIdleTimer();
+  if (!state.demo.on || state.demo.paused || state.nav.active || document.querySelector("dialog[open]")) return restartIdleTimer();
   state.demo.running = true;
   demoStep();
 }

@@ -11,7 +11,8 @@ The heuristics are deliberately simple enough to explain on a demo stage:
   right, rights where it keeps left), flagged when the junction is busy or a
   known crash hotspot. Google's free tier has no per-junction traffic volume,
   so "busy" means at least one road at the junction is arterial class or
-  faster, judged by its no-traffic speed.
+  faster, judged by its no-traffic speed. One at a traffic signal (on the road
+  graph) counts SIGNALED_CROSSING_SHARE of one without, unless it's crash-prone.
 * Traffic delay: duration minus staticDuration. Only non-zero when the
   request was traffic-aware.
 * Fuel: each step's distance at its average speed, plus turns, traffic
@@ -43,7 +44,7 @@ from app.geo import (
 from app.hotspots import CrashHotspots
 from app.models import CrossingTurn, LatLng, Maneuver, RouteFeatures
 from app.road_events import RoadEvent, count_on_route, weather_on_route
-from app.sun import Sun, glare, low_sun
+from app.sun import Sun, dark, glare, low_sun
 
 # Calibration knobs. Tune them against routes you have recorded in the cache.
 HIGHWAY_SPEED_KMH = 80.0
@@ -106,6 +107,10 @@ class JunctionLookup(Protocol):
 
     def road_name_at(self, point: Point, heading: float) -> str:
         """The name of the road at point running along heading; "" if unknown."""
+        ...
+
+    def signal_at(self, point: Point) -> bool:
+        """Whether a traffic signal controls the junction at point."""
         ...
 
 
@@ -249,6 +254,7 @@ def extract_features(route: Mapping[str, Any], context: TurnContext = TurnContex
         school_points=school_points,
         weather_hazards=weather_hazards,
         sun_glare_min=glare_s / 60,
+        after_dark=dark(context.sun),
     )
 
 
@@ -339,6 +345,7 @@ def _crossing_turn(
         if context.hotspots is not None and junction is not None
         else 0.0
     )
+    signal_at = getattr(context.junctions, "signal_at", None)
     return CrossingTurn(
         location=LatLng(lat=junction[0], lng=junction[1]) if junction else None,
         maneuver=maneuver,
@@ -346,4 +353,5 @@ def _crossing_turn(
         nearby_crashes=crashes,
         busy=busy,
         hotspot=crashes >= context.min_hotspot_crashes,
+        signal=bool(signal_at(junction)) if signal_at is not None and junction is not None else False,
     )

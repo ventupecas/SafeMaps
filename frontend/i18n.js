@@ -217,6 +217,7 @@ const PHRASES = [
   ["Comparing…", "Comparando…"],
   ["Plan the trip for this time", "Planificar el viaje para esta hora"],
   ["No sun glare or school zones", "Sin sol de frente ni zonas escolares"],
+  ["after dark", "de noche"],
   ["Best time to leave · pick one to plan it", "Mejor hora para salir · elige una para planificarla"],
   ["Some of our designs couldn't be checked against live traffic, so they're left out.", "Algunos de nuestros diseños no se pudieron comprobar con el tráfico en vivo, así que se omiten."],
   ["This trip is outside the area our router covers, so only standard routes are shown.", "Este viaje está fuera del área que cubre nuestro sistema de rutas, así que solo se muestran rutas estándar."],
@@ -276,7 +277,7 @@ const PHRASES = [
   ],
   ["What makes a route risky", "Qué hace riesgosa una ruta"],
   ["Turns across oncoming traffic", "Vueltas que cruzan el sentido contrario"],
-  ["at busy junctions, more so where crashes have happened.", "en cruces concurridos, sobre todo donde ha habido choques."],
+  ["at busy junctions, less where a traffic signal controls them, more where crashes have happened.", "en cruces concurridos: menos si hay semáforo, más donde ha habido choques."],
   ["Closed roads and lane closures", "Calles y carriles cerrados"],
   [", live from Wisconsin's work zones and 511", ", en vivo de las zonas de obra de Wisconsin y el 511"],
   [", and TomTom traffic", " y del tráfico de TomTom"],
@@ -287,6 +288,8 @@ const PHRASES = [
     "driving toward a low sun around sunrise and sunset, worked out from where the sun is when you leave.",
     "conducir con el sol bajo de frente al amanecer y al atardecer, calculado según dónde está el sol cuando sales.",
   ],
+  ["After dark:", "De noche:"],
+  ["turns across traffic count as riskier: oncoming cars are judged by their headlights.", "las vueltas que cruzan el sentido contrario cuentan como más riesgosas: los autos de frente se calculan por sus faros."],
   ["Weather:", "Clima:"],
   ["National Weather Service alerts", "Alertas del Servicio Meteorológico Nacional"],
   [", and fog, ice or flooding reported on the roads", ", y niebla, hielo o inundaciones reportadas en las calles"],
@@ -315,6 +318,31 @@ const PHRASES = [
   ["The code couldn't be made. Visitors can type this address:", "No se pudo crear el código. Los visitantes pueden escribir esta dirección:"],
   ["Touch anywhere to plan your own", "Toca la pantalla para planificar el tuyo"],
 
+  // "Which route is safer?"
+  ["Which route is safer?", "¿Cuál ruta es más segura?"],
+  ["Which Is Safer", "¿Cuál Es Más Segura?"],
+  ["Two real routes across Milwaukee. Pick the safer one.", "Dos rutas reales por Milwaukee. Elige la más segura."],
+  ["Plan your own trip", "Planifica tu propio viaje"],
+  ["More", "Más"],
+  ["Finding two routes…", "Buscando dos rutas…"],
+  ["Route A is safer", "La ruta A es más segura"],
+  ["Route B is safer", "La ruta B es más segura"],
+  ["Route A", "Ruta A"],
+  ["Route B", "Ruta B"],
+  ["Next trip", "Siguiente viaje"],
+  ["Right!", "¡Correcto!"],
+  ["Not this time.", "Esta vez no."],
+  ["Route A is safer.", "La ruta A es más segura."],
+  ["Route B is safer.", "La ruta B es más segura."],
+  ["These routes are all equally safe. Try another trip.", "Estas rutas son igual de seguras. Prueba otro viaje."],
+  ["Can't reach the routing server.", "No se puede conectar con el servidor de rutas."],
+  ["Map of the two routes", "Mapa de las dos rutas"],
+  [
+    "The safety score counts turns across oncoming traffic at busy or crash-prone junctions, railroad crossings, school zones at school times, closed roads and lane closures, weather hazards and driving into a low sun.",
+    "La puntuación de seguridad cuenta las vueltas que cruzan el sentido contrario en cruces concurridos o propensos a choques, los cruces de ferrocarril, las zonas escolares en horario escolar, las calles y carriles cerrados, los peligros por clima y conducir con el sol bajo de frente.",
+  ],
+  ["guessed the safer route in the game", "adivinaron la ruta más segura en el juego"],
+
   // The stats screen
   ["Booth Stats", "Estadísticas del stand"],
   ["Today at the booth", "Hoy en el stand"],
@@ -339,6 +367,7 @@ const PHRASES = [
 // ---- Phrases with numbers, times and names in them
 
 const JUNCTIONS = { "a busy junction": "un cruce concurrido", "a crash-prone junction": "un cruce propenso a choques" };
+const junctionEs = (text) => JUNCTIONS[text.replace(" with a traffic signal", "")] + (text.endsWith(" with a traffic signal") ? " con semáforo" : "");
 const RISKS = {
   "risky turns": "vueltas riesgosas",
   "lane closures": "cierres de carril",
@@ -445,6 +474,7 @@ const PATTERNS = [
   // The result
   [/^The server answered (\d+)\.?$/, "El servidor respondió $1."],
   [/^School zones count: leaving (.+) is a school drop-off or pickup time\.$/, (_, at) => `Las zonas escolares cuentan: salir ${when(at)} es hora de entrada o salida escolar.`],
+  [/^It's dark leaving (.+): turns across traffic count as riskier\.$/, (_, at) => `Ya es de noche si sales ${when(at)}: las vueltas que cruzan el sentido contrario cuentan como más riesgosas.`],
   [/^The sun is low leaving (.+): roads heading into it count as riskier\.$/, (_, at) => `El sol está bajo si sales ${when(at)}: las calles que van hacia él cuentan como más riesgosas.`],
   [/^Route data requests for this trip: (\d+)(?: \((\d+) of (\d+) today\))?$/, (_, n, used, cap) => `Solicitudes de datos de ruta para este viaje: ${n}${used ? ` (${used} de ${cap} hoy)` : ""}`],
   [
@@ -460,15 +490,15 @@ const PATTERNS = [
   ],
   [/^(Road closed|Lane closure|Weather hazard|Road event): (.+)$/s, (_, heading, text) => `${translate(heading)}: ${text}`],
   [
-    /^The recommended route turns across oncoming traffic at (a busy junction|a crash-prone junction)(, where fatal crashes have happened)?\.$/,
-    (_, junction, fatal) => `La ruta recomendada da vuelta cruzando el sentido contrario en ${JUNCTIONS[junction]}${fatal ? ", donde ha habido choques mortales" : ""}.`,
+    /^The recommended route turns across oncoming traffic at ((?:a busy junction|a crash-prone junction)(?: with a traffic signal)?)(, where fatal crashes have happened)?\.$/,
+    (_, junction, fatal) => `La ruta recomendada da vuelta cruzando el sentido contrario en ${junctionEs(junction)}${fatal ? ", donde ha habido choques mortales" : ""}.`,
   ],
-  [/^Turn across traffic at (a busy junction|a crash-prone junction)$/, (_, junction) => `Vuelta que cruza el sentido contrario en ${JUNCTIONS[junction]}`],
+  [/^Turn across traffic at ((?:a busy junction|a crash-prone junction)(?: with a traffic signal)?)$/, (_, junction) => `Vuelta que cruza el sentido contrario en ${junctionEs(junction)}`],
   [
-    /^The standard route turns across oncoming traffic here, at (a busy junction|a crash-prone junction)\. The recommended route doesn't\.$/,
-    (_, junction) => `La ruta estándar da vuelta aquí cruzando el sentido contrario, en ${JUNCTIONS[junction]}. La ruta recomendada no.`,
+    /^The standard route turns across oncoming traffic here, at ((?:a busy junction|a crash-prone junction)(?: with a traffic signal)?)\. The recommended route doesn't\.$/,
+    (_, junction) => `La ruta estándar da vuelta aquí cruzando el sentido contrario, en ${junctionEs(junction)}. La ruta recomendada no.`,
   ],
-  [/^Avoided: a turn across traffic at (a busy junction|a crash-prone junction)$/, (_, junction) => `Evitada: una vuelta que cruza el sentido contrario en ${JUNCTIONS[junction]}`],
+  [/^Avoided: a turn across traffic at ((?:a busy junction|a crash-prone junction)(?: with a traffic signal)?)$/, (_, junction) => `Evitada: una vuelta que cruza el sentido contrario en ${junctionEs(junction)}`],
   [/^Via (.+)$/, (_, roads) => `Por ${roads.replaceAll(", then ", ", luego ")}`],
   [/^Our safer design (\d+)$/, "Nuestro diseño más seguro $1"],
   [/^the route via (.+)$/, (_, roads) => `la ruta por ${roads.replaceAll(", then ", ", luego ")}`],
@@ -507,6 +537,8 @@ const PATTERNS = [
   [/^got a safer route than the standard one \((.+)\)$/, "obtuvieron una ruta más segura que la estándar ($1)"],
   [/^(.+) yes · (.+) no$/, "$1 sí · $2 no"],
   [/^Updated (.+)$/, "Actualizado $1"],
+  [/^You: (\d+) of (\d+) right$/, "Tú: $1 de $2 correctas"],
+  [/^guessed the safer route in the game \((.+) tries\)$/, "adivinaron la ruta más segura en el juego ($1 intentos)"],
   [/^Route design: map data (.+)$/, "Diseño de ruta: datos del mapa $1"],
   // Last: parts joined with " · " ("3 min sun glare · 1 school zone"), when each part translates.
   [/^(.+ · .+)$/, (_, parts) => (parts.split(" · ").every((part) => translate(part) !== part) ? parts.split(" · ").map(translate).join(" · ") : parts)],

@@ -47,6 +47,9 @@ class Settings:
     apify_daily_tiles: int = 300  # traffic tiles per day the paid Apify source may fetch
     # When set, route requests must send it (X-Access-Code): for a demo shared over a public link.
     access_code: str | None = None
+    # For the expo's control page (pausing demo mode, restarting the stats). Unset: only this
+    # computer itself may use it, not visitors coming through the tunnel.
+    admin_code: str | None = None
     # The web map: "google" (Google's map, live traffic) or "osm" (OpenStreetMap, no Google at all;
     # Google's terms don't allow its results on another map, so that mode never asks Google).
     map: str = "google"
@@ -125,6 +128,7 @@ class Settings:
             apify_token=os.getenv("APIFY_TOKEN") or None,
             apify_daily_tiles=apify_daily_tiles,
             access_code=os.getenv("ROUTES_ACCESS_CODE") or None,
+            admin_code=os.getenv("ROUTES_ADMIN_CODE") or None,
             map=map_kind,
             school_hours=school_hours,
             fuel_price=fuel_price,

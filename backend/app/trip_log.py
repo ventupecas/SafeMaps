@@ -45,9 +45,9 @@ class TripLog:
             with self.path.open("a", encoding="utf-8") as handle:
                 handle.write(json.dumps(line) + "\n")
 
-    def summary(self, day: date | None = None) -> dict[str, Any]:
-        """Trips planned (on day, or ever), how many got a safer route than the standard one, and what they avoided."""
-        trips = [trip for trip in self._read() if day is None or str(trip.get("at", "")).startswith(day.isoformat())]
+    def summary(self, day: date | None = None, since: datetime | None = None) -> dict[str, Any]:
+        """Trips planned (on day, or ever; from since), how many got a safer route than the standard one, and what they avoided."""
+        trips = [trip for trip in self._read() if _counts(trip, day, since)]
         gains = [trip["safety_gain"] for trip in trips if trip.get("different") and isinstance(trip.get("safety_gain"), (int, float))]
         return {
             "trips": len(trips),
@@ -71,6 +71,12 @@ class TripLog:
             if isinstance(trip, dict):
                 trips.append(trip)
         return trips
+
+
+def _counts(line: dict[str, Any], day: date | None, since: datetime | None) -> bool:
+    """Whether a logged line (with its "at" time) falls on day and from since; either may be None."""
+    at = str(line.get("at", ""))
+    return (day is None or at.startswith(day.isoformat())) and (since is None or at >= since.isoformat())
 
 
 def _avoided(count: Any, winner: ScoredRoute, standard: ScoredRoute | None) -> int:

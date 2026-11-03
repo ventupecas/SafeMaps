@@ -71,6 +71,8 @@ Without the router, each new trip costs 2 Essentials requests (plain + avoid-hig
 
 With the router (see below), each trip costs 1 live-traffic request for Google's own suggestions plus 1 per route our router designs: up to 4, all at the **Pro** tier. Live-traffic answers are only reused for 5 minutes in record mode. Size `ROUTES_DAILY_LIMIT` for the expo: 4 × the number of trips you expect.
 
+Planned next: safe bicycle routes, see [BIKE_MODE.md](BIKE_MODE.md).
+
 ## Web map and API
 
 From `backend/`:
@@ -111,7 +113,7 @@ Until then, the page shows these steps in place of the map. On the page:
 - Closed roads are black and lane closures dashed orange. Tap a closure's marker (or a risky turn's) for the details. On the OpenStreetMap map, closure markers close together merge into a numbered circle that splits apart as you zoom in. **Show closures** hides them all.
 - Routes are named by their main road, "Via W Wisconsin Ave", from our road map: each route's longest road that no better route already goes by. Below the name: what it is ("Our safer design 2", "Standard route") and the reason for its place.
 - **Extra time you'd accept for a safer route:** no fixed limit (a route up to 1.6× the fastest can win), or at most 5, 10 or 15 minutes more. The reasons say which limit applied.
-- **Safety score:** every route gets one, 0 to 100, higher is safer: a ring on the recommendation and a pill on each route. It weighs the same risks for every profile (the default's weights: a busy risky turn 3 points, a crash-prone one 9, a lane closure 3, a school zone 3, a rail crossing 1, a weather hazard 3, a minute of sun glare 1, a closed road 30), and 10 points halve it: score = 100 / (1 + points / 10). **What the safety score counts**, under the recommendation, lists each kind's points beside the standard route's (`safety_risks` on each route in the API).
+- **Safety score:** every route gets one, 0 to 100, higher is safer: a ring on the recommendation and a pill on each route. It weighs the same risks for every profile (the default's weights: a busy risky turn 3 points, half that where a traffic signal controls the junction, a crash-prone one 9, a lane closure 3, a school zone 3, a rail crossing 1, a weather hazard 3, a minute of sun glare 1, a closed road 30), and 10 points halve it: score = 100 / (1 + points / 10). **What the safety score counts**, under the recommendation, lists each kind's points beside the standard route's (`safety_risks` on each route in the API).
 - **Cost and emissions:** fuel shows in gallons and dollars (`ROUTES_FUEL_PRICE`, default $3.25 a gallon) and CO₂ (8.9 kg a gallon, the EPA's figure).
 - **Stops:** **Add a stop** (up to 3). The trip is planned leg by leg, and the plan joins each leg's recommended route, and each leg's standard route; the directions say "Arrive at stop N". While driving, a stop reached is left out of new routes.
 - **Leave:** now, or in 15, 30 or 60 minutes: school zones and sun glare are judged at that time (traffic and closures stay as they are now). **Best time to leave?** under the routes compares the four and marks the safest; pick one to plan it.
@@ -121,6 +123,8 @@ Until then, the page shows these steps in place of the map. On the page:
 - The panel lists every route with its minutes, miles, gallons, risky turns and the reason for its place, plus how the winner compares with the standard route. Alternatives take different roads, even when they're much slower; a route that mostly runs along a better one is left out (`plan.hidden` in the API says which).
 - Pick a route in the list to follow it (the recommended one is picked to start with).
 - **Advanced** (folded) holds the controls visitors don't need: where closures come from, Live traffic, and Our router.
+- **"Which route is safer?"** (`/game.html`, linked from the planner's header): a sample trip across Milwaukee, two of its routes as A and B without their scores, and the visitor picks the safer one; then both scores show with what each route has. The routes are planned without live traffic and aren't counted as trips; each guess is counted (right or not, no places: `POST /guess`), and the stats screen shows how often visitors guess right.
+- **Control page** (`/control.html`, from `/health`, `/expo-stats` and `/expo-control`): readiness checks, today's paid usage against its caps, and switches to pause demo mode on the screens running it and to restart today's stats. The switches need `ROUTES_ADMIN_CODE` (sent as `X-Admin-Code`), or without it, a request from the server's own computer that didn't come through a tunnel.
 - **Stats screen** (`/stats.html`, from `GET /expo-stats`): today's trips, how many got a safer route, what they avoided (risky turns, railroad crossings, school zones, closed roads) and visitors' answers, for a second screen at the expo. Trips are counted without places; sample trips and automatic re-plans aren't counted (`counted` in the trip request).
 - **How it works** explains the ranking for visitors, with the headline numbers of the latest results summary (`frontend/results.json`, see "Results summary"). **Open on your phone** shows a QR code of the page's address, with the access code, once the page is opened from the tunnel's https link (see EXPO.md).
 - Place search on the OpenStreetMap map works from the keyboard: arrow keys move through the suggestions, Enter picks one, Escape closes the list.
@@ -322,6 +326,7 @@ The access agreement (linked on the doc page) wasn't reviewed here: read it befo
 
 **Weather.**
 - **On the roads:** TomTom's fog, ice, rain, wind and flooding reports become weather hazards on their stretches (OpenStreetMap map). Our router drives them 1.3× slower, entering one costs `weather_hazard_weight` (3), and the map draws them in purple.
+- **After dark:** leaving after dusk (the sun more than 6° below the horizon at the start), turns across traffic count 1.25× as risky, in the score and the ranking: gaps in oncoming traffic are judged by headlights alone. Each route says so (`after_dark`), the page notes it, and **Best time to leave?** shows which times are after dark. Counting crashes by hour would mislead without traffic counts by hour (rush hour has more crashes because it has more cars), so darkness, known to make each mile riskier, stands in for time of day.
 - **Alerts:** the National Weather Service's alerts where the trip starts (api.weather.gov: free, no key; cached 10 minutes; `ROUTES_WEATHER_ALERTS=off` turns them off) show above the recommendation. Winter ones (snow, ice, freezing rain) make turns across oncoming traffic count 1.5× as risky: stopping takes longer on ice.
 
 ## School zones and railroad crossings

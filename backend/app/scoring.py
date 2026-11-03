@@ -26,14 +26,16 @@ from __future__ import annotations
 
 from collections.abc import Callable, Sequence
 
-from app.models import CandidateRoute, RouteFeatures, ScoreBreakdown, ScoredRoute, ScoringProfile
+from app.models import SIGNALED_CROSSING_SHARE, CandidateRoute, RouteFeatures, ScoreBreakdown, ScoredRoute, ScoringProfile
 from app.road_events import WORKERS_PRESENT_FACTOR
+from app.sun import DARK_TURN_FACTOR
 
 _EPSILON = 1e-9
 
 
 def score_route(features: RouteFeatures, profile: ScoringProfile) -> ScoreBreakdown:
     """Personalized cost of one route, in perceived minutes. Lower is better."""
+    night = DARK_TURN_FACTOR if features.after_dark else 1.0  # turns across traffic, judged by headlights
     terms = {
         "time": profile.time_weight * features.duration_min,
         "distance": profile.distance_weight * features.distance_km,
@@ -41,8 +43,10 @@ def score_route(features: RouteFeatures, profile: ScoringProfile) -> ScoreBreakd
         "highway": profile.highway_weight * features.highway_min,
         "traffic": profile.traffic_weight * features.traffic_delay_min,
         "maneuvers": profile.maneuver_weight * features.maneuver_count,
-        "busy_crossings": profile.busy_crossing_weight * features.busy_crossing_turns,
-        "hotspot_crossings": profile.hotspot_crossing_weight * features.hotspot_crossing_turns,
+        "busy_crossings": night
+        * profile.busy_crossing_weight
+        * (features.busy_crossing_turns - (1 - SIGNALED_CROSSING_SHARE) * features.signaled_busy_crossing_turns),
+        "hotspot_crossings": night * profile.hotspot_crossing_weight * features.hotspot_crossing_turns,
         "lane_closures": profile.lane_closure_weight
         * (features.lane_closures + (WORKERS_PRESENT_FACTOR - 1) * features.lane_closures_with_workers),
         "school_zones": profile.school_zone_weight * features.school_zones,

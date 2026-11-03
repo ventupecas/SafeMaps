@@ -249,3 +249,16 @@ def test_the_page_in_spanish_and_back_to_english_with_the_trip_kept(browser, sit
     page.wait_for_selector(".route")
     assert page.locator("#find").text_content() == "Find route" and page.locator("#lang").text_content() == "Español"
     context.close()
+
+
+def test_the_safer_route_game_asks_for_free_uncounted_routes_and_shows_two(page, site):
+    asked = route_request(page, lambda: page.goto(site + "game.html" + TRIP))
+    assert asked["live_traffic"] is False and asked["counted"] is False
+    # The test city's routes may all score the same: then the game says so instead of asking.
+    page.wait_for_function(
+        "!document.getElementById('pick-a').disabled || /equally safe/.test(document.getElementById('game-status').textContent)"
+    )
+    if not page.locator("#pick-a").is_disabled():
+        with page.expect_request("**/guess"):
+            page.click("#pick-a")
+        assert page.locator("#game-tally").text_content() == "You: 1 of 1 right" or "0 of 1" in page.locator("#game-tally").text_content()

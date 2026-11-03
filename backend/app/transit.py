@@ -128,6 +128,11 @@ class BusRoutes:
     def attribution(self) -> str:
         return f"Bus routes: {self._agency or 'the transit agency'}"
 
+    def routes_now(self) -> list[BusRoute]:
+        """The lines already in hand, without fetching: for /health."""
+        with self._lock:
+            return list(self._routes or [])
+
     def routes(self) -> list[BusRoute]:
         with self._lock:
             if self._routes is None:

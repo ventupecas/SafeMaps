@@ -27,9 +27,9 @@ class FeedbackLog:
             with self.path.open("a", encoding="utf-8") as handle:
                 handle.write(line + "\n")
 
-    def summary(self, day: date | None = None) -> dict[str, Any]:
-        """How many said yes and no (on day, or ever), and how much safer and slower the routes they judged were."""
-        answers = [a for a in self._read() if day is None or str(a.get("at", "")).startswith(day.isoformat())]
+    def summary(self, day: date | None = None, since: datetime | None = None) -> dict[str, Any]:
+        """How many said yes and no (on day, or ever; from since), and how much safer and slower the routes they judged were."""
+        answers = self.answers(day, since)
         yes = [a for a in answers if a.get("choice") == "yes"]
         no = [a for a in answers if a.get("choice") == "no"]
 
@@ -47,6 +47,12 @@ class FeedbackLog:
             "safety_gain_when_no": average(no, "safety_gain"),
             "extra_min_when_no": average(no, "extra_min"),
         }
+
+    def answers(self, day: date | None = None, since: datetime | None = None) -> list[dict[str, Any]]:
+        """The lines kept (on day, or ever; from since)."""
+        from app.trip_log import _counts
+
+        return [answer for answer in self._read() if _counts(answer, day, since)]
 
     def _read(self) -> list[dict[str, Any]]:
         with self._lock:

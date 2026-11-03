@@ -167,6 +167,9 @@ class RoadGraph:
     _signal_cells: dict[tuple[int, int], list[int]] | None = field(init=False, default=None, repr=False)
     _edge_cells: dict[tuple[int, int], list[int]] | None = field(init=False, default=None, repr=False)
     _point_cells: dict[str, dict[tuple[int, int], list[Point]]] = field(init=False, default_factory=dict, repr=False)
+    # Meters on each named road of the routes our router built, by their encoded polyline: naming a
+    # route (engine.name_routes) reads them here instead of looking its road up every 100 m.
+    known_road_lengths: dict[str, dict[str, float]] = field(init=False, default_factory=dict, repr=False)
 
     def __post_init__(self) -> None:
         self.rail_crossings = self.rail_crossings or [0] * len(self.edge_from)
@@ -246,6 +249,18 @@ class RoadGraph:
         """Kind of the junction at point (see node_kind), or None if no junction is that close."""
         node = self._nearest(point, JUNCTION_MATCH_M, snappable_only=False)
         return None if node is None else self.node_kind(node)
+
+    def signal_at(self, point: Point) -> bool:
+        """Whether a traffic signal controls the junction at point (one within JUNCTION_MATCH_M)."""
+        ci, cj = _cell(point, _SIGNAL_CELL_DEG)
+        reach_lng = math.ceil(1 / max(math.cos(math.radians(point[0])), 0.01))
+        cells = self._signal_index()
+        return any(
+            haversine_m(point, self.point(node)) <= JUNCTION_MATCH_M
+            for i in range(ci - 1, ci + 2)
+            for j in range(cj - reach_lng, cj + reach_lng + 1)
+            for node in cells.get((i, j), ())
+        )
 
     def signals_along(self, stretches: Iterable[Sequence[Point]]) -> int:
         """Distinct traffic signals within SIGNAL_MATCH_M of the given stretches of road.
@@ -624,7 +639,7 @@ class RoadGraph:
             if not self._is_road(edge, road):
                 continue
             chord = (self.point(self.edge_from[edge]), self.point(self.edge_to[edge]))
-            if distance_to_path_m(point, chord)[0] > EVENT_MATCH_M + min(self.length_m[edge] / 2, _EDGE_SAMPLE_M):
+            if _flat_distance_m(point, *chord) > EVENT_MATCH_M + min(self.length_m[edge] / 2, _EDGE_SAMPLE_M):
                 continue  # far even allowing for a curve: skip decoding its shape
             offset, bearing = distance_to_path_m(point, self.edge_points(edge))
             if offset <= EVENT_MATCH_M and carries(bearing, None, direction, False):
@@ -1153,6 +1168,17 @@ def _largest_strongly_connected(count: int, sources: list[int], targets: list[in
         return set()
     largest = sizes.most_common(1)[0][0]
     return {node for node in range(count) if component[node] == largest}
+
+
+def _flat_distance_m(point: Point, a: Point, b: Point) -> float:
+    """Distance from point to the segment a-b on a flat projection around point: no bearing, little
+    trigonometry. For ruling out far segments quickly; distance_to_path_m measures the near ones."""
+    m_per_deg_lng = _M_PER_DEG_LAT * math.cos(math.radians(point[0]))
+    ax, ay = (a[1] - point[1]) * m_per_deg_lng, (a[0] - point[0]) * _M_PER_DEG_LAT
+    dx, dy = (b[1] - point[1]) * m_per_deg_lng - ax, (b[0] - point[0]) * _M_PER_DEG_LAT - ay
+    length_sq = dx * dx + dy * dy
+    t = 0.0 if length_sq == 0 else max(0.0, min(1.0, -(ax * dx + ay * dy) / length_sq))
+    return math.hypot(ax + t * dx, ay + t * dy)
 
 
 def _cell(point: Point, size_deg: float) -> tuple[int, int]:

@@ -14,6 +14,8 @@ try the API directly.
     GET  /traffic-tiles/{z}/{x}/{y}.png   TomTom's traffic map, for the OpenStreetMap page
     GET  /bus-routes  the county's bus routes, for the OpenStreetMap page's Transit layer
     GET  /expo-stats  today's trips and answers, for the expo's stats screen (stats.html)
+    POST /guess       a visitor's guess in the "Which route is safer?" game (game.html)
+    GET  /expo-control, POST /expo-control   the expo's control page (control.html): pause demo mode, restart the stats
     GET  /            the web map (frontend/), when that folder exists
 
 The frontend never calls Google's Routes API itself. Routing, scoring and
@@ -78,9 +80,10 @@ from app.road_events import collect as collect_road_events
 from app.roadgraph import RoadGraph
 from app.router import Router
 from app.routes_client import DailyLimitReached, RoutesApiError, RoutesClient, daily_usage
-from app.sun import low_sun
+from app.sun import dark, low_sun
 from app.traffic_tiles import TILE_REFRESH, TileError, TrafficTiles
 from app.transit import BusRoutes
+from app.expo_control import ExpoControl
 from app.trip_log import TripLog
 from app.usage import DailyUsage
 from app.weather import WeatherAlert, WeatherAlerts, for_the_weather
@@ -189,6 +192,7 @@ class TripResponse(BaseModel):
     road_events: list[RoadEventOut] = Field(description="Closures and lane closures around the trip, to draw.")
     school_hours: bool = Field(description="School zones count on this trip: it's a school-day drop-off or pickup time.")
     low_sun: bool = Field(False, description="The sun is low at departure: routes heading into it count sun glare.")
+    after_dark: bool = Field(False, description="It's dark at departure: turns across traffic count more.")
     leaving_at: str = Field("", description="The departure time the trip was judged at, local, ISO 8601.")
     weather_alerts: list[WeatherAlertOut] = Field(
         default_factory=list, description="National Weather Service alerts in force where the trip starts."
@@ -202,11 +206,32 @@ class LeaveTime(BaseModel):
     duration_min: float
     sun_glare_min: float
     school_zones: int
+    after_dark: bool = False
 
 
 class LeaveTimesResponse(BaseModel):
     times: list[LeaveTime] = Field(description="The recommended route's numbers for each departure time, soonest first.")
     best_offset_min: int = Field(description="The safest departure; the soonest among equally safe ones.")
+
+
+class ControlChange(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    demo_paused: bool | None = Field(None, description="Pause (or resume) demo mode on the screens running it.")
+    reset_stats: bool = Field(False, description="Count the stats from now: earlier trips and answers are left out.")
+
+
+class Guess(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    right: bool = Field(description="The visitor picked the route with the higher safety score.")
+    picked_score: int = Field(ge=0, le=100)
+    other_score: int = Field(ge=0, le=100)
+
+
+def guess_summary(guesses: Sequence[dict[str, Any]]) -> dict[str, Any]:
+    right = sum(1 for guess in guesses if guess.get("right") is True)
+    return {"total": len(guesses), "right": right, "right_share": round(right / len(guesses), 3) if guesses else None}
 
 
 class Feedback(BaseModel):
@@ -251,6 +276,8 @@ class Engine:
     feedback: FeedbackLog | None = None  # visitors' "Would you take this route?" answers
     buses: BusRoutes | None = None  # bus routes for the OpenStreetMap map's Transit layer
     trips: TripLog | None = None  # the trips visitors plan, for the expo's stats (no places)
+    control: ExpoControl | None = None  # what the expo's control page set
+    guesses: FeedbackLog | None = None  # "Which route is safer?" guesses, right or wrong (no places)
     warmed_up: bool = False  # the road events across the map are matched to it (warm_up)
     _routers: dict[DrivingSide, Router] = field(default_factory=dict)
     _snapped: dict[tuple[Any, ...], list[RoadEvent]] = field(default_factory=dict)
@@ -423,6 +450,8 @@ def create_app(settings: Settings | None = None, *, http: httpx.Client | None = 
             weather=WeatherAlerts(client) if settings.weather_alerts else None,
             feedback=FeedbackLog(settings.cache_dir / "feedback.jsonl"),
             trips=TripLog(settings.cache_dir / "trips.jsonl"),
+            control=ExpoControl(settings.cache_dir / "expo-control.json"),
+            guesses=FeedbackLog(settings.cache_dir / "guesses.jsonl"),
             buses=BusRoutes(client, settings.bus_routes_url, settings.cache_dir / "bus-routes.json")
             if settings.bus_routes_url and settings.map == "osm"
             else None,
@@ -484,11 +513,14 @@ def create_app(settings: Settings | None = None, *, http: httpx.Client | None = 
                 "tomtom_key_set": engine.tomtom is not None,
                 "tomtom_requests_today": engine.tomtom.usage.used_today() if engine.tomtom else 0,
                 "tomtom_tiles_today": engine.tiles.usage.used_today() if engine.tiles else 0,
+                "tomtom_daily_requests": settings.tomtom_daily_requests,
+                "tomtom_daily_tiles": settings.tomtom_daily_tiles,
                 "apify_enabled": engine.apify is not None,
                 "apify_tiles_today": engine.apify.usage.used_today() if engine.apify else 0,
             },
             "weather_alerts": engine.weather is not None,
             "bus_routes": engine.buses is not None,
+            "bus_routes_ready": bool(engine.buses and engine.buses.routes_now()),
             "feedback": {key: engine.feedback.summary()[key] for key in ("yes", "no")} if engine.feedback else None,
         }
 
@@ -538,6 +570,13 @@ def create_app(settings: Settings | None = None, *, http: httpx.Client | None = 
             raise HTTPException(status_code=exc.status, detail=str(exc)) from None
         # Browsers keep it as long as the server does, so panning back doesn't fetch it again.
         return Response(png, media_type="image/png", headers={"Cache-Control": f"max-age={int(TILE_REFRESH.total_seconds())}"})
+
+    def from_this_computer(request: Request) -> bool:
+        """A request from this computer's own browser. The tunnel connects from here too, but adds
+        the visitor's address in a header (Cloudflare's, or the usual forwarding ones)."""
+        local = request.client is not None and request.client.host in ("127.0.0.1", "::1", "localhost")
+        forwarded = any(name in request.headers for name in ("cf-connecting-ip", "x-forwarded-for", "forwarded"))
+        return local and not forwarded
 
     def check_access(code: str | None) -> None:
         # A demo shared over a public link: only people given the code can spend its Google requests.
@@ -669,6 +708,7 @@ def create_app(settings: Settings | None = None, *, http: httpx.Client | None = 
             google=google,
             school_hours=context.school_hours,
             low_sun=low_sun(context.sun),
+            after_dark=dark(context.sun),
             leaving_at=prepared.departure.isoformat(timespec="minutes"),
             weather_alerts=[
                 WeatherAlertOut(event=a.event, headline=a.headline, ends=a.ends, slippery=a.slippery) for a in prepared.alerts
@@ -726,6 +766,7 @@ def create_app(settings: Settings | None = None, *, http: httpx.Client | None = 
                     duration_min=round(winner.features.duration_min, 1),
                     sun_glare_min=round(winner.features.sun_glare_min, 1),
                     school_zones=winner.features.school_zones,
+                    after_dark=winner.features.after_dark,
                 )
             )
         best = max(times, key=lambda t: (t.safety_score, -t.offset_min))
@@ -745,12 +786,42 @@ def create_app(settings: Settings | None = None, *, http: httpx.Client | None = 
         """Today's trips (what their recommended routes avoided) and visitors' answers, for stats.html. No places."""
         engine: Engine = request.app.state.engine
         today = datetime.now().date()
+        since = engine.control.stats_since()  # set from the control page, to leave a rehearsal out
         return {
             "day": today.isoformat(),
-            "trips": engine.trips.summary(today),
-            "answers": engine.feedback.summary(today),
+            "since": since.isoformat(timespec="minutes") if since else None,
+            "trips": engine.trips.summary(today, since),
+            "answers": engine.feedback.summary(today, since),
+            "guesses": guess_summary(engine.guesses.answers(today, since)),
             "trips_ever": engine.trips.summary()["trips"],
         }
+
+    @app.get("/expo-control")
+    def expo_control(request: Request) -> dict[str, Any]:
+        """What the control page set: whether demo mode is paused, and since when the stats count."""
+        return request.app.state.engine.control.state()
+
+    @app.post("/expo-control")
+    def set_expo_control(
+        change: ControlChange, request: Request, x_admin_code: str | None = Header(None, include_in_schema=False)
+    ) -> dict[str, Any]:
+        """Pause or resume demo mode on the booth screens, or restart the stats. Needs ROUTES_ADMIN_CODE,
+        or without one, a request from this computer itself (not through the tunnel)."""
+        if settings.admin_code:
+            if not hmac.compare_digest(x_admin_code or "", settings.admin_code):
+                raise HTTPException(status_code=401, detail="The control page needs the admin code.")
+        elif not from_this_computer(request):
+            raise HTTPException(status_code=403, detail="Without ROUTES_ADMIN_CODE, only this computer can use the control page.")
+        return request.app.state.engine.control.update(demo_paused=change.demo_paused, reset_stats=change.reset_stats)
+
+    @app.post("/guess", status_code=204)
+    def guess(
+        answer: Guess, request: Request, x_access_code: str | None = Header(None, include_in_schema=False)
+    ) -> Response:
+        """A visitor's guess in "Which route is safer?": right or not, and the two scores (no places)."""
+        check_access(x_access_code)
+        request.app.state.engine.guesses.add(answer.model_dump())
+        return Response(status_code=204)
 
     @app.get("/feedback-summary")
     def feedback_summary(request: Request) -> dict[str, Any]:

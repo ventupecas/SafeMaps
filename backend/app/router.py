@@ -37,7 +37,7 @@ from app.features import (
 )
 from app.fuel import MIN_L_PER_KM, SIGNAL_L, TURN_L, cruise_liters
 from app.geo import Point, angle_between_deg, encode_polyline, haversine_m, initial_bearing_deg
-from app.models import ScoringProfile
+from app.models import SIGNALED_CROSSING_SHARE, ScoringProfile
 from app.road_events import MAX_SLOWDOWN, WORKERS_PRESENT_FACTOR, RoadEvent
 from app.roadgraph import DEFAULT_SPEED_FACTOR, RoadGraph
 from app.sun import GLARE_ANGLE_DEG, Sun, low_sun
@@ -163,6 +163,9 @@ def turn_time_s(maneuver: str, crossing: bool) -> float:
     return 5.0
 
 
+KNOWN_ROUTES_KEPT = 5000  # routes whose road lengths the graph remembers (graph.known_road_lengths)
+
+
 class Router:
     def __init__(self, graph: RoadGraph, context: TurnContext = TurnContext()) -> None:
         self.graph = graph
@@ -181,6 +184,8 @@ class Router:
         self._crashes: dict[int, float] = {}
         self._event_edges: dict[tuple[Any, ...], frozenset[int]] = {}
         self._bearings: list[float] | None = None
+        # Junctions with a traffic signal: a busy crossing turn there costs SIGNALED_CROSSING_SHARE of one.
+        self._signal_nodes = {graph.edge_to[edge] for edge in range(graph.edge_count) if graph.signals[edge]}
 
     def routes(
         self,
@@ -371,13 +376,17 @@ class Router:
             road_lengths[g.name[edge]] += g.length_m[edge]
         named = [(length, name) for name, length in road_lengths.items() if name != 0]
         seconds = round(sum(g.time_s[e] for e in path.edges))
+        encoded = encode_polyline(self.path_points(path))
+        if len(g.known_road_lengths) > KNOWN_ROUTES_KEPT:
+            g.known_road_lengths.clear()
+        g.known_road_lengths[encoded] = {g.names[name]: length for length, name in named}
         return {
             "distanceMeters": round(sum(g.length_m[e] for e in path.edges)),
             "duration": f"{seconds}s",
             "staticDuration": f"{seconds}s",
             "description": g.names[max(named)[1]] if named else "",
             "routeLabels": [],
-            "polyline": {"encodedPolyline": encode_polyline(self.path_points(path))},
+            "polyline": {"encodedPolyline": encoded},
             "legs": [{"steps": steps}],
         }
 
@@ -611,7 +620,7 @@ class Router:
         cost = table[maneuver, crossing]
         if crossing:
             if busy:
-                cost += profile.busy_crossing_weight
+                cost += profile.busy_crossing_weight * (SIGNALED_CROSSING_SHARE if node in self._signal_nodes else 1.0)
             if self.crashes_at(node) >= self.context.min_hotspot_crashes:
                 cost += profile.hotspot_crossing_weight
         return cost

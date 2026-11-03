@@ -35,6 +35,7 @@
   --icon-undo: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2.4' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M9 14 4 9l5-5'/%3E%3Cpath d='M4 9h10.5a5.5 5.5 0 0 1 0 11H11'/%3E%3C/svg%3E");
   --icon-layers: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2.2' stroke-linejoin='round'%3E%3Cpath d='m12 3 9 5-9 5-9-5z'/%3E%3Cpath d='m3 13 9 5 9-5'/%3E%3C/svg%3E");
   --icon-swap: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2.4' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M7 4v16M3 8l4-4 4 4M17 20V4M13 16l4 4 4-4'/%3E%3C/svg%3E");
+  --icon-globe: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2.1' stroke-linecap='round'%3E%3Ccircle cx='12' cy='12' r='9.5'/%3E%3Cpath d='M2.5 12h19M12 2.5c2.6 2.8 3.9 6 3.9 9.5s-1.3 6.7-3.9 9.5c-2.6-2.8-3.9-6-3.9-9.5s1.3-6.7 3.9-9.5z'/%3E%3C/svg%3E");
   --icon-plus: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2.6' stroke-linecap='round'%3E%3Cpath d='M12 5v14M5 12h14'/%3E%3C/svg%3E");
   --icon-clock: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2.2' stroke-linecap='round'%3E%3Ccircle cx='12' cy='12' r='9.5'/%3E%3Cpath d='M12 7v5l3 2'/%3E%3C/svg%3E");
   --icon-thumb: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2.1' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M7 10v11H3V10zM7 10l4-7c1.7 0 2.8 1.4 2.4 3L12.8 10H19a2 2 0 0 1 2 2.3l-1.2 7A2 2 0 0 1 17.8 21H7'/%3E%3C/svg%3E");
@@ -159,6 +160,27 @@ body {
 
 .chip--phone {
   --icon: var(--icon-phone);
+}
+
+.chip--lang {
+  --icon: var(--icon-globe);
+}
+
+.chip--game {
+  --icon: var(--icon-shield);
+}
+
+.chip--back {
+  --icon: var(--icon-arrow);
+}
+
+/* A chip without an icon of its own shows none; one that's a link isn't underlined. */
+.chip:not([class*="chip--"])::before {
+  content: none;
+}
+
+a.chip {
+  text-decoration: none;
 }
 
 .trip {
@@ -1990,6 +2012,229 @@ body:not(.map-osm) .osm-only {
   .board__header {
     flex-wrap: wrap;
   }
+}
+
+/* ---- "Which route is safer?" (game.html) */
+
+.game__round {
+  display: grid;
+  gap: 12px;
+}
+
+.game__trip {
+  margin: 0;
+  font-size: 1.15rem;
+  font-weight: 700;
+}
+
+.game__choices {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+}
+
+.game__pick {
+  color: #fff;
+  border: none;
+}
+
+.game__pick--a {
+  background: #1a73e8;
+}
+
+.game__pick--b {
+  background: #9334e6;
+}
+
+.game__pick:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
+.game__verdict {
+  margin: 0;
+  font-size: 1.2rem;
+  font-weight: 800;
+}
+
+.game__verdict--right {
+  color: var(--accent);
+}
+
+.game__verdict--wrong {
+  color: #8a1c14;
+}
+
+.game__tally {
+  margin: 0;
+  font-weight: 700;
+  color: var(--muted);
+}
+
+.game__key {
+  position: absolute;
+  z-index: 1000;
+  top: 14px;
+  right: 14px;
+  display: flex;
+  gap: 14px;
+  padding: 8px 12px;
+  border-radius: var(--radius);
+  background: rgba(255, 255, 255, 0.92);
+  box-shadow: var(--shadow);
+  font-size: 0.85rem;
+  font-weight: 600;
+}
+
+.game__key > span {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.game__key--a {
+  background: #1a73e8;
+}
+
+.game__key--b {
+  background: #9334e6;
+}
+
+/* ---- The expo's control page (control.html) */
+
+.control-page {
+  min-height: 100vh;
+  background: var(--bg);
+}
+
+.control {
+  display: grid;
+  gap: 18px;
+  max-width: 860px;
+  margin: 0 auto;
+  padding: 28px 20px 40px;
+}
+
+.control .brand__mark {
+  width: 44px;
+  height: 44px;
+}
+
+.control__card {
+  padding: 18px 20px;
+  border-radius: var(--radius-lg);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  box-shadow: var(--shadow-sm);
+}
+
+.control__card h2 {
+  margin: 0 0 12px;
+  font-size: 1.05rem;
+}
+
+.control__checks {
+  display: grid;
+  gap: 8px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.control__check {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  color: var(--muted);
+}
+
+.control__check strong {
+  color: var(--text);
+}
+
+.control__check::before {
+  flex: none;
+  width: 1.2em;
+  font-weight: 800;
+}
+
+.control__check--ok::before {
+  content: "✓";
+  color: var(--accent);
+}
+
+.control__check--no::before {
+  content: "!";
+  color: var(--risk);
+}
+
+.control__usage {
+  display: grid;
+  gap: 14px;
+}
+
+.control__meter {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 6px 12px;
+}
+
+.control__meter-numbers {
+  font-variant-numeric: tabular-nums;
+  color: var(--muted);
+}
+
+.control__bar {
+  grid-column: 1 / -1;
+  height: 10px;
+  border-radius: 999px;
+  background: linear-gradient(90deg, var(--meter) calc(var(--share) * 100%), var(--surface-2) 0);
+  box-shadow: inset 0 0 0 1px var(--border);
+}
+
+.control__meter--low {
+  --meter: var(--accent);
+}
+
+.control__meter--mid {
+  --meter: #c47a00;
+}
+
+.control__meter--high {
+  --meter: var(--risk);
+}
+
+.control__today {
+  margin: 0 0 12px;
+}
+
+.control__actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+.control__message {
+  min-height: 1.2em;
+  margin: 10px 0;
+  color: var(--muted);
+}
+
+.control__code {
+  max-width: 320px;
+}
+
+.control__code input {
+  padding: 10px 12px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius);
+  font: inherit;
+}
+
+.control__links {
+  margin: 14px 0 0;
+  font-size: 0.9rem;
+  color: var(--muted);
 }
 
 /* ---- Phones: the map on top, the panel below */

@@ -131,6 +131,12 @@ class ScoringProfile(BaseModel):
         return self
 
 
+# A turn across traffic at a busy junction with a traffic signal counts this share of one without:
+# it's made on a green (often on its own arrow), not by picking a gap in oncoming cars. A judgment
+# call, like the profiles' weights; crash-prone junctions count in full either way.
+SIGNALED_CROSSING_SHARE = 0.5
+
+
 class CrossingTurn(BaseModel):
     """A turn across oncoming traffic: a left where traffic keeps right, a right where it keeps left."""
 
@@ -142,6 +148,7 @@ class CrossingTurn(BaseModel):
     nearby_crashes: float = Field(description="Recorded crashes near the junction; 0 without crash data.")
     busy: bool = Field(description="At least one road at the junction is arterial class or faster.")
     hotspot: bool = Field(description="Enough recorded crashes nearby to call the junction crash-prone.")
+    signal: bool = Field(False, description="A traffic signal controls the junction (on the road map).")
 
 
 class RouteFeatures(BaseModel):
@@ -169,6 +176,7 @@ class RouteFeatures(BaseModel):
     school_points: tuple[LatLng, ...] = Field((), description="The schools whose zones count (school_zones).")
     weather_hazards: int = Field(0, description="Stretches with a reported weather hazard (fog, ice, flooding) driven through.")
     sun_glare_min: float = Field(0.0, description="Minutes driven toward a low sun, at the trip's departure time.")
+    after_dark: bool = Field(False, description="Leaving after dark: turns across traffic count more (app.sun.DARK_TURN_FACTOR).")
 
     @computed_field
     @property
@@ -179,6 +187,12 @@ class RouteFeatures(BaseModel):
     @property
     def hotspot_crossing_turns(self) -> int:
         return sum(turn.hotspot for turn in self.crossing_turns)
+
+    @computed_field
+    @property
+    def signaled_busy_crossing_turns(self) -> int:
+        """Busy crossing turns at a traffic signal: they count SIGNALED_CROSSING_SHARE of one."""
+        return sum(turn.busy and turn.signal for turn in self.crossing_turns)
 
 
 class ScoreBreakdown(BaseModel):

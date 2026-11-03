@@ -30,6 +30,8 @@ const PAGE_FILES = [
   "i18n.js",
   "stats.html",
   "stats.js",
+  "game.html",
+  "game.js",
   "manifest.json",
   "results.json",
   "icons/icon-192.png",

@@ -111,7 +111,7 @@ export const state = {
   stops: [], // places to stop at on the way: { id, point, pin }, in order
   nextStopId: 1,
   fuelPrice: 3.25, // US dollars a gallon (the server's ROUTES_FUEL_PRICE)
-  demo: { on: false, running: false, index: 0, idleTimer: null, stepTimer: null },
+  demo: { on: false, running: false, paused: false, index: 0, idleTimer: null, stepTimer: null }, // paused: from the control page
   routeLines: [], // { id, lines: [line handle] }
   turnMarkers: [],
   closures: [], // closures and lane closures from the last trip

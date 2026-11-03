@@ -39,6 +39,7 @@ export function showTrip(trip, { fit = true } = {}) {
     element("p", { className: "usage" }, roadEventsLine(trip)),
     ...(trip.school_hours ? [element("p", { className: "usage" }, `School zones count: leaving ${when} is a school drop-off or pickup time.`)] : []),
     ...(trip.low_sun ? [element("p", { className: "usage" }, `The sun is low leaving ${when}: roads heading into it count as riskier.`)] : []),
+    ...(trip.after_dark ? [element("p", { className: "usage" }, `It's dark leaving ${when}: turns across traffic count as riskier.`)] : []),
     // Route data requests are paid ones; the OpenStreetMap map never makes any.
     ...(state.mapKind === "osm"
       ? []
@@ -219,7 +220,7 @@ function drawCrossingsAndSchools(plan) {
 // recommended route doesn't turn: what choosing it avoids.
 function drawRiskyTurns(plan) {
   const risky = (route) => route.features.crossing_turns.filter((turn) => (turn.busy || turn.hotspot) && turn.location);
-  const why = (turn) => (turn.hotspot ? "a crash-prone junction" : "a busy junction");
+  const why = (turn) => `${turn.hotspot ? "a crash-prone junction" : "a busy junction"}${turn.signal ? " with a traffic signal" : ""}`;
   const ours = risky(plan.winner);
   for (const turn of ours) {
     const dot = element("div", { className: "turn-dot" });
@@ -544,6 +545,7 @@ function leaveTimesList({ times, best_offset_min: best }) {
     const why = [
       time.sun_glare_min >= 0.5 ? `${Math.round(time.sun_glare_min)} min sun glare` : "",
       time.school_zones ? `${time.school_zones} school zone${time.school_zones === 1 ? "" : "s"}` : "",
+      time.after_dark ? "after dark" : "",
     ].filter(Boolean);
     const row = element(
       "button",
