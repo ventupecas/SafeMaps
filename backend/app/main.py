@@ -78,7 +78,7 @@ from app.road_events import collect as collect_road_events
 from app.roadgraph import RoadGraph
 from app.router import Router
 from app.routes_client import DailyLimitReached, RoutesApiError, RoutesClient, daily_usage
-from app.sun import low_sun
+from app.sun import dark, low_sun
 from app.traffic_tiles import TILE_REFRESH, TileError, TrafficTiles
 from app.transit import BusRoutes
 from app.trip_log import TripLog
@@ -189,6 +189,7 @@ class TripResponse(BaseModel):
     road_events: list[RoadEventOut] = Field(description="Closures and lane closures around the trip, to draw.")
     school_hours: bool = Field(description="School zones count on this trip: it's a school-day drop-off or pickup time.")
     low_sun: bool = Field(False, description="The sun is low at departure: routes heading into it count sun glare.")
+    after_dark: bool = Field(False, description="It's dark at departure: turns across traffic count more.")
     leaving_at: str = Field("", description="The departure time the trip was judged at, local, ISO 8601.")
     weather_alerts: list[WeatherAlertOut] = Field(
         default_factory=list, description="National Weather Service alerts in force where the trip starts."
@@ -202,6 +203,7 @@ class LeaveTime(BaseModel):
     duration_min: float
     sun_glare_min: float
     school_zones: int
+    after_dark: bool = False
 
 
 class LeaveTimesResponse(BaseModel):
@@ -669,6 +671,7 @@ def create_app(settings: Settings | None = None, *, http: httpx.Client | None = 
             google=google,
             school_hours=context.school_hours,
             low_sun=low_sun(context.sun),
+            after_dark=dark(context.sun),
             leaving_at=prepared.departure.isoformat(timespec="minutes"),
             weather_alerts=[
                 WeatherAlertOut(event=a.event, headline=a.headline, ends=a.ends, slippery=a.slippery) for a in prepared.alerts
@@ -726,6 +729,7 @@ def create_app(settings: Settings | None = None, *, http: httpx.Client | None = 
                     duration_min=round(winner.features.duration_min, 1),
                     sun_glare_min=round(winner.features.sun_glare_min, 1),
                     school_zones=winner.features.school_zones,
+                    after_dark=winner.features.after_dark,
                 )
             )
         best = max(times, key=lambda t: (t.safety_score, -t.offset_min))

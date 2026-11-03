@@ -217,6 +217,7 @@ const PHRASES = [
   ["Comparing…", "Comparando…"],
   ["Plan the trip for this time", "Planificar el viaje para esta hora"],
   ["No sun glare or school zones", "Sin sol de frente ni zonas escolares"],
+  ["after dark", "de noche"],
   ["Best time to leave · pick one to plan it", "Mejor hora para salir · elige una para planificarla"],
   ["Some of our designs couldn't be checked against live traffic, so they're left out.", "Algunos de nuestros diseños no se pudieron comprobar con el tráfico en vivo, así que se omiten."],
   ["This trip is outside the area our router covers, so only standard routes are shown.", "Este viaje está fuera del área que cubre nuestro sistema de rutas, así que solo se muestran rutas estándar."],
@@ -287,6 +288,8 @@ const PHRASES = [
     "driving toward a low sun around sunrise and sunset, worked out from where the sun is when you leave.",
     "conducir con el sol bajo de frente al amanecer y al atardecer, calculado según dónde está el sol cuando sales.",
   ],
+  ["After dark:", "De noche:"],
+  ["turns across traffic count as riskier: oncoming cars are judged by their headlights.", "las vueltas que cruzan el sentido contrario cuentan como más riesgosas: los autos de frente se calculan por sus faros."],
   ["Weather:", "Clima:"],
   ["National Weather Service alerts", "Alertas del Servicio Meteorológico Nacional"],
   [", and fog, ice or flooding reported on the roads", ", y niebla, hielo o inundaciones reportadas en las calles"],
@@ -446,6 +449,7 @@ const PATTERNS = [
   // The result
   [/^The server answered (\d+)\.?$/, "El servidor respondió $1."],
   [/^School zones count: leaving (.+) is a school drop-off or pickup time\.$/, (_, at) => `Las zonas escolares cuentan: salir ${when(at)} es hora de entrada o salida escolar.`],
+  [/^It's dark leaving (.+): turns across traffic count as riskier\.$/, (_, at) => `Ya es de noche si sales ${when(at)}: las vueltas que cruzan el sentido contrario cuentan como más riesgosas.`],
   [/^The sun is low leaving (.+): roads heading into it count as riskier\.$/, (_, at) => `El sol está bajo si sales ${when(at)}: las calles que van hacia él cuentan como más riesgosas.`],
   [/^Route data requests for this trip: (\d+)(?: \((\d+) of (\d+) today\))?$/, (_, n, used, cap) => `Solicitudes de datos de ruta para este viaje: ${n}${used ? ` (${used} de ${cap} hoy)` : ""}`],
   [

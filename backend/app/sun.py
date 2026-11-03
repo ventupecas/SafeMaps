@@ -19,6 +19,11 @@ from app.geo import angle_between_deg
 
 GLARE_MAX_ELEVATION_DEG = 25.0  # above this, a car's visor blocks it
 GLARE_ANGLE_DEG = 25.0  # within this of the direction of travel, it's in the driver's eyes
+# After dark (the sun this far below the horizon: past dusk), the gaps in oncoming traffic are judged
+# by headlights alone, so a turn across traffic counts DARK_TURN_FACTOR as much. Driving is deadlier
+# per mile at night; the factor is a judgment call, less than ice's (app.weather).
+DARK_ELEVATION_DEG = -6.0
+DARK_TURN_FACTOR = 1.25
 
 Sun = tuple[float, float]  # (azimuth, elevation) in degrees: azimuth clockwise from north
 
@@ -59,6 +64,11 @@ def sun_position(moment: datetime, lat: float, lng: float) -> Sun:
 def low_sun(sun: Sun | None) -> bool:
     """Whether the sun is up and low enough to dazzle a driver heading toward it."""
     return sun is not None and 0 < sun[1] < GLARE_MAX_ELEVATION_DEG
+
+
+def dark(sun: Sun | None) -> bool:
+    """Whether it's dark: the sun more than DARK_ELEVATION_DEG below the horizon (after dusk, before dawn)."""
+    return sun is not None and sun[1] < DARK_ELEVATION_DEG
 
 
 def glare(bearing: float, sun: Sun | None) -> bool:

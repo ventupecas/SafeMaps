@@ -176,6 +176,7 @@ class RouteFeatures(BaseModel):
     school_points: tuple[LatLng, ...] = Field((), description="The schools whose zones count (school_zones).")
     weather_hazards: int = Field(0, description="Stretches with a reported weather hazard (fog, ice, flooding) driven through.")
     sun_glare_min: float = Field(0.0, description="Minutes driven toward a low sun, at the trip's departure time.")
+    after_dark: bool = Field(False, description="Leaving after dark: turns across traffic count more (app.sun.DARK_TURN_FACTOR).")
 
     @computed_field
     @property

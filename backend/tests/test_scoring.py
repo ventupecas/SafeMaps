@@ -151,3 +151,14 @@ def test_a_busy_turn_at_a_traffic_signal_counts_half():
     assert b.busy_crossings == pytest.approx(2 + 1)
     crash_prone = features(crossing_turns=(crossing(busy=True, hotspot=True, signal=True),))
     assert score_route(crash_prone, ScoringProfile(busy_crossing_weight=2, hotspot_crossing_weight=4)).hotspot_crossings == 4
+
+
+def test_after_dark_turns_across_traffic_count_more():
+    from app.sun import DARK_TURN_FACTOR
+
+    turns = (crossing(busy=True), crossing(busy=True, hotspot=True))
+    profile = ScoringProfile(busy_crossing_weight=2, hotspot_crossing_weight=4)
+    day, night = score_route(features(crossing_turns=turns), profile), score_route(features(crossing_turns=turns, after_dark=True), profile)
+    assert night.busy_crossings == pytest.approx(day.busy_crossings * DARK_TURN_FACTOR)
+    assert night.hotspot_crossings == pytest.approx(day.hotspot_crossings * DARK_TURN_FACTOR)
+    assert safety_score(features(crossing_turns=turns, after_dark=True)) < safety_score(features(crossing_turns=turns))

@@ -63,3 +63,12 @@ def test_the_router_makes_roads_into_a_low_sun_cost_more():
     plain = router._costs(profile, [], keep=()).edges
     sunrise = router._costs(profile, [], keep=(), sun=(toward, 10.0)).edges
     assert sunrise[eastbound] > plain[eastbound] and sunrise[westbound] == plain[westbound]
+
+
+def test_it_is_dark_after_dusk():
+    from app.sun import dark
+
+    milwaukee = (43.0389, -87.9065)
+    assert not dark(sun_position(datetime(2026, 11, 2, 18, 0, tzinfo=timezone.utc), *milwaukee))  # noon
+    assert dark(sun_position(datetime(2026, 11, 3, 3, 0, tzinfo=timezone.utc), *milwaukee))  # 9 PM
+    assert not dark(None)

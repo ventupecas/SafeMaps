@@ -39,6 +39,7 @@ export function showTrip(trip, { fit = true } = {}) {
     element("p", { className: "usage" }, roadEventsLine(trip)),
     ...(trip.school_hours ? [element("p", { className: "usage" }, `School zones count: leaving ${when} is a school drop-off or pickup time.`)] : []),
     ...(trip.low_sun ? [element("p", { className: "usage" }, `The sun is low leaving ${when}: roads heading into it count as riskier.`)] : []),
+    ...(trip.after_dark ? [element("p", { className: "usage" }, `It's dark leaving ${when}: turns across traffic count as riskier.`)] : []),
     // Route data requests are paid ones; the OpenStreetMap map never makes any.
     ...(state.mapKind === "osm"
       ? []
@@ -544,6 +545,7 @@ function leaveTimesList({ times, best_offset_min: best }) {
     const why = [
       time.sun_glare_min >= 0.5 ? `${Math.round(time.sun_glare_min)} min sun glare` : "",
       time.school_zones ? `${time.school_zones} school zone${time.school_zones === 1 ? "" : "s"}` : "",
+      time.after_dark ? "after dark" : "",
     ].filter(Boolean);
     const row = element(
       "button",

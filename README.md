@@ -322,6 +322,7 @@ The access agreement (linked on the doc page) wasn't reviewed here: read it befo
 
 **Weather.**
 - **On the roads:** TomTom's fog, ice, rain, wind and flooding reports become weather hazards on their stretches (OpenStreetMap map). Our router drives them 1.3× slower, entering one costs `weather_hazard_weight` (3), and the map draws them in purple.
+- **After dark:** leaving after dusk (the sun more than 6° below the horizon at the start), turns across traffic count 1.25× as risky, in the score and the ranking: gaps in oncoming traffic are judged by headlights alone. Each route says so (`after_dark`), the page notes it, and **Best time to leave?** shows which times are after dark. Counting crashes by hour would mislead without traffic counts by hour (rush hour has more crashes because it has more cars), so darkness, known to make each mile riskier, stands in for time of day.
 - **Alerts:** the National Weather Service's alerts where the trip starts (api.weather.gov: free, no key; cached 10 minutes; `ROUTES_WEATHER_ALERTS=off` turns them off) show above the recommendation. Winter ones (snow, ice, freezing rain) make turns across oncoming traffic count 1.5× as risky: stopping takes longer on ice.
 
 ## School zones and railroad crossings

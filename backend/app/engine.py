@@ -371,15 +371,15 @@ def _joined(legs: Sequence[ScoredRoute], stops: Sequence[LatLng], route_id: str,
         if number:
             maneuvers.append(Maneuver(maneuver="WAYPOINT", instruction=f"Arrive at stop {number}", location=stops[number - 1]))
         maneuvers += leg.maneuvers
-    # Counts and times add up over the legs; lists of places (turns, crossings, schools) join.
-    features = RouteFeatures(
-        **{
-            name: tuple(item for leg in legs for item in getattr(leg.features, name))
-            if isinstance(getattr(legs[0].features, name), tuple)
-            else sum(getattr(leg.features, name) for leg in legs)
-            for name in RouteFeatures.model_fields
-        }
-    )
+    # Counts and times add up over the legs; lists of places (turns, crossings, schools) join;
+    # yes-or-no facts (after dark) hold if they do on any leg.
+    def joined(name: str) -> object:
+        values = [getattr(leg.features, name) for leg in legs]
+        if isinstance(values[0], tuple):
+            return tuple(item for value in values for item in value)
+        return any(values) if isinstance(values[0], bool) else sum(values)
+
+    features = RouteFeatures(**{name: joined(name) for name in RouteFeatures.model_fields})
     vias = list(dict.fromkeys(leg.via for leg in legs if leg.via))
     return ScoredRoute(
         id=route_id,

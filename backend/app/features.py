@@ -44,7 +44,7 @@ from app.geo import (
 from app.hotspots import CrashHotspots
 from app.models import CrossingTurn, LatLng, Maneuver, RouteFeatures
 from app.road_events import RoadEvent, count_on_route, weather_on_route
-from app.sun import Sun, glare, low_sun
+from app.sun import Sun, dark, glare, low_sun
 
 # Calibration knobs. Tune them against routes you have recorded in the cache.
 HIGHWAY_SPEED_KMH = 80.0
@@ -254,6 +254,7 @@ def extract_features(route: Mapping[str, Any], context: TurnContext = TurnContex
         school_points=school_points,
         weather_hazards=weather_hazards,
         sun_glare_min=glare_s / 60,
+        after_dark=dark(context.sun),
     )
 
 
