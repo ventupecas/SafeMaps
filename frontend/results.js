@@ -219,7 +219,7 @@ function drawCrossingsAndSchools(plan) {
 // recommended route doesn't turn: what choosing it avoids.
 function drawRiskyTurns(plan) {
   const risky = (route) => route.features.crossing_turns.filter((turn) => (turn.busy || turn.hotspot) && turn.location);
-  const why = (turn) => (turn.hotspot ? "a crash-prone junction" : "a busy junction");
+  const why = (turn) => `${turn.hotspot ? "a crash-prone junction" : "a busy junction"}${turn.signal ? " with a traffic signal" : ""}`;
   const ours = risky(plan.winner);
   for (const turn of ours) {
     const dot = element("div", { className: "turn-dot" });

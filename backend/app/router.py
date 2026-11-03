@@ -37,7 +37,7 @@ from app.features import (
 )
 from app.fuel import MIN_L_PER_KM, SIGNAL_L, TURN_L, cruise_liters
 from app.geo import Point, angle_between_deg, encode_polyline, haversine_m, initial_bearing_deg
-from app.models import ScoringProfile
+from app.models import SIGNALED_CROSSING_SHARE, ScoringProfile
 from app.road_events import MAX_SLOWDOWN, WORKERS_PRESENT_FACTOR, RoadEvent
 from app.roadgraph import DEFAULT_SPEED_FACTOR, RoadGraph
 from app.sun import GLARE_ANGLE_DEG, Sun, low_sun
@@ -181,6 +181,8 @@ class Router:
         self._crashes: dict[int, float] = {}
         self._event_edges: dict[tuple[Any, ...], frozenset[int]] = {}
         self._bearings: list[float] | None = None
+        # Junctions with a traffic signal: a busy crossing turn there costs SIGNALED_CROSSING_SHARE of one.
+        self._signal_nodes = {graph.edge_to[edge] for edge in range(graph.edge_count) if graph.signals[edge]}
 
     def routes(
         self,
@@ -611,7 +613,7 @@ class Router:
         cost = table[maneuver, crossing]
         if crossing:
             if busy:
-                cost += profile.busy_crossing_weight
+                cost += profile.busy_crossing_weight * (SIGNALED_CROSSING_SHARE if node in self._signal_nodes else 1.0)
             if self.crashes_at(node) >= self.context.min_hotspot_crashes:
                 cost += profile.hotspot_crossing_weight
         return cost

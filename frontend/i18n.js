@@ -276,7 +276,7 @@ const PHRASES = [
   ],
   ["What makes a route risky", "Qué hace riesgosa una ruta"],
   ["Turns across oncoming traffic", "Vueltas que cruzan el sentido contrario"],
-  ["at busy junctions, more so where crashes have happened.", "en cruces concurridos, sobre todo donde ha habido choques."],
+  ["at busy junctions, less where a traffic signal controls them, more where crashes have happened.", "en cruces concurridos: menos si hay semáforo, más donde ha habido choques."],
   ["Closed roads and lane closures", "Calles y carriles cerrados"],
   [", live from Wisconsin's work zones and 511", ", en vivo de las zonas de obra de Wisconsin y el 511"],
   [", and TomTom traffic", " y del tráfico de TomTom"],
@@ -339,6 +339,7 @@ const PHRASES = [
 // ---- Phrases with numbers, times and names in them
 
 const JUNCTIONS = { "a busy junction": "un cruce concurrido", "a crash-prone junction": "un cruce propenso a choques" };
+const junctionEs = (text) => JUNCTIONS[text.replace(" with a traffic signal", "")] + (text.endsWith(" with a traffic signal") ? " con semáforo" : "");
 const RISKS = {
   "risky turns": "vueltas riesgosas",
   "lane closures": "cierres de carril",
@@ -460,15 +461,15 @@ const PATTERNS = [
   ],
   [/^(Road closed|Lane closure|Weather hazard|Road event): (.+)$/s, (_, heading, text) => `${translate(heading)}: ${text}`],
   [
-    /^The recommended route turns across oncoming traffic at (a busy junction|a crash-prone junction)(, where fatal crashes have happened)?\.$/,
-    (_, junction, fatal) => `La ruta recomendada da vuelta cruzando el sentido contrario en ${JUNCTIONS[junction]}${fatal ? ", donde ha habido choques mortales" : ""}.`,
+    /^The recommended route turns across oncoming traffic at ((?:a busy junction|a crash-prone junction)(?: with a traffic signal)?)(, where fatal crashes have happened)?\.$/,
+    (_, junction, fatal) => `La ruta recomendada da vuelta cruzando el sentido contrario en ${junctionEs(junction)}${fatal ? ", donde ha habido choques mortales" : ""}.`,
   ],
-  [/^Turn across traffic at (a busy junction|a crash-prone junction)$/, (_, junction) => `Vuelta que cruza el sentido contrario en ${JUNCTIONS[junction]}`],
+  [/^Turn across traffic at ((?:a busy junction|a crash-prone junction)(?: with a traffic signal)?)$/, (_, junction) => `Vuelta que cruza el sentido contrario en ${junctionEs(junction)}`],
   [
-    /^The standard route turns across oncoming traffic here, at (a busy junction|a crash-prone junction)\. The recommended route doesn't\.$/,
-    (_, junction) => `La ruta estándar da vuelta aquí cruzando el sentido contrario, en ${JUNCTIONS[junction]}. La ruta recomendada no.`,
+    /^The standard route turns across oncoming traffic here, at ((?:a busy junction|a crash-prone junction)(?: with a traffic signal)?)\. The recommended route doesn't\.$/,
+    (_, junction) => `La ruta estándar da vuelta aquí cruzando el sentido contrario, en ${junctionEs(junction)}. La ruta recomendada no.`,
   ],
-  [/^Avoided: a turn across traffic at (a busy junction|a crash-prone junction)$/, (_, junction) => `Evitada: una vuelta que cruza el sentido contrario en ${JUNCTIONS[junction]}`],
+  [/^Avoided: a turn across traffic at ((?:a busy junction|a crash-prone junction)(?: with a traffic signal)?)$/, (_, junction) => `Evitada: una vuelta que cruza el sentido contrario en ${junctionEs(junction)}`],
   [/^Via (.+)$/, (_, roads) => `Por ${roads.replaceAll(", then ", ", luego ")}`],
   [/^Our safer design (\d+)$/, "Nuestro diseño más seguro $1"],
   [/^the route via (.+)$/, (_, roads) => `la ruta por ${roads.replaceAll(", then ", ", luego ")}`],

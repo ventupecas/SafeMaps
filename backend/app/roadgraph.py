@@ -247,6 +247,18 @@ class RoadGraph:
         node = self._nearest(point, JUNCTION_MATCH_M, snappable_only=False)
         return None if node is None else self.node_kind(node)
 
+    def signal_at(self, point: Point) -> bool:
+        """Whether a traffic signal controls the junction at point (one within JUNCTION_MATCH_M)."""
+        ci, cj = _cell(point, _SIGNAL_CELL_DEG)
+        reach_lng = math.ceil(1 / max(math.cos(math.radians(point[0])), 0.01))
+        cells = self._signal_index()
+        return any(
+            haversine_m(point, self.point(node)) <= JUNCTION_MATCH_M
+            for i in range(ci - 1, ci + 2)
+            for j in range(cj - reach_lng, cj + reach_lng + 1)
+            for node in cells.get((i, j), ())
+        )
+
     def signals_along(self, stretches: Iterable[Sequence[Point]]) -> int:
         """Distinct traffic signals within SIGNAL_MATCH_M of the given stretches of road.
 

@@ -11,7 +11,8 @@ The heuristics are deliberately simple enough to explain on a demo stage:
   right, rights where it keeps left), flagged when the junction is busy or a
   known crash hotspot. Google's free tier has no per-junction traffic volume,
   so "busy" means at least one road at the junction is arterial class or
-  faster, judged by its no-traffic speed.
+  faster, judged by its no-traffic speed. One at a traffic signal (on the road
+  graph) counts SIGNALED_CROSSING_SHARE of one without, unless it's crash-prone.
 * Traffic delay: duration minus staticDuration. Only non-zero when the
   request was traffic-aware.
 * Fuel: each step's distance at its average speed, plus turns, traffic
@@ -106,6 +107,10 @@ class JunctionLookup(Protocol):
 
     def road_name_at(self, point: Point, heading: float) -> str:
         """The name of the road at point running along heading; "" if unknown."""
+        ...
+
+    def signal_at(self, point: Point) -> bool:
+        """Whether a traffic signal controls the junction at point."""
         ...
 
 
@@ -339,6 +344,7 @@ def _crossing_turn(
         if context.hotspots is not None and junction is not None
         else 0.0
     )
+    signal_at = getattr(context.junctions, "signal_at", None)
     return CrossingTurn(
         location=LatLng(lat=junction[0], lng=junction[1]) if junction else None,
         maneuver=maneuver,
@@ -346,4 +352,5 @@ def _crossing_turn(
         nearby_crashes=crashes,
         busy=busy,
         hotspot=crashes >= context.min_hotspot_crashes,
+        signal=bool(signal_at(junction)) if signal_at is not None and junction is not None else False,
     )

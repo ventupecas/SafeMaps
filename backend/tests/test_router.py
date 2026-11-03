@@ -267,3 +267,19 @@ def test_school_zones_cost_more_only_during_school_hours():
     features = extract_features(router.to_route_json(path), TurnContext(junctions=graph, school_hours=True))
     assert features.school_zones == 1
     assert [(p.lat, p.lng) for p in features.school_points] == graph.school_points  # where, for the map
+
+
+def test_a_signal_makes_the_busy_turn_cheaper_and_the_scorer_knows_it():
+    city = grid_city()
+    signal = next(e for e in city.osm.elements if e["type"] == "node" and e["id"] == junction(1, 2))
+    signal["tags"] = {"highway": "traffic_signals"}
+    graph = build_graph(city.osm.elements)
+    assert graph.signal_at(point(1, 2)) and not graph.signal_at(point(1, 1))
+    router = Router(graph)
+    table = router._turn_table(AVOID_BUSY_CROSSINGS)
+    at_signal = router._turn_cost(table, AVOID_BUSY_CROSSINGS, node_at(graph, 1, 2), "TURN_LEFT", True, True)
+    without = router._turn_cost(table, AVOID_BUSY_CROSSINGS, node_at(graph, 1, 1), "TURN_LEFT", True, True)
+    assert without - at_signal == pytest.approx(AVOID_BUSY_CROSSINGS.busy_crossing_weight / 2)
+    (best, *_) = router.routes(point(1, 0), point(2, 2), FASTEST)  # turns left at (1, 2), the signal
+    (turn,) = extract_features(router.to_route_json(best), TurnContext(junctions=graph)).crossing_turns
+    assert turn.busy and turn.signal
