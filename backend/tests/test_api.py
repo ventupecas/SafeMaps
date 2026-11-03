@@ -360,7 +360,7 @@ def test_routes_come_with_turn_by_turn_directions(api):
 def test_the_openstreetmap_map_never_asks_google(tmp_path, google):
     app = create_app(make_settings(tmp_path, map="osm"), http=httpx.Client(transport=httpx.MockTransport(google)))
     with TestClient(app) as client:
-        assert client.get("/app-config").json() == {"map": "osm", "traffic_tiles": False, "bus_routes": False, "bike": False, "fuel_price": 3.25}  # no TomTom key
+        assert client.get("/app-config").json() == {"map": "osm", "traffic_tiles": False, "bus_routes": False, "bike": False, "walk": False, "transit": False, "fuel_price": 3.25}  # no TomTom key
         trip = client.post("/route", json={"origin": ORIGIN, "destination": DESTINATION, "live_traffic": True}).json()
     assert google.requests == []  # no Google: not even with live traffic asked for
     standard = [route for route in trip["plan"]["candidates"] if route["is_standard"]]
@@ -372,7 +372,7 @@ def test_the_openstreetmap_map_never_asks_google(tmp_path, google):
 def test_googles_default_is_the_standard_route_on_the_google_map(api):
     trip = api.post("/route", json={"origin": ORIGIN, "destination": DESTINATION}).json()
     assert [r["id"] for r in trip["plan"]["candidates"] if r["is_standard"]] == ["google-1"]
-    assert api.get("/app-config").json() == {"map": "google", "traffic_tiles": False, "bus_routes": False, "bike": False, "fuel_price": 3.25}
+    assert api.get("/app-config").json() == {"map": "google", "traffic_tiles": False, "bus_routes": False, "bike": False, "walk": False, "transit": False, "fuel_price": 3.25}
 
 
 class FakeTomTom:
@@ -401,7 +401,7 @@ def test_tomtom_traffic_on_the_openstreetmap_map(tmp_path, google):
     tomtom = FakeTomTom(main_st_closed_both_ways(), google)
     settings = make_settings(tmp_path, map="osm", tomtom_api_key="tt-key")
     with TestClient(create_app(settings, http=httpx.Client(transport=httpx.MockTransport(tomtom)))) as client:
-        assert client.get("/app-config").json() == {"map": "osm", "traffic_tiles": True, "bus_routes": False, "bike": False, "fuel_price": 3.25}
+        assert client.get("/app-config").json() == {"map": "osm", "traffic_tiles": True, "bus_routes": False, "bike": False, "walk": False, "transit": False, "fuel_price": 3.25}
         trip = client.post("/route", json={"origin": ORIGIN, "destination": DESTINATION}).json()
         first = client.get("/traffic-tiles/12/1047/1504.png")
         again = client.get("/traffic-tiles/12/1047/1504.png")
@@ -534,3 +534,57 @@ def test_bike_routes_through_the_api(tmp_path, google):
 def test_no_bike_map_no_bike_routes(api):
     assert api.get("/app-config").json()["bike"] is False
     assert api.post("/bike-route", json={"origin": ORIGIN, "destination": DESTINATION}).status_code == 503
+
+
+def test_walking_routes_through_the_api(tmp_path, google):
+    walk_map = tmp_path / "grid-walk.json.gz"
+    build_graph(grid_city().osm.elements, area="grid", mode="walk").save(walk_map)
+    app = create_app(make_settings(tmp_path, map="osm", walk_graph_path=walk_map), http=httpx.Client(transport=httpx.MockTransport(google)))
+    with TestClient(app) as client:
+        assert client.get("/app-config").json()["walk"] is True
+        trip = client.post("/walk-route", json={"origin": ORIGIN, "destination": DESTINATION, "profile": "careful"}).json()
+        assert client.post("/walk-route", json={"origin": ORIGIN, "destination": DESTINATION, "profile": "family"}).status_code == 422
+    winner = trip["plan"]["winner"]
+    assert winner["features"]["duration_min"] >= 9  # 600 m or so at a careful walker's pace
+    assert trip["attribution"][0].startswith("Walking routes")
+
+
+def test_bus_trips_through_the_api(tmp_path, google):
+    from tests.test_timetable import feed
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, content=feed(point(1, 1))) if request.url.host == "transit.example" else google(request)
+
+    walk_map = tmp_path / "grid-walk.json.gz"
+    build_graph(grid_city().osm.elements, area="grid", mode="walk").save(walk_map)
+    settings = make_settings(tmp_path, map="osm", walk_graph_path=walk_map, bus_routes_url="https://transit.example/gtfs.zip")
+    app = create_app(settings, http=httpx.Client(transport=httpx.MockTransport(handler)))
+    with TestClient(app) as client:
+        assert client.get("/app-config").json()["transit"] is True
+        client.app.state.engine.schedule.load()  # read in the background at startup: here, wait for it
+        assert client.get("/health").json()["transit"]["ready"] is True
+        tuesday_10 = "2026-11-10T10:00:00"
+        far_east = {"lat": point(1, 1)[0], "lng": point(1, 1)[1] + 0.0367}  # 3 km east, past the GreenLine's last stop
+        trip = client.post("/transit-route", json={"origin": ORIGIN, "destination": far_east, "leave_at": tuesday_10}).json()
+        sunday = client.post("/transit-route", json={"origin": ORIGIN, "destination": far_east, "leave_at": "2026-11-08T10:00:00"})
+    winner = trip["plan"]["winner"]
+    assert [leg["kind"] for leg in winner["legs"]] == ["walk", "ride", "walk"]
+    to_the_bus = winner["legs"][0]
+    # Planned on the walking map: 200 m along Main St, a busy street with no sidewalks mapped.
+    assert 150 < to_the_bus["meters"] < 300 and to_the_bus["minutes_by_stress"][2] > 0
+    assert winner["legs"][1]["route"]["name"] == "GRE" and trip["scheduled"] is True
+    assert sunday.status_code == 404 and "No bus" in sunday.json()["detail"]
+
+
+def test_without_the_schedule_no_bus_trips(tmp_path, google):
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(503) if request.url.host == "transit.example" else google(request)
+
+    settings = make_settings(tmp_path, bus_routes_url="https://transit.example/gtfs.zip")
+    with TestClient(create_app(settings, http=httpx.Client(transport=httpx.MockTransport(handler)))) as client:
+        client.app.state.engine.schedule.load()
+        response = client.post("/transit-route", json={"origin": ORIGIN, "destination": DESTINATION})
+        assert response.status_code == 503 and "couldn't be loaded" in response.json()["detail"]
+    with TestClient(create_app(make_settings(tmp_path, bus_routes_url="https://transit.example/gtfs.zip", transit=False), http=httpx.Client(transport=httpx.MockTransport(handler)))) as client:
+        assert client.get("/app-config").json()["transit"] is False
+        assert client.post("/transit-route", json={"origin": ORIGIN, "destination": DESTINATION}).status_code == 503

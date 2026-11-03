@@ -131,6 +131,23 @@ def build_bike_query(bbox: BBox, timeout_s: int = 600) -> str:
     )
 
 
+def build_walk_query(bbox: BBox, timeout_s: int = 600) -> str:
+    """For the walking map, what the road query leaves out: footways and sidewalks, paths, steps and
+    pedestrian streets, their nodes, and their own crossings (marked or signaled). Combined with the road tiles."""
+    box = f"{bbox.south},{bbox.west},{bbox.north},{bbox.east}"
+    return (
+        f"[out:json][timeout:{timeout_s}];\n"
+        f'way["highway"~"^(footway|path|pedestrian|steps|cycleway|track|bridleway)$"]({box})->.paths;\n'
+        ".paths out body qt;\n"
+        "node(w.paths)->.path_nodes;\n"
+        ".path_nodes out skel qt;\n"
+        'node.path_nodes["highway"~"^(traffic_signals|crossing)$"];\n'
+        "out body qt;\n"
+        'node.path_nodes["railway"~"^(level_crossing|crossing)$"];\n'
+        "out body qt;\n"
+    )
+
+
 def download_area(
     area: str,
     bbox: BBox,
@@ -163,9 +180,18 @@ def download_area(
 
 
 def iter_elements(paths: Iterable[Path]) -> Iterator[dict[str, Any]]:
+    """Every element in the files. Files written one element a line (app.osm_extract) are read a line
+    at a time, so a whole metro's nodes never sit in memory at once; Overpass's own, whole."""
     for path in paths:
         with gzip.open(path, "rt", encoding="utf-8") as handle:
-            yield from json.load(handle).get("elements", [])
+            first = handle.readline()
+            if first.strip() == '{"elements": [':
+                for line in handle:
+                    line = line.strip().rstrip(",")
+                    if line and line != "]}":
+                        yield json.loads(line)
+            else:
+                yield from json.loads(first + handle.read()).get("elements", [])
 
 
 @dataclass

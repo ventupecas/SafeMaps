@@ -1,9 +1,12 @@
-// Bike mode (see BIKE_MODE.md): the Car / Bike switch, bike trips from the server (POST /bike-route),
-// their routes drawn by traffic stress, and the Bike stress layer (GET /bike-stress).
+// Bike and walking modes (see BIKE_MODE.md), and the switch between all the modes: bike and walking
+// trips from the server (POST /bike-route, /walk-route), their routes drawn by stress, and the Bike
+// stress layer (GET /bike-stress). Bus trips are transit.js's.
 //
 // A bike route's stretches are colored by their Level of Traffic Stress: 1 for anyone (trails,
-// quiet streets) to 4 for only the most confident riders (fast, multi-lane traffic). The recommended
-// route is the lowest-stress one within the rider's detour limit; the standard one is the shortest.
+// quiet streets) to 4 for only the most confident riders (fast, multi-lane traffic). A walk's are
+// colored the same way by its sidewalks: 1 a sidewalk or path, 4 a busy street without one. The
+// recommended route is the lowest-stress one within the traveler's detour limit; the standard one
+// is the shortest.
 
 import { decodePolyline } from "./maps.js";
 import { $, KM_TO_MI, capitalize, element, state } from "./core.js";
@@ -12,8 +15,8 @@ import { chosenStops } from "./editing.js";
 import { clearRoutes, drawRoutes, isStandard, routeLabel, routeKind, scorePill, scoreRing, selectRoute } from "./results.js";
 
 export const STRESS_COLORS = { 1: "#1a9850", 2: "#8bbd2a", 3: "#f08c00", 4: "#d7191c" };
-const STRESS_NAMES = { 1: "Low stress: anyone", 2: "Some traffic: most adults", 3: "Busy: confident riders", 4: "Very busy: few riders" };
 const MODE_KEY = "routes-mode";
+const MODES = ["car", "bike", "walk", "transit"];
 const STRESS_MIN_ZOOM = 14; // the stress layer asks for the streets in view only this close in
 const RISK_LABELS = {
   stress_4_minutes: "Minutes on very busy streets",
@@ -26,19 +29,66 @@ const RISK_LABELS = {
   closures: "Closed roads",
 };
 
-const bike = { available: false, stress: [], crossingMarks: [], stressRequest: 0 };
+// What the bike and walking modes say and ask for.
+const ACTIVE = {
+  bike: {
+    path: "/bike-route",
+    profile: "bike-profile",
+    start: "Start riding",
+    stop: "Stop riding",
+    stress: { 1: "Low stress: anyone", 2: "Some traffic: most adults", 3: "Busy: confident riders", 4: "Very busy: few riders" },
+    busy: "busy streets",
+    killed: "Where cyclists were killed",
+    risks: RISK_LABELS,
+    winter: "Winter: trails may not be cleared of snow and ice. Check before you ride.",
+    dark: "It's dark: crossing busy roads counts as riskier. Use lights.",
+  },
+  walk: {
+    path: "/walk-route",
+    profile: "walk-profile",
+    start: "Start walking",
+    stop: "Stop walking",
+    stress: { 1: "Sidewalk or path", 2: "Quiet street without a sidewalk", 3: "Busy street with no sidewalk mapped", 4: "Busy street without a sidewalk" },
+    busy: "busy streets without a sidewalk",
+    killed: "Where pedestrians were killed",
+    risks: {
+      ...RISK_LABELS,
+      stress_4_minutes: "Minutes on busy streets without a sidewalk",
+      stress_3_minutes: "Minutes on busy streets with no sidewalk mapped",
+      crash_spots: "Where pedestrians were killed",
+    },
+    winter: "Winter: sidewalks may be icy where they aren't cleared.",
+    dark: "It's dark: crossing busy roads counts as riskier. Wear something bright.",
+  },
+};
 
-// The switch, the rider profiles and the stress layer, when the server has the bike map.
-export function setUpBikeMode(available) {
-  bike.available = available;
-  if (!available) return;
-  $("mode").hidden = false;
-  $("bike-stress-switch").hidden = false;
+const modes = { available: { car: true }, stressRequest: 0 };
+
+// Bike and walking trips come from here; car trips from results.js, bus trips from transit.js.
+export function isActiveMode(mode) {
+  return mode in ACTIVE;
+}
+
+// What the Start button says in each mode.
+export function startLabel(mode, going = false) {
+  const words = ACTIVE[mode] || { start: "Start driving", stop: "Stop driving" };
+  return going ? words.stop : words.start;
+}
+
+// The switch, with the modes the server has maps (or a schedule) for; the stress layer with the bike map.
+export function setUpModes(available) {
+  Object.assign(modes.available, available);
   for (const radio of document.querySelectorAll('input[name="mode"]')) {
+    radio.closest("label").hidden = !modes.available[radio.value];
     radio.addEventListener("change", () => setMode(radio.value, { remember: true }));
   }
-  $("bike-stress-layer").addEventListener("change", drawStressLayer);
-  state.view.onMoveEnd(() => $("bike-stress-layer").checked && drawStressLayer());
+  if (!MODES.some((mode) => mode !== "car" && modes.available[mode])) return;
+  $("mode").hidden = false;
+  if (modes.available.bike) {
+    $("bike-stress-switch").hidden = false;
+    $("bike-stress-layer").addEventListener("change", drawStressLayer);
+    state.view.onMoveEnd(() => $("bike-stress-layer").checked && drawStressLayer());
+  }
   const fromLink = new URLSearchParams(window.location.search).get("mode");
   let saved = null;
   try {
@@ -46,34 +96,35 @@ export function setUpBikeMode(available) {
   } catch {
     // Storage blocked: car mode unless the link says.
   }
-  setMode(fromLink === "bike" || (!fromLink && saved === "bike") ? "bike" : "car");
+  setMode(fromLink || saved || "car");
 }
 
-// Car or bike: the controls that apply, and what's drawn. Routes for the other mode are cleared.
+// Car, bike, walk or transit: the controls that apply, and what's drawn. Routes for the other mode are cleared.
 export function setMode(mode, { remember = false } = {}) {
-  if (mode === "bike" && !bike.available) mode = "car";
+  if (!modes.available[mode]) mode = "car";
   const changed = state.mode !== mode;
   state.mode = mode;
-  document.body.classList.toggle("mode-bike", mode === "bike");
+  document.body.dataset.mode = mode;
   showStressKey();
   const radio = document.querySelector(`input[name="mode"][value="${mode}"]`);
   if (radio) radio.checked = true;
-  $("drive").textContent = state.nav.active ? $("drive").textContent : mode === "bike" ? "Start riding" : "Start driving";
+  if (!state.nav.active) $("drive").textContent = startLabel(mode);
   if (remember) {
     try {
       localStorage.setItem(MODE_KEY, mode);
     } catch {
       // Remembered for this visit only.
     }
-  }
-  // The Biking layer helps on a bike: on with bike mode, off again with the car.
-  const biking = $("biking-layer");
-  if (remember && biking.checked !== (mode === "bike")) {
-    biking.checked = mode === "bike";
-    biking.dispatchEvent(new Event("change"));
+    // The Biking layer helps on a bike, the Transit layer on the bus: on with that mode, off again after.
+    for (const [layer, on] of [["biking-layer", mode === "bike"], ["transit-layer", mode === "transit"]]) {
+      const box = $(layer);
+      if (box.checked !== on) {
+        box.checked = on;
+        box.dispatchEvent(new Event("change"));
+      }
+    }
   }
   if (changed && state.plan) {
-    clearBikeMarks();
     clearRoutes();
     state.plan = null;
     $("results").replaceChildren();
@@ -81,32 +132,30 @@ export function setMode(mode, { remember = false } = {}) {
   }
 }
 
-// stops: places still to stop at (the chosen ones by default; while riding, those not reached yet).
-export async function requestBikeTrip(origin, destination, { stops = chosenStops() } = {}) {
-  return postJson("/bike-route", {
+// stops: places still to stop at (the chosen ones by default; while on the way, those not reached yet).
+export async function requestActiveTrip(origin, destination, { stops = chosenStops() } = {}) {
+  const words = ACTIVE[state.mode];
+  return postJson(words.path, {
     origin: { lat: origin.lat, lng: origin.lng },
     destination: { lat: destination.lat, lng: destination.lng },
     stops: stops.map((point) => ({ lat: point.lat, lng: point.lng })),
-    profile: $("bike-profile").value,
+    profile: $(words.profile).value,
     departure_offset_min: Number($("leave").value) || 0,
   });
 }
 
-// ---- A bike trip, drawn and explained
+// ---- A bike or walking trip, drawn and explained
 
-export function showBikeTrip(trip, { fit = true } = {}) {
+export function showActiveTrip(trip, { fit = true } = {}) {
   const { plan } = trip;
+  const words = ACTIVE[state.mode];
   state.plan = plan;
-  clearBikeMarks();
   clearRoutes();
   drawRoutes(plan, fit);
   drawStress(plan.winner);
   drawCrossings(plan);
   const standard = plan.candidates.find(isStandard);
-  const notes = [
-    ...(trip.winter ? ["Winter: trails may not be cleared of snow and ice. Check before you ride."] : []),
-    ...(trip.after_dark ? ["It's dark: crossing busy roads counts as riskier. Use lights."] : []),
-  ];
+  const notes = [...(trip.winter ? [words.winter] : []), ...(trip.after_dark ? [words.dark] : [])];
   $("results").replaceChildren(
     ...notes.map((note) => element("div", { className: "alert" }, element("p", {}, note))),
     winnerCard(plan, standard),
@@ -120,10 +169,11 @@ export function showBikeTrip(trip, { fit = true } = {}) {
   $("drive").hidden = false;
 }
 
-// The recommended route, stretch by stretch in its stress colors, over its white edge.
+// The recommended route, stretch by stretch in its stress colors, over its white edge. (What's in
+// state.modeMarks goes with the routes: clearRoutes.)
 function drawStress(route) {
   for (const stretch of route.stress_segments) {
-    bike.stress.push(state.view.line(decodePolyline(stretch.encoded_polyline), { color: STRESS_COLORS[stretch.stress], weight: 6, zIndex: 22 }));
+    state.modeMarks.push(state.view.line(decodePolyline(stretch.encoded_polyline), { color: STRESS_COLORS[stretch.stress], weight: 6, zIndex: 22 }));
   }
 }
 
@@ -136,7 +186,7 @@ function drawCrossings(plan) {
     const text = avoided
       ? "The shortest route crosses a busy road here without a signal. The recommended route doesn't."
       : "The recommended route crosses a busy road here without a signal. Take care.";
-    bike.crossingMarks.push(state.view.marker(crossing, dot, { title: heading, zIndex: avoided ? 29 : 30, popup: { heading, text } }));
+    state.modeMarks.push(state.view.marker(crossing, dot, { title: heading, zIndex: avoided ? 29 : 30, popup: { heading, text } }));
   };
   ours.forEach((crossing) => mark(crossing, false));
   const standard = plan.candidates.find(isStandard);
@@ -145,11 +195,6 @@ function drawCrossings(plan) {
   for (const crossing of standard.features.crossings) {
     if (!ours.some((mine) => near(mine, crossing))) mark(crossing, true);
   }
-}
-
-function clearBikeMarks() {
-  bike.stress.splice(0).forEach((line) => line.remove());
-  bike.crossingMarks.splice(0).forEach((mark) => mark.remove());
 }
 
 function winnerCard(plan, standard) {
@@ -183,7 +228,7 @@ function winnerCard(plan, standard) {
         ["Distance", `${(f.distance_km * KM_TO_MI).toFixed(1)} mi`],
         ["Busy crossings", String(f.busy_crossings)],
         ["Railroad tracks", String(f.rail_crossings)],
-        ...(f.crash_spots ? [["Where cyclists were killed", String(f.crash_spots)]] : []),
+        ...(f.crash_spots ? [[ACTIVE[state.mode].killed, String(f.crash_spots)]] : []),
       ].map(([label, value]) => element("div", {}, element("dt", {}, label), element("dd", {}, value))),
     ),
     breakdown(winner, standard),
@@ -191,17 +236,18 @@ function winnerCard(plan, standard) {
   return card;
 }
 
-// Minutes at each stress level, as one bar.
-function stressBar(minutes) {
+// Minutes at each stress level, as one bar, named as mode names them.
+export function stressBar(minutes, mode = state.mode) {
+  const names = ACTIVE[mode].stress;
   const total = minutes.reduce((sum, value) => sum + value, 0) || 1;
   const bar = element(
     "div",
     { className: "stress-bar", role: "img" },
     ...minutes.map((value, i) =>
-      element("span", { className: "stress-bar__part", style: `flex:${value / total};background:${STRESS_COLORS[i + 1]}`, title: `${STRESS_NAMES[i + 1]}: ${Math.round(value)} min` }),
+      element("span", { className: "stress-bar__part", style: `flex:${value / total};background:${STRESS_COLORS[i + 1]}`, title: `${names[i + 1]}: ${Math.round(value)} min` }),
     ),
   );
-  bar.setAttribute("aria-label", minutes.map((value, i) => `${STRESS_NAMES[i + 1]}: ${Math.round(value)} min`).join(", "));
+  bar.setAttribute("aria-label", minutes.map((value, i) => `${names[i + 1]}: ${Math.round(value)} min`).join(", "));
   return element(
     "div",
     { className: "stress" },
@@ -209,7 +255,7 @@ function stressBar(minutes) {
     element(
       "ul",
       { className: "stress__key" },
-      ...minutes.map((value, i) => element("li", {}, element("span", { className: "key", style: `background:${STRESS_COLORS[i + 1]}` }), `${STRESS_NAMES[i + 1]} · ${Math.round(value)} min`)),
+      ...minutes.map((value, i) => element("li", {}, element("span", { className: "key", style: `background:${STRESS_COLORS[i + 1]}` }), `${names[i + 1]} · ${Math.round(value)} min`)),
     ),
   );
 }
@@ -218,7 +264,7 @@ function comparedWithShortest(winner, standard) {
   const parts = [`safety score ${standard.safety_score} → ${winner.safety_score}`];
   const busy = (route) => route.features.minutes_by_stress[2] + route.features.minutes_by_stress[3];
   const calmer = busy(standard) - busy(winner);
-  if (calmer >= 0.5) parts.push(`${Math.round(calmer)} min less on busy streets`);
+  if (calmer >= 0.5) parts.push(`${Math.round(calmer)} min less on ${ACTIVE[state.mode].busy}`);
   const fewer = standard.features.busy_crossings - winner.features.busy_crossings;
   if (fewer > 0) parts.push(`${fewer} fewer busy crossing${fewer === 1 ? "" : "s"}`);
   const minutes = winner.features.duration_min - standard.features.duration_min;
@@ -230,7 +276,8 @@ function breakdown(winner, standard) {
   const compare = Boolean(standard && standard.id !== winner.id);
   const ours = winner.safety_risks || {};
   const theirs = compare ? standard.safety_risks || {} : {};
-  const kinds = Object.keys(RISK_LABELS).filter((kind) => ours[kind] || theirs[kind]);
+  const labels = ACTIVE[state.mode].risks;
+  const kinds = Object.keys(labels).filter((kind) => ours[kind] || theirs[kind]);
   if (!kinds.length) return element("p", { className: "breakdown__none" }, "No risks found on this route: a perfect 100.");
   const points = (value) => (value ? (Math.round(value * 10) / 10).toString() : "–");
   const total = (risks) => Object.values(risks).reduce((sum, value) => sum + value, 0);
@@ -244,7 +291,7 @@ function breakdown(winner, standard) {
       "table",
       { className: "breakdown__table" },
       element("thead", {}, row("Risk points", columns("This route", "Shortest"))),
-      element("tbody", {}, ...kinds.map((kind) => row(RISK_LABELS[kind], columns(points(ours[kind]), points(theirs[kind]))))),
+      element("tbody", {}, ...kinds.map((kind) => row(labels[kind], columns(points(ours[kind]), points(theirs[kind]))))),
       element(
         "tfoot",
         {},
@@ -301,8 +348,8 @@ function showStressKey() {
 }
 
 async function drawStressLayer() {
-  const ticket = ++bike.stressRequest;
-  const clear = () => bike.layer && bike.layer.splice(0).forEach((line) => line.remove());
+  const ticket = ++modes.stressRequest;
+  const clear = () => modes.layer && modes.layer.splice(0).forEach((line) => line.remove());
   showStressKey();
   if (!$("bike-stress-layer").checked) {
     $("stress-hint").hidden = true;
@@ -326,12 +373,12 @@ async function drawStressLayer() {
     console.warn("Bike stress unavailable:", error);
     return;
   }
-  if (ticket !== bike.stressRequest || !$("bike-stress-layer").checked) return; // the map moved again meanwhile
+  if (ticket !== modes.stressRequest || !$("bike-stress-layer").checked) return; // the map moved again meanwhile
   clear();
-  bike.layer = [];
+  modes.layer = [];
   for (const [stress, lines] of Object.entries(data.lines)) {
     for (const encoded of lines) {
-      bike.layer.push(state.view.line(decodePolyline(encoded), { color: STRESS_COLORS[stress], weight: 3, opacity: 0.85, zIndex: 2, under: true }));
+      modes.layer.push(state.view.line(decodePolyline(encoded), { color: STRESS_COLORS[stress], weight: 3, opacity: 0.85, zIndex: 2, under: true }));
     }
   }
 }

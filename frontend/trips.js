@@ -64,7 +64,7 @@ export function tripLink() {
     if (point.label && !/^(My|Current) location$/.test(point.label)) params.set(`${key}Name`, point.label.slice(0, 80));
   }
   for (const stop of chosenStops()) params.append("stop", where(stop));
-  if (state.mode === "bike") params.set("mode", "bike");
+  if (state.mode !== "car") params.set("mode", state.mode);
   const query = params.toString();
   return `${window.location.origin}${window.location.pathname}${query ? `?${query}` : ""}`;
 }

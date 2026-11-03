@@ -155,11 +155,14 @@ class RoadGraph:
     school_zone: list[bool] = field(default_factory=list)  # per edge: within SCHOOL_ZONE_M of a school
     rail_crossing_points: list[Point] = field(default_factory=list)
     school_points: list[Point] = field(default_factory=list)
-    # "car", or "bike" for the bike map (build_graph(mode="bike")): its segments carry stress, its
-    # speeds are riding speeds, and it has trails and paths cars can't use.
+    # "car", or "bike" / "walk" for the bike and walking maps (build_graph(mode=...)): their segments
+    # carry stress, their speeds are riding or walking speeds, and they have paths cars can't use.
     mode: str = "car"
-    stress: list[int] = field(default_factory=list)  # per segment, bike map only: Level of Traffic Stress, 1-4
-    lit: list[bool] = field(default_factory=list)  # per segment, bike map only: lit at night (see _lit)
+    stress: list[int] = field(default_factory=list)  # per segment: stress riding (Level of Traffic Stress) or walking along it, 1-4
+    lit: list[bool] = field(default_factory=list)  # per segment: lit at night (see _lit)
+    # Per segment: how hard its traffic is to cross, 1-4 (its Level of Traffic Stress). On the bike map,
+    # the same as stress; on the walking map, a street with a sidewalk is easy to walk along but not to cross.
+    cross: list[int] = field(default_factory=list)
 
     time_s: list[float] = field(init=False, repr=False)
     out_edges: list[list[int]] = field(init=False, repr=False)
@@ -181,6 +184,7 @@ class RoadGraph:
         self.school_zone = self.school_zone or [False] * len(self.edge_from)
         self.stress = self.stress or [0] * len(self.edge_from)
         self.lit = self.lit or [True] * len(self.edge_from)
+        self.cross = self.cross or list(self.stress)
         self.time_s = [
             length / (speed / 3.6) + SIGNAL_DELAY_S * signals
             for length, speed, signals in zip(self.length_m, self.speed_kmh, self.signals, strict=True)
@@ -742,7 +746,8 @@ class RoadGraph:
                 "geometry": self.geometry,
                 "rail_crossings": self.rail_crossings,
                 "school": [int(x) for x in self.school_zone],
-                **({"stress": self.stress, "lit": [int(x) for x in self.lit]} if self.mode == "bike" else {}),
+                **({"stress": self.stress, "lit": [int(x) for x in self.lit]} if self.mode != "car" else {}),
+                **({"cross": self.cross} if self.mode == "walk" else {}),
             },
             "banned": [[edge, other] for edge, others in sorted(self.banned.items()) for other in sorted(others)],
             "rail_crossing_points": [[round(lat, 7), round(lng, 7)] for lat, lng in self.rail_crossing_points],
@@ -799,6 +804,7 @@ class RoadGraph:
             mode=data.get("mode", "car"),
             stress=edges.get("stress", []),
             lit=[bool(x) for x in edges.get("lit", [])],
+            cross=edges.get("cross", []),
         )
 
 
@@ -836,8 +842,8 @@ def build_graph(
                 signal_nodes.add(element["id"])
             if tags.get("railway") == "level_crossing":
                 crossing_nodes.add(element["id"])
-            if mode == "bike":
-                # A trail's own signal to cross a street, and its own crossing of the tracks.
+            if mode != "car":
+                # A path's own signal to cross a street, and its own crossing of the tracks.
                 if tags.get("highway") == "crossing" and tags.get("crossing") == "traffic_signals":
                     signal_nodes.add(element["id"])
                 if tags.get("railway") == "crossing":
@@ -850,7 +856,7 @@ def build_graph(
     stats: Counter[str] = Counter()
     roads = []
     for way in ways.values():
-        road = _Road.from_way(way, coords) if mode == "car" else _Road.for_bikes(way, coords)
+        road = {"car": _Road.from_way, "bike": _Road.for_bikes, "walk": _Road.for_walking}[mode](way, coords)
         if road is None:
             stats["ways_skipped"] += 1
         else:
@@ -872,16 +878,24 @@ def build_graph(
                 builder.add_segment(road, road.refs[start : i + 1])
                 start = i
 
-    banned = _apply_restrictions(builder, relations.values(), stats, mode)
+    # The ways are segments now: let them go before the map is finished (a metro's worth is large).
+    del uses
+    roads.clear()
+    ways.clear()
+
+    # Turn restrictions are for vehicles: none apply on foot.
+    banned = _apply_restrictions(builder, relations.values(), stats, mode) if mode != "walk" else {}
+    relations.clear()
+    rail_crossing_points = sorted(coords[node] for node in crossing_nodes if node in coords)
     graph = builder.finish(area, bbox, banned, stats)
     _mark_school_zones(graph, schools)
-    graph.rail_crossing_points = sorted(coords[node] for node in crossing_nodes if node in coords)
+    graph.rail_crossing_points = rail_crossing_points
     graph.stats.update(
         rail_crossings=len(graph.rail_crossing_points),
         schools=len(schools),
         school_zone_segments=sum(graph.school_zone),
     )
-    if mode == "bike":
+    if mode != "car":
         graph.stats.update({f"stress_{level}_km": round(sum(l for l, s in zip(graph.length_m, graph.stress) if s == level) / 2000) for level in (1, 2, 3, 4)})
     logger.info("Built %s: %d junctions, %d road segments", area or "graph", graph.node_count, graph.edge_count)
     return graph
@@ -896,8 +910,9 @@ class _Road:
     name: str
     forward: bool
     backward: bool
-    stress: int = 0  # bike map only: Level of Traffic Stress, 1-4
-    lit: bool = True  # bike map only
+    stress: int = 0  # bike and walking maps: stress riding or walking along it, 1-4
+    lit: bool = True  # bike and walking maps
+    cross: int = 0  # walking map: how hard it is to cross (its Level of Traffic Stress)
 
     @classmethod
     def for_bikes(cls, way: Mapping[str, Any], coords: Mapping[int, Point]) -> _Road | None:
@@ -924,6 +939,33 @@ class _Road:
             backward=direction[1],
             stress=traffic_stress(tags),
             lit=_lit(tags),
+        )
+
+    @classmethod
+    def for_walking(cls, way: Mapping[str, Any], coords: Mapping[int, Point]) -> _Road | None:
+        """The way as the walking map has it: both ways (one-way streets are for vehicles), at walking pace."""
+        tags = way.get("tags", {})
+        if not _walkable(tags):
+            return None
+        refs: list[int] = []
+        for ref in way.get("nodes", []):
+            if ref in coords and (not refs or refs[-1] != ref):
+                refs.append(ref)
+        if len(refs) < 2:
+            return None
+        highway = tags["highway"]
+        one_way = tags.get("oneway:foot") == "yes"
+        return cls(
+            way_id=way["id"],
+            refs=refs,
+            highway=highway,
+            speed_kmh=WALK_STEPS_KMH if highway == "steps" else WALK_SPEED_KMH,
+            name=tags.get("name") or tags.get("ref") or "",
+            forward=True,
+            backward=not one_way,
+            stress=walking_stress(tags),
+            lit=_lit(tags),
+            cross=1 if highway in WALK_ONLY_HIGHWAYS or highway in OFF_STREET_HIGHWAYS else traffic_stress(tags),
         )
 
     @classmethod
@@ -989,7 +1031,7 @@ class _EdgeBuilder:
         self.lat: list[float] = []
         self.lng: list[float] = []
         self.names: dict[str, int] = {"": 0}
-        self.classes = list(DRIVABLE_HIGHWAYS) + (list(BIKE_ONLY_HIGHWAYS) if mode == "bike" else [])
+        self.classes = list(DRIVABLE_HIGHWAYS) + (list(BIKE_ONLY_HIGHWAYS) if mode != "car" else []) + (list(WALK_ONLY_HIGHWAYS) if mode == "walk" else [])
         self.edges: dict[str, list[Any]] = defaultdict(list)
 
     def junction(self, osm_id: int) -> int:
@@ -1029,6 +1071,7 @@ class _EdgeBuilder:
         e["geometry"].append(encode_polyline(points))
         e["stress"].append(road.stress)
         e["lit"].append(road.lit)
+        e["cross"].append(road.cross)
 
     def finish(self, area: str, bbox: BBox | None, banned: dict[int, set[int]], stats: Counter[str]) -> RoadGraph:
         e = self.edges
@@ -1071,8 +1114,9 @@ class _EdgeBuilder:
             banned=remapped_banned,
             rail_crossings=column("rail_crossings"),
             mode=self.mode,
-            stress=column("stress") if self.mode == "bike" else [],
-            lit=column("lit") if self.mode == "bike" else [],
+            stress=column("stress") if self.mode != "car" else [],
+            lit=column("lit") if self.mode != "car" else [],
+            cross=column("cross") if self.mode == "walk" else [],
         )
         stats["junctions"] = graph.node_count
         stats["road_segments"] = graph.edge_count
@@ -1189,6 +1233,48 @@ def _bike_direction(tags: Mapping[str, str]) -> tuple[bool, bool] | None:
     if tags.get("highway") in OFF_STREET_HIGHWAYS and tags.get("oneway") not in ("yes", "-1"):
         return (True, True)
     return _direction(tags)
+
+
+# ---- The walking map: where people may walk, and how stressful walking along it is.
+
+WALK_ONLY_HIGHWAYS = ("steps",)
+WALK_SPEED_KMH = 4.8  # an everyday walker
+WALK_STEPS_KMH = 2.0
+_WALKERS_WELCOME = frozenset({"yes", "designated", "permissive"})
+_HAS_SIDEWALK = frozenset({"both", "left", "right", "yes", "separate"})
+
+
+def _walkable(tags: Mapping[str, str]) -> bool:
+    highway = tags.get("highway")
+    if highway not in DRIVABLE_HIGHWAYS and highway not in BIKE_ONLY_HIGHWAYS and highway not in WALK_ONLY_HIGHWAYS:
+        return False
+    if highway in NO_BIKE_HIGHWAYS or tags.get("area") == "yes":
+        return False  # freeways; and plazas, which are outlines to cross, not lines to walk
+    foot = tags.get("foot")
+    if foot in ("no", "use_sidepath"):
+        return False
+    if foot in _WALKERS_WELCOME:
+        return True
+    if highway == "trunk" and tags.get("sidewalk") in ("no", "none", None):
+        return False  # an expressway without a sidewalk
+    access = tags.get("access")
+    return access is None or access not in _NO_ACCESS
+
+
+def walking_stress(tags: Mapping[str, str]) -> int:
+    """How stressful walking along the way is, 1-4: a path or a sidewalk is 1; a quiet street without
+    a sidewalk 2; a busier one without 3 or 4. Where OSM doesn't say, quiet streets are taken as fine
+    and others as 2: most of Milwaukee's busier streets have sidewalks, but it isn't known."""
+    highway = tags.get("highway", "")
+    if highway in OFF_STREET_HIGHWAYS or highway in WALK_ONLY_HIGHWAYS or highway == "living_street":
+        return 1
+    sides = {tags.get(key, "") for key in ("sidewalk", "sidewalk:both", "sidewalk:left", "sidewalk:right")}
+    traffic = traffic_stress(tags)
+    if sides & _HAS_SIDEWALK:
+        return 1
+    if sides & {"no", "none"}:
+        return {1: 2, 2: 3}.get(traffic, 4)
+    return 1 if traffic == 1 else 2 if traffic <= 3 else 3
 
 
 def _lit(tags: Mapping[str, str]) -> bool:

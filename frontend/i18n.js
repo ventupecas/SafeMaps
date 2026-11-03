@@ -383,6 +383,65 @@ const PHRASES = [
   ["Busy: confident riders", "Concurrida: ciclistas con experiencia"],
   ["Very busy: few riders", "Muy concurrida: pocos ciclistas"],
 
+  // Walking mode
+  ["Walk", "A pie"],
+  ["Walker", "Peatón"],
+  ["Most people: a short detour for a calmer walk", "La mayoría: un desvío corto por una caminata más tranquila"],
+  ["Careful: slower, the calmest streets", "Con cuidado: más despacio, por las calles más tranquilas"],
+  ["Step-free: no stairs, for a wheelchair or stroller", "Sin escalones: sin escaleras, para silla de ruedas o carriola"],
+  ["Start walking", "Empezar a caminar"],
+  ["Stop walking", "Terminar caminata"],
+  ["Walking: sidewalk or path → busy street without one", "A pie: banqueta o sendero → calle concurrida sin banqueta"],
+  ["Sidewalk or path", "Banqueta o sendero"],
+  ["Quiet street without a sidewalk", "Calle tranquila sin banqueta"],
+  ["Busy street with no sidewalk mapped", "Calle concurrida sin banqueta en el mapa"],
+  ["Busy street without a sidewalk", "Calle concurrida sin banqueta"],
+  ["Where pedestrians were killed", "Donde murieron peatones"],
+  ["Minutes on busy streets without a sidewalk", "Minutos en calles concurridas sin banqueta"],
+  ["Minutes on busy streets with no sidewalk mapped", "Minutos en calles concurridas sin banqueta en el mapa"],
+  ["Winter: sidewalks may be icy where they aren't cleared.", "Invierno: las banquetas pueden tener hielo donde no las han limpiado."],
+  ["It's dark: crossing busy roads counts as riskier. Wear something bright.", "Ya es de noche: cruzar calles concurridas cuenta como más riesgoso. Usa ropa clara o reflejante."],
+  ["Comparing routes for safety and time…", "Comparando rutas por seguridad y tiempo…"],
+  ["No bike route was found between these points.", "No se encontró una ruta en bicicleta entre estos puntos."],
+  ["No walking route was found between these points.", "No se encontró una ruta a pie entre estos puntos."],
+  ["The server has no bike map.", "El servidor no tiene el mapa para bicicletas."],
+  ["The server has no walking map.", "El servidor no tiene el mapa para caminar."],
+
+  // Transit mode
+  ["Transit", "Transporte público"],
+  ["Bus ride, in the route's color ·", "Viaje en autobús, del color de la ruta ·"],
+  ["walk", "a pie"],
+  ["Checking the bus schedule…", "Consultando los horarios de autobús…"],
+  ["Bus schedule: Milwaukee County Transit System", "Horarios de autobús: Milwaukee County Transit System"],
+  [
+    "Times are from the bus schedule, not live: buses can run late. Be at the stop a minute or two early.",
+    "Los horarios son los programados, no en tiempo real: los autobuses pueden retrasarse. Llega a la parada uno o dos minutos antes.",
+  ],
+  [
+    "It's dark: waiting at a stop counts as riskier. Wait where it's lit, and wear something bright.",
+    "Ya es de noche: esperar en una parada cuenta como más riesgoso. Espera donde haya luz y usa ropa clara o reflejante.",
+  ],
+  ["All bus options, best first · pick one to see it", "Todas las opciones de autobús, la mejor primero · elige una para verla"],
+  ["The recommended trip, step by step", "El viaje recomendado, paso a paso"],
+  ["This trip, step by step", "Este viaje, paso a paso"],
+  ["Walking", "A pie"],
+  ["Waiting", "Esperando"],
+  ["Transfers", "Transbordos"],
+  ["Arrive", "Llegada"],
+  ["Walk to your destination", "Camina hasta tu destino"],
+  ["This trip", "Este viaje"],
+  ["No risks found on this trip: a perfect 100.", "No se encontraron riesgos en este viaje: un 100 perfecto."],
+  ["Minutes walking on busy streets without a sidewalk", "Minutos caminando por calles concurridas sin banqueta"],
+  ["Minutes walking on busy streets with no sidewalk mapped", "Minutos caminando por calles concurridas sin banqueta en el mapa"],
+  ["Minutes walking on unlit stretches, after dark", "Minutos caminando por tramos sin luz, de noche"],
+  ["Minutes waiting at a stop after dark", "Minutos esperando en una parada de noche"],
+  [
+    "The walks count as walking routes do; waiting after dark counts by the minute, and each transfer counts one. The score is 100 with no risks, and halves with every 10 risk points.",
+    "Las caminatas cuentan como las rutas a pie; esperar de noche cuenta por minuto, y cada transbordo cuenta uno. La puntuación es 100 sin riesgos y se reduce a la mitad con cada 10 puntos de riesgo.",
+  ],
+  ["No bus gets there from here at this time. Try another time, or walking or biking.", "Ningún autobús llega ahí desde aquí a esta hora. Prueba otra hora, o ir a pie o en bicicleta."],
+  ["The bus schedule isn't ready: it loads when the server starts. Try again in a minute.", "Los horarios de autobús aún no están listos: se cargan al iniciar el servidor. Intenta de nuevo en un minuto."],
+
   // The stats screen
   ["Booth Stats", "Estadísticas del stand"],
   ["Today at the booth", "Hoy en el stand"],
@@ -493,6 +552,20 @@ const REASONS = [
     (_, ratio, extra, ours, theirs) => `la de menos estrés dentro de ${ratio} veces el tiempo más corto, con ${extra} min más como máximo: ${ours} min en calles concurridas en vez de ${theirs}`,
   ],
   [/^more stress: (\d+) min on busy streets$/i, (_, n) => `más estrés: ${n} min en calles concurridas`],
+  // Walking routes (app.bike, on the walking map)
+  [
+    /^lowest stress within ([\d.]+)x the shortest time, at most ([\d.]+) min more: (\d+) min on streets without sidewalks instead of (\d+)$/i,
+    (_, ratio, extra, ours, theirs) => `la de menos estrés dentro de ${ratio} veces el tiempo más corto, con ${extra} min más como máximo: ${ours} min en calles sin banqueta en vez de ${theirs}`,
+  ],
+  [/^more stress: (\d+) min on streets without sidewalks$/i, (_, n) => `más estrés: ${n} min en calles sin banqueta`],
+  [/^safest within ([\d.]+)x the shortest time, at most ([\d.]+) min more$/i, (_, ratio, extra) => `la más segura dentro de ${ratio} veces el tiempo más corto, con ${extra} min más como máximo`],
+  [/^less safe: safety score (\d+)$/i, (_, n) => `menos segura: puntuación de seguridad ${n}`],
+  // Bus trips (app.transit_plan)
+  [/^safest, and arrives earliest$/i, () => "la más segura, y la que llega primero"],
+  [/^safest within (\d+) min of the earliest arrival$/i, (_, n) => `la más segura entre las que llegan a menos de ${n} min de la primera`],
+  [/^arrives (\d+) min after the earliest$/i, (_, n) => `llega ${n} min después de la primera`],
+  [/^arrives earliest$/i, () => "la que llega primero"],
+  [/^as safe, but arrives later$/i, () => "igual de segura, pero llega más tarde"],
   [/^too long a detour: over ([\d.]+)x the shortest time or ([\d.]+) min more$/i, (_, ratio, extra) => `un desvío demasiado largo: más de ${ratio} veces el tiempo más corto o ${extra} min más`],
 ];
 
@@ -500,6 +573,7 @@ const REASONS = [
 const BIKE_CHANGES = [
   [/^safety score (\d+) → (\d+)$/, "puntuación de seguridad $1 → $2"],
   [/^(\d+) min less on busy streets$/, "$1 min menos en calles concurridas"],
+  [/^(\d+) min less on busy streets without a sidewalk$/, "$1 min menos en calles concurridas sin banqueta"],
   [/^(\d+) fewer busy crossings?$/, (_, n) => `${n} ${plural(n, "cruce concurrido", "cruces concurridos")} menos`],
   [/^([\d.]+) min longer$/, "$1 min más"],
 ];
@@ -596,6 +670,22 @@ const PATTERNS = [
   [/^Updated (.+)$/, "Actualizado $1"],
   // Bike mode
   [/^(Low stress: anyone|Some traffic: most adults|Busy: confident riders|Very busy: few riders)( · |: )(\d+) min$/, (_, name, joint, n) => `${translate(name)}${joint}${n} min`],
+  [/^(Sidewalk or path|Quiet street without a sidewalk|Busy street with no sidewalk mapped|Busy street without a sidewalk)( · |: )(\d+) min$/, (_, name, joint, n) => `${translate(name)}${joint}${n} min`],
+  [/^Walking routes: map data (.+)$/, "Rutas a pie: datos del mapa $1"],
+  // Bus trips
+  [/^Leave (.+) · arrive (.+)$/, "Sal a las $1 · llegas a las $2"],
+  [/^Wait about (\d+) min$/, "Espera unos $1 min"],
+  [/^Toward (.+)$/, "Hacia $1"],
+  [/^Walk to (.+) to transfer$/, "Camina hasta $1 para transbordar"],
+  [/^Walk to (.+)$/, "Camina hasta $1"],
+  [
+    /^Get on at (.+)\. Ride (\d+) stops? \((\d+) min\), get off at (.+) at (.+)\.$/,
+    (_, on, n, minutes, off, at) => `Súbete en ${on}. Viaja ${n} ${plural(n, "parada", "paradas")} (${minutes} min) y bájate en ${off} a las ${sentenceEnd(at)}`,
+  ],
+  [/^Get on route (.+) here at (.+)\.$/, (_, route, at) => `Súbete a la ruta ${route} aquí a las ${sentenceEnd(at)}`],
+  [/^Get off route (.+) here at (.+)\.$/, (_, route, at) => `Bájate de la ruta ${route} aquí a las ${sentenceEnd(at)}`],
+  [/^(\d+) min · walk (\d+) min$/, "$1 min · $2 min a pie"],
+  [/^(\d+) min · ([\d.]+) mi · (\d+) busy crossings?$/, (_, minutes, miles, n) => `${minutes} min · ${miles} mi · ${n} ${plural(n, "cruce concurrido", "cruces concurridos")}`],
   [/^(\d+) busy crossings?$/, (_, n) => `${n} ${plural(n, "cruce concurrido", "cruces concurridos")}`],
   [/^Instead of the shortest route: (.+)$/, (_, changes) => `En lugar de la ruta más corta: ${changes.split(", ").map((part) => apply(BIKE_CHANGES, part)).join(", ")}`],
   [/^You: (\d+) of (\d+) right$/, "Tú: $1 de $2 correctas"],
@@ -603,10 +693,15 @@ const PATTERNS = [
   [/^Route design: map data (.+)$/, "Diseño de ruta: datos del mapa $1"],
   [/^Bike routes: map data (.+)$/, "Rutas en bici: datos del mapa $1"],
   // A stress bar, read aloud: each level's minutes, joined.
-  [/^((?:Low stress|Some traffic|Busy|Very busy)[^,]*: \d+ min(?:, [^,]+: \d+ min)+)$/, (_, list) => list.split(", ").map(translate).join(", ")],
+  [/^((?:Low stress|Some traffic|Busy|Very busy|Sidewalk|Quiet street)[^,]*: \d+ min(?:, [^,]+: \d+ min)+)$/, (_, list) => list.split(", ").map(translate).join(", ")],
   // Last: parts joined with " · " ("3 min sun glare · 1 school zone"), when each part translates.
   [/^(.+ · .+)$/, (_, parts) => (parts.split(" · ").every((part) => translate(part) !== part) ? parts.split(" · ").map(translate).join(" · ") : parts)],
 ];
+
+// A time at the end of a sentence: "10:24 a.m." takes no second period.
+function sentenceEnd(time) {
+  return time.endsWith(".") ? time : `${time}.`;
+}
 
 const phrases = new Map(PHRASES.map(([english, spanish]) => [english, spanish]));
 

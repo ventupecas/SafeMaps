@@ -28,7 +28,8 @@ import { applyBaseMap, drawBuses, isNight, rememberLayers, restoreLayers, savedL
 import { forgetRecentTrips, openTripFromLink, rememberTrip, showRecentTrips, tripLink } from "./trips.js";
 import { setUpDemo, showAbout, showPhoneLink } from "./expo.js";
 import { lang, startTranslating, switchLanguage } from "./i18n.js";
-import { requestBikeTrip, setUpBikeMode, showBikeTrip } from "./bike.js";
+import { isActiveMode, requestActiveTrip, setUpModes, showActiveTrip } from "./bike.js";
+import { requestTransitTrip, showTransitTrip } from "./transit.js";
 
 boot();
 
@@ -46,7 +47,7 @@ async function boot() {
     state.mapKind = appConfig.map;
     trafficTiles = Boolean(appConfig.traffic_tiles);
     state.buses.available = Boolean(appConfig.bus_routes);
-    state.bikeAvailable = Boolean(appConfig.bike);
+    state.modesAvailable = { bike: Boolean(appConfig.bike), walk: Boolean(appConfig.walk), transit: Boolean(appConfig.transit) };
     if (Number.isFinite(appConfig.fuel_price)) state.fuelPrice = appConfig.fuel_price;
   } catch {
     state.mapKind = "google"; // an older server: it only knew Google's map
@@ -76,7 +77,7 @@ async function boot() {
     return;
   }
   await initMap();
-  setUpBikeMode(Boolean(state.bikeAvailable));
+  setUpModes(state.modesAvailable || {});
   restoreLayers();
   setInterval(applyBaseMap, 5 * 60 * 1000); // dusk and dawn come while the page is open
   setUpDemo();
@@ -260,12 +261,16 @@ export async function findRoute({ fit = true, again = false } = {}) {
   if (!state.origin || !state.destination) return;
   const ticket = ++state.findTicket;
   setFinding(true);
-  showStatus("Comparing routes for safety, fuel and time…");
+  const mode = state.mode;
+  showStatus(mode === "transit" ? "Checking the bus schedule…" : mode === "car" ? "Comparing routes for safety, fuel and time…" : "Comparing routes for safety and time…");
   try {
-    const bike = state.mode === "bike";
-    const trip = bike ? await requestBikeTrip(state.origin, state.destination) : await requestTrip(state.origin, state.destination, { counted: !again });
-    if (ticket !== state.findTicket) return;
-    if (bike) showBikeTrip(trip, { fit });
+    let trip;
+    if (mode === "transit") trip = await requestTransitTrip(state.origin, state.destination);
+    else if (isActiveMode(mode)) trip = await requestActiveTrip(state.origin, state.destination);
+    else trip = await requestTrip(state.origin, state.destination, { counted: !again });
+    if (ticket !== state.findTicket || mode !== state.mode) return;
+    if (mode === "transit") showTransitTrip(trip, { fit });
+    else if (isActiveMode(mode)) showActiveTrip(trip, { fit });
     else showTrip(trip, { fit });
     if (!again) rememberTrip();
   } catch (error) {
@@ -342,7 +347,7 @@ export async function postJson(path, payload) {
     throw new Error("Can't reach the routing server. Open this page from it, e.g. http://127.0.0.1:3143");
   }
   const body = await response.json().catch(() => ({}));
-  if (!response.ok) throw new Error(errorMessage(response.status, body));
+  if (!response.ok) throw new Error(errorMessage(response.status, body, path));
   return body;
 }
 
@@ -367,11 +372,21 @@ const ERROR_MESSAGES = {
   503: "The server is in offline replay mode and has no saved traffic data for this trip.",
 };
 
-function errorMessage(status, body) {
+// ...and for the other modes, where they differ.
+const MODE_ERROR_MESSAGES = {
+  "/bike-route": { 404: "No bike route was found between these points.", 503: "The server has no bike map." },
+  "/walk-route": { 404: "No walking route was found between these points.", 503: "The server has no walking map." },
+  "/transit-route": {
+    404: "No bus gets there from here at this time. Try another time, or walking or biking.",
+    503: "The bus schedule isn't ready: it loads when the server starts. Try again in a minute.",
+  },
+};
+
+function errorMessage(status, body, path = "") {
   const detail = body && body.detail;
   if (status === 422 && Array.isArray(detail)) return detail.map((item) => item.msg).join("; ");
   if (status === 422 && detail) return detail;
-  return ERROR_MESSAGES[status] || `The server answered ${status}.`;
+  return (MODE_ERROR_MESSAGES[path] || {})[status] || ERROR_MESSAGES[status] || `The server answered ${status}.`;
 }
 
 // Rewrite the server's notes (written for developers) into what a driver needs to know.

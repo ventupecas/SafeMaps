@@ -171,10 +171,23 @@ The first writes `data/graphs/milwaukee-metro-bike.json.gz`, which the server lo
 - **Riders:** Most adults (the default: some traffic is fine), Family (the quietest streets, long detours accepted), Confident (busier streets are fine) and E-bike (like most adults, faster). Each has a detour limit, such as 1.5 times the shortest time and at most 15 minutes more for most adults.
 - **The page:** the recommended route colored by stress, its busy crossings marked (and the shortest route's it avoids), minutes at each stress level, the safety score and what it counts, beside the shortest route. Turn-by-turn and spoken directions work as for cars. **Bike stress** under Map layers colors every street in view (zoomed in). From December to March, a note says trails may not be cleared.
 - **Stops and the dark:** trips with stops are planned leg by leg, as for cars. After dark, unlit stretches cost more and count in the score: lit as OpenStreetMap says, else streets count as lit and trails as unlit.
-- **Not yet:** hills. Trails come from a separate download (see BIKE_MODE.md, "Status").
+- **Not yet:** hills.
 - **Results:** `python -m app.bike_evaluate` plans 20 Milwaukee bike trips on the running server and compares each with the shortest route, into [BIKE_RESULTS.md](BIKE_RESULTS.md).
 - **All bike crashes:** a Community Maps export (see "All reported crashes") cut down to bike crashes: `python -m app.crash_data import <file> --cyclists`.
 - **API:** `POST /bike-route` (`origin`, `destination`, `profile`), `GET /bike-stress?south=&west=&north=&east=`.
+
+## Walking and bus trips
+
+The mode switch adds **Walk** with the walking map, and **Transit** with the bus schedule; each shows only when the server has it.
+
+```powershell
+.\.venv\Scripts\python.exe -m app.build_graph milwaukee-metro --walk          # the walking map: streets, sidewalks, paths, stairs
+.\.venv\Scripts\python.exe -m app.crash_data milwaukee-metro --pedestrians    # fatal crashes where a pedestrian died (FARS)
+```
+
+- **Walking** works like biking, with stress from sidewalks instead of traffic: 1 is a sidewalk or path (or a quiet street), 2 a quiet street without a sidewalk, 3 a busy street where no sidewalk is mapped, 4 a busy street without one. Crossing a busy road without a signal costs extra, as do places where a pedestrian was killed and, after dark, unlit stretches. Walkers: Most people (the default), Careful (slower, the calmest streets) and Step-free (no stairs, for a wheelchair or stroller). One-way streets go both ways on foot. The walking map is `data/graphs/milwaukee-metro-walk.json.gz` (`ROUTES_WALK_GRAPH`, `off` for none; `ROUTES_WALK_CRASH_DATA` for the crashes).
+- **Transit** plans bus trips from MCTS's schedule, the same GTFS feed the Transit layer draws (`ROUTES_BUS_ROUTES`), fetched at most once a week into the cache folder and read when the server starts (a minute or two in the background; trips wait for it, nothing else does). The search (RAPTOR) finds the fastest way with one bus, with two, and with three, walking up to 800 m to and from the stops (1,600 m where no bus is nearer) and 250 m between stops to transfer. Each option's walks are then planned on the walking map, so they count as walking routes do; waiting at a stop after dark counts 0.2 points a minute and each transfer 1 point. Of the options arriving within 10 minutes (or a quarter of the trip) of the earliest, the safest is recommended. The page shows each option step by step (walk, get on, ride, get off) with its stops on the map; the times are the schedule's, not live. `ROUTES_TRANSIT=off` skips the schedule (it takes about 200 MB of memory while it's read).
+- **API:** `POST /walk-route` (as `/bike-route`; profiles `everyday`, `careful`, `stepfree`), `POST /transit-route` (`origin`, `destination`, `departure_offset_min` or `leave_at`; 503 while the schedule is loading).
 
 ## Running the engine
 
@@ -388,6 +401,16 @@ This command:
 - with `--endpoint https://overpass.kumi.systems/api/interpreter`, uses a mirror if the main server is busy
 
 Routes built from this data must credit **"© OpenStreetMap contributors"** (ODbL) on the map.
+
+
+**From an extract instead of Overpass.** Where Overpass can't be reached, `--pbf <file>` builds any of the maps from an OpenStreetMap extract (`.osm.pbf`, needs `pip install osmium`): it picks out what each Overpass query asks for (roads with their signals, rail crossings, turn restrictions and schools; trails and paths; sidewalks and steps) and builds from that exactly as from downloaded tiles. OpenStreetMap US's Slice service cuts an extract of any area from the day's planet data:
+
+```powershell
+curl.exe -X POST https://slice.openstreetmap.us/api/ -d '{\"Name\":\"milwaukee-metro\",\"RegionType\":\"geojson\",\"RegionData\":{\"type\":\"Polygon\",\"coordinates\":[[[-88.55,42.83],[-87.75,42.83],[-87.75,43.55],[-88.55,43.55],[-88.55,42.83]]]}}'
+# prints an id; when https://slice.openstreetmap.us/api/<id> says "Complete":true (two or three minutes):
+curl.exe -o data\osm\pbf\milwaukee-metro.osm.pbf https://slice.openstreetmap.us/files/<id>.osm.pbf
+.\.venv\Scripts\python.exe -m app.build_graph milwaukee-metro --walk --pbf data\osm\pbf\milwaukee-metro.osm.pbf
+```
 
 ### How a trip works
 

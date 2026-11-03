@@ -14,6 +14,7 @@ try the API directly.
     GET  /traffic-tiles/{z}/{x}/{y}.png   TomTom's traffic map, for the OpenStreetMap page
     GET  /bus-routes  the county's bus routes, for the OpenStreetMap page's Transit layer
     POST /bike-route  bike routes for one trip, lowest stress first (app.bike; needs the bike map)
+    POST /walk-route  walking routes for one trip, the same way (needs the walking map)
     GET  /bike-stress the bike map's traffic stress in a box, for the page's Bike stress layer
     GET  /expo-stats  today's trips and answers, for the expo's stats screen (stats.html)
     POST /guess       a visitor's guess in the "Which route is safer?" game (game.html)
@@ -82,10 +83,11 @@ from app.road_events import collect as collect_road_events
 from app.roadgraph import RoadGraph
 from app.router import Router
 from app.routes_client import DailyLimitReached, RoutesApiError, RoutesClient, daily_usage
-from app.sun import dark, low_sun
+from app.sun import dark, low_sun, sun_position
 from app.traffic_tiles import TILE_REFRESH, TileError, TrafficTiles
 from app.transit import BusRoutes
-from app import bike
+from app import bike, transit_plan
+from app.timetable import TimetableSource
 from app.expo_control import ExpoControl
 from app.trip_log import TripLog
 from app.usage import DailyUsage
@@ -233,8 +235,20 @@ class BikeTripRequest(BaseModel):
     origin: LatLng
     destination: LatLng
     stops: list[LatLng] = Field(default_factory=list, max_length=MAX_STOPS, description="Places to stop at on the way, in order.")
-    profile: str = Field(bike.DEFAULT_PROFILE, description="everyday, family, confident or ebike (app.bike.PROFILES).")
+    profile: str = Field(
+        bike.DEFAULT_PROFILE,
+        description="Bikes: everyday, family, confident or ebike (app.bike.PROFILES). Walking: everyday, careful or stepfree.",
+    )
     departure_offset_min: int = Field(0, ge=0, le=24 * 60)
+
+
+class TransitTripRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    origin: LatLng
+    destination: LatLng
+    departure_offset_min: int = Field(0, ge=0, le=24 * 60)
+    leave_at: datetime | None = Field(None, description="Leave then (local time) instead: within the coming week.")
 
 
 class Guess(BaseModel):
@@ -295,7 +309,11 @@ class Engine:
     control: ExpoControl | None = None  # what the expo's control page set
     guesses: FeedbackLog | None = None  # "Which route is safer?" guesses, right or wrong (no places)
     bike_graph: RoadGraph | None = None  # the bike map, when built (app.bike)
+    walk_graph: RoadGraph | None = None  # the walking map, when built
+    walk_hotspots: CrashHotspots | None = None  # fatal crashes where a pedestrian died
+    _walk_router: bike.BikeRouter | None = None
     bike_hotspots: CrashHotspots | None = None  # fatal crashes where a cyclist died
+    schedule: TimetableSource | None = None  # the buses' timetable, for transit trips (app.timetable)
     _bike_router: bike.BikeRouter | None = None
     warmed_up: bool = False  # the road events across the map are matched to it (warm_up)
     _routers: dict[DrivingSide, Router] = field(default_factory=dict)
@@ -352,10 +370,12 @@ class Engine:
             router = self.router(make_turn_context(self.settings, self.hotspots, None, self.graph))
             for event in snapped:
                 router.event_edges(event)  # the router's own lookup, remembered too
-            if self.bike_graph is not None:  # the bike map too, so the first bike trip doesn't wait a minute
-                bike_router = self.bike_router()
-                for event in snapped:
-                    bike_router.event_edges(event)
+            # The bike and walking maps too, so their first trips don't wait a minute.
+            for graph, routed in ((self.bike_graph, self.bike_router), (self.walk_graph, self.walk_router)):
+                if graph is not None:
+                    active = routed()
+                    for event in snapped:
+                        active.event_edges(event)
             logger.info(
                 "Ready for trips: %d closures, lane closures and jams from %s matched to the map in %.0f s",
                 len(report.events),
@@ -378,6 +398,14 @@ class Engine:
                 context = TurnContext(hotspots=self.bike_hotspots, min_hotspot_crashes=bike.MIN_CRASHES)
                 self._bike_router = bike.BikeRouter(self.bike_graph, context)
             return self._bike_router
+
+    def walk_router(self) -> bike.BikeRouter:
+        with self._lock:
+            if self._walk_router is None:
+                assert self.walk_graph is not None
+                context = TurnContext(hotspots=self.walk_hotspots, min_hotspot_crashes=bike.MIN_CRASHES)
+                self._walk_router = bike.BikeRouter(self.walk_graph, context)
+            return self._walk_router
 
     def router(self, context: TurnContext) -> Router:
         # A router remembers its turn analysis, so keep one per driving side.
@@ -487,14 +515,23 @@ def create_app(settings: Settings | None = None, *, http: httpx.Client | None = 
             if settings.bike_graph_path and settings.bike_graph_path.exists()
             else None,
             bike_hotspots=CrashHotspots.from_csv(settings.bike_crash_data_path) if settings.bike_crash_data_path else None,
+            walk_graph=RoadGraph.load(settings.walk_graph_path)
+            if settings.walk_graph_path and settings.walk_graph_path.exists()
+            else None,
+            walk_hotspots=CrashHotspots.from_csv(settings.walk_crash_data_path) if settings.walk_crash_data_path else None,
             buses=BusRoutes(client, settings.bus_routes_url, settings.cache_dir / "bus-routes.json")
             if settings.bus_routes_url and settings.map == "osm"
+            else None,
+            schedule=TimetableSource(client, settings.bus_routes_url, settings.cache_dir / "transit-feed.zip")
+            if settings.bus_routes_url and settings.transit
             else None,
         )
         app.state.engine = engine
         Thread(target=engine.warm_up, name="road-events-warm-up", daemon=True).start()
         if engine.buses:  # fetched ahead, so the Transit layer shows at once
             Thread(target=engine.buses.routes, name="bus-routes", daemon=True).start()
+        if engine.schedule:  # read in the background: transit trips wait for it, nothing else does
+            Thread(target=engine.schedule.load, name="bus-schedule", daemon=True).start()
         logger.info(
             "Started: %s map, road graph %s, crash data %s, cache %s, road events from %s%s",
             "OpenStreetMap" if settings.map == "osm" else "Google",
@@ -556,6 +593,19 @@ def create_app(settings: Settings | None = None, *, http: httpx.Client | None = 
             "weather_alerts": engine.weather is not None,
             "bus_routes": engine.buses is not None,
             "bus_routes_ready": bool(engine.buses and engine.buses.routes_now()),
+            "transit": {
+                "ready": engine.schedule.table is not None,
+                "stops": len(engine.schedule.table.stop_ids) if engine.schedule.table else 0,
+                "error": engine.schedule.error,
+            }
+            if engine.schedule
+            else None,
+            "walk_map": {
+                "segments": engine.walk_graph.edge_count,
+                "pedestrian_crash_locations": engine.walk_hotspots.locations if engine.walk_hotspots else 0,
+            }
+            if engine.walk_graph
+            else None,
             "bike_map": {
                 "segments": engine.bike_graph.edge_count,
                 "trails": sum(1 for e in range(engine.bike_graph.edge_count) if engine.bike_graph.class_name(e) in ("cycleway", "path")),
@@ -580,6 +630,8 @@ def create_app(settings: Settings | None = None, *, http: httpx.Client | None = 
             "traffic_tiles": request.app.state.engine.tiles is not None,
             "bus_routes": request.app.state.engine.buses is not None,
             "bike": request.app.state.engine.bike_graph is not None,
+            "walk": request.app.state.engine.walk_graph is not None,
+            "transit": request.app.state.engine.schedule is not None,
             "fuel_price": settings.fuel_price,
         }
 
@@ -863,13 +915,55 @@ def create_app(settings: Settings | None = None, *, http: httpx.Client | None = 
     ) -> dict[str, Any]:
         """Bike routes for one trip: the lowest-stress route within the rider's detour limit, the shortest
         route to compare with, and what each has (minutes per stress level, stressful crossings...)."""
-        engine: Engine = request.app.state.engine
+        return active_route("bike", trip, request.app.state.engine, x_access_code)
+
+    @app.post("/walk-route")
+    def walk_route(
+        trip: BikeTripRequest, request: Request, x_access_code: str | None = Header(None, include_in_schema=False)
+    ) -> dict[str, Any]:
+        """Walking routes for one trip, the same way: the calmest route (sidewalks and paths, signals to cross
+        busy roads) within the walker's detour limit, beside the shortest."""
+        return active_route("walk", trip, request.app.state.engine, x_access_code)
+
+    @app.post("/transit-route")
+    def transit_route(
+        trip: TransitTripRequest, request: Request, x_access_code: str | None = Header(None, include_in_schema=False)
+    ) -> dict[str, Any]:
+        """Bus trips by the schedule: walk, ride, maybe transfer, walk; the safest of those arriving near the
+        earliest first. The walks are planned on the walking map when there is one."""
         check_access(x_access_code)
-        if engine.bike_graph is None:
-            raise HTTPException(status_code=503, detail="Bike routes need the bike map: python -m app.build_graph <area> --bike")
-        profile = bike.PROFILES.get(trip.profile)
+        engine: Engine = request.app.state.engine
+        if engine.schedule is None:
+            raise HTTPException(status_code=503, detail="Transit trips need a bus schedule (ROUTES_BUS_ROUTES).")
+        table = engine.schedule.table
+        if table is None:
+            detail = "The bus schedule couldn't be loaded." if engine.schedule.error else "The bus schedule is still loading: try again in a minute."
+            raise HTTPException(status_code=503, detail=detail)
+        departure = trip.leave_at.replace(tzinfo=None) if trip.leave_at else datetime.now() + timedelta(minutes=trip.departure_offset_min)
+        walker = engine.walk_router() if engine.walk_graph is not None else None
+        try:
+            result = transit_plan.plan(
+                table, walker, trip.origin, trip.destination, departure, lambda moment, point: sun_position(moment, *point)
+            )
+        except LookupError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from None
+        return {
+            "plan": result,
+            "attribution": ["Bus schedule: Milwaukee County Transit System", f"Walking routes: map data {ATTRIBUTION}"],
+            "leaving_at": departure.isoformat(timespec="minutes"),
+            "after_dark": dark(sun_position(departure, trip.origin.lat, trip.origin.lng)),
+            "scheduled": True,  # times are the timetable's, not live
+        }
+
+    def active_route(mode: str, trip: BikeTripRequest, engine: Engine, x_access_code: str | None) -> dict[str, Any]:
+        check_access(x_access_code)
+        graph = engine.bike_graph if mode == "bike" else engine.walk_graph
+        if graph is None:
+            raise HTTPException(status_code=503, detail=f"{mode.title()} routes need the {mode} map: python -m app.build_graph <area> --{mode}")
+        profiles = bike.PROFILES if mode == "bike" else bike.WALK_PROFILES
+        profile = profiles.get(trip.profile)
         if profile is None:
-            raise HTTPException(status_code=422, detail=f"Unknown bike profile {trip.profile!r}; choose from {', '.join(bike.PROFILES)}.")
+            raise HTTPException(status_code=422, detail=f"Unknown {mode} profile {trip.profile!r}; choose from {', '.join(profiles)}.")
         departure = datetime.now() + timedelta(minutes=trip.departure_offset_min)
         report = collect_road_events(
             sources_for_map(settings.road_event_sources, settings.map),
@@ -884,15 +978,16 @@ def create_app(settings: Settings | None = None, *, http: httpx.Client | None = 
         sun = make_turn_context(settings, None, None, None, now=departure, where=trip.origin).sun
         try:
             places = [trip.origin, *trip.stops, trip.destination]
-            result = bike.plan_with_stops(engine.bike_router(), places, profile, events=events, sun=sun)
+            router = engine.bike_router() if mode == "bike" else engine.walk_router()
+            result = bike.plan_with_stops(router, places, profile, events=events, sun=sun)
         except (LookupError, ValueError) as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from None
         return {
             "plan": result,
-            "attribution": [f"Bike routes: map data {ATTRIBUTION}"],
+            "attribution": [f"{'Bike' if mode == 'bike' else 'Walking'} routes: map data {ATTRIBUTION}"],
             "leaving_at": departure.isoformat(timespec="minutes"),
             "after_dark": dark(sun),
-            # Trails may not be cleared of snow and ice from December to March.
+            # Trails and sidewalks may not be cleared of snow and ice from December to March.
             "winter": departure.month in (12, 1, 2, 3),
             "road_events_source": report.source,
         }
