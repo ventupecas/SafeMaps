@@ -283,3 +283,22 @@ def test_a_signal_makes_the_busy_turn_cheaper_and_the_scorer_knows_it():
     (best, *_) = router.routes(point(1, 0), point(2, 2), FASTEST)  # turns left at (1, 2), the signal
     (turn,) = extract_features(router.to_route_json(best), TurnContext(junctions=graph)).crossing_turns
     assert turn.busy and turn.signal
+
+
+def test_our_routes_are_named_from_their_own_roads_without_looking_them_up(graph):
+    from app.engine import name_routes, short_road_name
+    from app.models import RoutePlan, ScoredRoute
+    from app.scoring import score_route
+
+    router = Router(graph)
+    (best, *_) = router.routes(point(1, 0), point(2, 2), FASTEST)
+    route = router.to_route_json(best)
+    encoded = route["polyline"]["encodedPolyline"]
+    lengths = graph.known_road_lengths[encoded]  # meters on each named road, as the router built it
+    features = extract_features(route)
+    scored = ScoredRoute(
+        id="own-1", source="own", encoded_polyline=encoded, features=features,
+        breakdown=score_route(features, FASTEST), eligible=True,
+    )  # fmt: skip
+    named = name_routes(RoutePlan(profile=FASTEST, winner=scored, candidates=[scored]), graph)
+    assert named.winner.via == short_road_name(max(lengths, key=lengths.get))

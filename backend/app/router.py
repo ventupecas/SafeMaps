@@ -163,6 +163,9 @@ def turn_time_s(maneuver: str, crossing: bool) -> float:
     return 5.0
 
 
+KNOWN_ROUTES_KEPT = 5000  # routes whose road lengths the graph remembers (graph.known_road_lengths)
+
+
 class Router:
     def __init__(self, graph: RoadGraph, context: TurnContext = TurnContext()) -> None:
         self.graph = graph
@@ -373,13 +376,17 @@ class Router:
             road_lengths[g.name[edge]] += g.length_m[edge]
         named = [(length, name) for name, length in road_lengths.items() if name != 0]
         seconds = round(sum(g.time_s[e] for e in path.edges))
+        encoded = encode_polyline(self.path_points(path))
+        if len(g.known_road_lengths) > KNOWN_ROUTES_KEPT:
+            g.known_road_lengths.clear()
+        g.known_road_lengths[encoded] = {g.names[name]: length for length, name in named}
         return {
             "distanceMeters": round(sum(g.length_m[e] for e in path.edges)),
             "duration": f"{seconds}s",
             "staticDuration": f"{seconds}s",
             "description": g.names[max(named)[1]] if named else "",
             "routeLabels": [],
-            "polyline": {"encodedPolyline": encode_polyline(self.path_points(path))},
+            "polyline": {"encodedPolyline": encoded},
             "legs": [{"steps": steps}],
         }
 

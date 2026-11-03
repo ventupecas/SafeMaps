@@ -107,7 +107,8 @@ Leave this window open all day: closing it stops the app.
 .\.venv\Scripts\python.exe -m uvicorn app.main:app --port 3143
 ```
 
-- **No `--reload`:** that option is for development. Without it, a stray file save can't restart the server mid-demo.
+- **No `--reload`:** that option is for development. Without it, a stray file save can't restart the server mid-demo. It also keeps checking every file for changes, which uses a lot of the computer over a long day.
+- **Many visitors at once? Add `--workers 2` (or 3).** One server process plans about 8 trips a minute, one at a time: with 5 visitors at once, the last waits about 40 seconds; with 30, trips time out. Each extra worker plans trips alongside, but loads its own copy of the road map, about 1.2 GB of memory each, so only add workers the computer has memory for (Task Manager, Performance, Memory: "Available"). Measure with the load test below.
 - **Keep `--port 3143`:** the map key only works on that port.
 - **Wait for "Ready for trips":** the window prints `Started: ...` at once, then `Ready for trips: ... matched to the map in N s` about a minute later. Trips work before that, just slower.
 - **Restarted within 10 minutes?** TomTom's last answer is reused, so a restart doesn't use another TomTom request.
@@ -132,6 +133,16 @@ Look for:
 ### Turn on demo mode on the booth screen
 
 Open **http://127.0.0.1:3143/?demo=1** on the screen visitors see. After 45 seconds with no one touching it, the page plans sample trips by itself (Fiserv Forum to Bay View, and three more), one every 20 seconds, with a "Sample trip" banner. Any touch stops it, so visitors can plan their own; it starts again once they leave. The browser remembers the setting; turn it off under **Advanced**. Sample trips cost no paid requests.
+
+### Load test: can it keep up with a crowd?
+
+With the server running as it will at the expo, in a second window:
+
+```powershell
+.\.venv\Scripts\python.exe -m app.loadtest --users 10 --trips 2
+```
+
+It plays 10 visitors planning 2 trips each, all at once, and prints how long trips took and any errors. Its trips cost no paid requests and don't count on the stats screen. If most trips take longer than about 30 seconds, add a worker (see "Start the server") or expect a short wait at busy moments. Through the tunnel, add `--url https://<the tunnel's address>` (and `--code <the access code>` if there is one). Measured on a 4-core laptop with one worker: a trip alone takes about 11 seconds; 5 at once all finish within 40 seconds; 30 at once time out.
 
 ### Rehearse the showcase trips
 

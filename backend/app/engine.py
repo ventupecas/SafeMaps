@@ -412,7 +412,8 @@ def name_routes(plan: RoutePlan, graph: RoadGraph | None) -> RoutePlan:
     taken: set[str] = set()
     via: dict[str, str] = {}
     for route in plan.candidates:
-        lengths = _road_lengths(graph, decode_polyline(route.encoded_polyline))
+        # Our router's routes know their roads; others (Google's, trips joined through stops) are looked up.
+        lengths = graph.known_road_lengths.get(route.encoded_polyline) or _road_lengths(graph, decode_polyline(route.encoded_polyline))
         longest = sorted(lengths, key=lambda name: -lengths[name])
         name = next((name for name in longest if name not in taken), longest[0] if longest else "")
         taken.add(name)
