@@ -1,0 +1,316 @@
+"""Bike routes: the lowest-stress route a rider would be comfortable on, within a detour they accept.
+
+See BIKE_MODE.md for the reasoning. In short:
+
+* The bike map (build_graph(mode="bike")) gives every segment a Level of Traffic Stress, 1 (anyone:
+  trails, protected lanes, quiet streets) to 4 (only the most confident: fast, multi-lane traffic).
+* The bike router searches it with each segment costing its riding time times a stress weight for
+  its level, plus crossings: going straight across, or turning left across, a stress 3 or 4 road
+  where no signal controls it. Bike crash spots, railroad tracks and closures cost too.
+* Each route gets a safety score (100 with no risks, halved every 10 risk points), from its minutes
+  at stress 3 and 4, its stressful crossings, crash spots, tracks and closures.
+* The standard route to compare with is the shortest one (stress ignored). The recommended route is
+  the safest within the rider's detour limit; ties go to the faster.
+
+Riders pick a profile: everyday (most adults: "interested but concerned"), family (the quietest
+streets, long detours accepted), confident (busier streets are fine) or e-bike (everyday, faster).
+"""
+
+from __future__ import annotations
+
+import math
+from collections.abc import Sequence
+from dataclasses import dataclass
+
+from app.features import TurnContext, directions
+from app.geo import encode_polyline
+from app.models import LatLng, ScoringProfile
+from app.road_events import RoadEvent
+from app.roadgraph import BIKE_SPEED_KMH, RoadGraph
+from app.router import RoutedPath, Router, _Costs
+from app.sun import DARK_TURN_FACTOR, Sun, dark
+
+
+@dataclass(frozen=True)
+class BikeProfile:
+    name: str
+    speed_kmh: float  # the rider's average
+    stress_weights: tuple[float, float, float, float]  # a minute at stress 1..4 feels like this many
+    crossing_minutes: tuple[float, float]  # crossing a stress 3 / 4 road without a signal feels like this many
+    crash_minutes: float  # passing a spot where a cyclist was killed
+    rail_minutes: float  # crossing railroad tracks (wheels catch at shallow angles)
+    max_detour_ratio: float  # at most this many times the shortest route's time ...
+    max_extra_min: float  # ... and at most this many minutes more
+
+
+PROFILES = {
+    "everyday": BikeProfile("everyday", 16.0, (1.0, 1.4, 3.0, 8.0), (3.0, 8.0), 5.0, 1.0, 1.5, 15.0),
+    "family": BikeProfile("family", 13.0, (1.0, 2.0, 8.0, 40.0), (8.0, 25.0), 10.0, 2.0, 2.0, 25.0),
+    "confident": BikeProfile("confident", 20.0, (1.0, 1.15, 1.6, 3.0), (1.0, 3.0), 3.0, 0.5, 1.3, 8.0),
+    "ebike": BikeProfile("ebike", 22.0, (1.0, 1.4, 3.0, 8.0), (3.0, 8.0), 5.0, 1.0, 1.5, 15.0),
+}
+DEFAULT_PROFILE = "everyday"
+# The standard route: the shortest ride, stress ignored.
+SHORTEST = BikeProfile("shortest", 16.0, (1.0, 1.0, 1.0, 1.0), (0.0, 0.0), 0.0, 0.0, math.inf, math.inf)
+
+# The safety score's risk points, the same for every rider so scores compare across routes and trips.
+RISK_POINTS = {
+    "stress_3_minutes": 0.5,  # per minute on a stress 3 street
+    "stress_4_minutes": 1.5,  # per minute on a stress 4 street
+    "busy_crossings": 2.0,  # per crossing of a stress 3 road without a signal; twice that for stress 4
+    "crash_spots": 5.0,
+    "rail_crossings": 1.0,
+    "lane_closures": 3.0,
+    "closures": 30.0,
+}
+SAFETY_SCALE = 10.0
+LEFT_TURNS = ("TURN_LEFT", "TURN_SLIGHT_LEFT", "TURN_SHARP_LEFT", "UTURN_LEFT")
+RIGHT_TURNS = ("TURN_RIGHT", "TURN_SLIGHT_RIGHT", "TURN_SHARP_RIGHT", "UTURN_RIGHT")
+MIN_CRASHES = 1.0  # fatal cyclist crashes (FARS) are rare: one near a junction counts
+
+
+@dataclass(frozen=True)
+class _BikeTrip:
+    profile: BikeProfile
+    dark: bool
+
+
+class BikeRouter(Router):
+    """The car router's search, costed for a rider (see the module docstring)."""
+
+    def __init__(self, graph: RoadGraph, context: TurnContext = TurnContext()) -> None:
+        if graph.mode != "bike":
+            raise ValueError("BikeRouter needs the bike map (python -m app.build_graph <area> --bike)")
+        super().__init__(graph, context)
+        self._crossings: dict[tuple[int, int, str], int] = {}
+
+    def bike_routes(
+        self,
+        origin: tuple[float, float],
+        destination: tuple[float, float],
+        profile: BikeProfile,
+        *,
+        count: int = 3,
+        events: Sequence[RoadEvent] = (),
+        sun: Sun | None = None,
+        avoid: Sequence[Sequence[tuple[float, float]]] = (),
+    ) -> list[RoutedPath]:
+        return self.routes(origin, destination, profile, count=count, events=events, sun=sun, avoid=avoid)  # type: ignore[arg-type]
+
+    def _trip_costs(self, profile, events, *, keep, school_hours=False, sun=None) -> _Costs:  # type: ignore[override]
+        g = self.graph
+        slower = BIKE_SPEED_KMH / profile.speed_kmh  # the map's times are at BIKE_SPEED_KMH
+        weights = profile.stress_weights
+        edges = [
+            g.time_s[edge] / 60 * slower * weights[max(1, g.stress[edge]) - 1] + g.rail_crossings[edge] * profile.rail_minutes
+            for edge in range(g.edge_count)
+        ]
+        keep = set(keep)
+        for event in events:
+            for edge in self.event_edges(event):
+                if event.kind == "closed" and edge not in keep:
+                    edges[edge] = math.inf
+                elif event.kind == "lanes":
+                    # A lane closure squeezes the rider into traffic: one stress level worse.
+                    level = max(1, g.stress[edge])
+                    edges[edge] *= weights[min(4, level + 1) - 1] / weights[level - 1]
+                elif event.kind == "hazard":
+                    edges[edge] *= 2.0  # fog, ice, flooding: slower and riskier on a bike
+        # The search's lower bound: no segment costs less than its time at the map's fastest speed.
+        search = ScoringProfile(time_weight=slower, fuel_weight=0.0, maneuver_weight=0.3, busy_crossing_weight=0.0, hotspot_crossing_weight=0.0)
+        return _Costs(
+            profile=search, edges=edges, table=self._turn_table(search), zones={}, zone_costs={}, extra=_BikeTrip(profile, dark(sun))
+        )
+
+    def _cut_through_cost(self, edge: int, nxt: int) -> float:
+        return 0.0  # quiet service roads and alleys are welcome on a bike
+
+    def _step_cost(self, edge: int, step, costs: _Costs, penalties: dict[int, float]) -> float:
+        cost = super()._step_cost(edge, step, costs, penalties)
+        trip: _BikeTrip = costs.extra
+        previous = edge
+        for nxt, maneuver in zip(step.edges, step.maneuvers, strict=True):
+            stress = self.crossing_stress(previous, nxt, maneuver)
+            if stress >= 3:
+                cost += trip.profile.crossing_minutes[stress - 3] * (DARK_TURN_FACTOR if trip.dark else 1.0)
+            if self.crashes_at(self.graph.edge_to[previous]) >= MIN_CRASHES:
+                cost += trip.profile.crash_minutes
+            previous = nxt
+        return cost
+
+    def crossing_stress(self, edge: int, nxt: int, maneuver: str) -> int:
+        """The stress of the traffic crossed going from edge onto nxt: the worst road met at the junction
+        that the rider isn't riding along (going straight across or turning left across it), and the road
+        being left when turning left across its own oncoming lanes. 0 where a signal controls the junction,
+        or for a right turn, which crosses no traffic."""
+        key = (edge, nxt, maneuver)
+        known = self._crossings.get(key)
+        if known is not None:
+            return known
+        g = self.graph
+        node = g.edge_to[edge]
+        stress = 0
+        if node not in self._signal_nodes and not maneuver.startswith(RIGHT_TURNS):
+            riding = {g.way_id[edge], g.way_id[nxt]}
+            names = {g.name[edge], g.name[nxt]} - {0}
+            for other in (*g.out_edges[node], *g.in_edges[node]):
+                if g.way_id[other] not in riding and not (g.name[other] and g.name[other] in names):
+                    stress = max(stress, g.stress[other])
+            if maneuver.startswith(LEFT_TURNS):
+                stress = max(stress, g.stress[edge])
+        if len(self._crossings) > 200_000:
+            self._crossings.clear()
+        self._crossings[key] = stress
+        return stress
+
+
+# ---- A route's features, its safety score, and the plan
+
+
+def route_features(router: BikeRouter, path: RoutedPath, profile: BikeProfile, events: Sequence[RoadEvent], after_dark: bool) -> dict:
+    g = router.graph
+    slower = BIKE_SPEED_KMH / profile.speed_kmh
+    minutes = [0.0, 0.0, 0.0, 0.0]
+    for edge in path.edges:
+        minutes[max(1, g.stress[edge]) - 1] += g.time_s[edge] / 60 * slower
+    crossings = []
+    crash_spots = 0
+    for i in range(1, len(path.edges)):
+        previous, nxt = path.edges[i - 1], path.edges[i]
+        node = g.edge_to[previous]
+        stress = router.crossing_stress(previous, nxt, path.maneuvers[i])
+        if stress >= 3:
+            lat, lng = g.point(node)
+            crossings.append({"lat": lat, "lng": lng, "stress": stress})
+        crash_spots += router.crashes_at(node) >= MIN_CRASHES
+    on_route = set(path.edges)
+    closed = sum(1 for event in events if event.kind == "closed" and router.event_edges(event) & on_route)
+    lanes = sum(1 for event in events if event.kind == "lanes" and router.event_edges(event) & on_route)
+    return {
+        "duration_min": round(sum(minutes), 2),
+        "distance_km": round(sum(g.length_m[edge] for edge in path.edges) / 1000, 2),
+        "minutes_by_stress": [round(m, 2) for m in minutes],
+        "busy_crossings": len(crossings),
+        "rail_crossings": sum(g.rail_crossings[edge] for edge in path.edges),
+        "crash_spots": int(crash_spots),
+        "lane_closures": lanes,
+        "closures": closed,
+        "after_dark": after_dark,
+        "crossings": crossings,
+    }
+
+
+def safety(features: dict) -> tuple[int, dict[str, float]]:
+    """The safety score (0-100, higher is safer) and the risk points behind it, by kind."""
+    night = DARK_TURN_FACTOR if features["after_dark"] else 1.0
+    crossing_points = sum((1 if c["stress"] == 3 else 2) for c in features["crossings"]) * RISK_POINTS["busy_crossings"] * night
+    points = {
+        "stress_3_minutes": features["minutes_by_stress"][2] * RISK_POINTS["stress_3_minutes"],
+        "stress_4_minutes": features["minutes_by_stress"][3] * RISK_POINTS["stress_4_minutes"],
+        "busy_crossings": crossing_points,
+        "crash_spots": features["crash_spots"] * RISK_POINTS["crash_spots"],
+        "rail_crossings": features["rail_crossings"] * RISK_POINTS["rail_crossings"],
+        "lane_closures": features["lane_closures"] * RISK_POINTS["lane_closures"],
+        "closures": features["closures"] * RISK_POINTS["closures"],
+    }
+    risks = {kind: round(value, 2) for kind, value in points.items() if value > 1e-9}
+    return round(100 / (1 + sum(points.values()) / SAFETY_SCALE)), risks
+
+
+def stress_segments(router: BikeRouter, path: RoutedPath) -> list[dict]:
+    """The route in stretches of one stress level each, for drawing it colored by stress."""
+    g = router.graph
+    stretches: list[dict] = []
+    run: list[int] = []
+    for edge in path.edges:
+        if run and g.stress[edge] != g.stress[run[-1]]:
+            stretches.append({"stress": g.stress[run[-1]], "encoded_polyline": encode_polyline(router._points(run))})
+            run = []
+        run.append(edge)
+    if run:
+        stretches.append({"stress": g.stress[run[-1]], "encoded_polyline": encode_polyline(router._points(run))})
+    return stretches
+
+
+def plan(
+    router: BikeRouter,
+    origin: LatLng,
+    destination: LatLng,
+    profile: BikeProfile,
+    *,
+    events: Sequence[RoadEvent] = (),
+    sun: Sun | None = None,
+) -> dict:
+    """Bike routes for one trip, best first: {"winner", "candidates"}, each candidate a dict the page draws."""
+    start, end = origin.as_tuple(), destination.as_tuple()
+    shortest = router.bike_routes(start, end, SHORTEST, count=1, events=events, sun=sun)
+    designs = router.bike_routes(start, end, profile, count=3, events=events, sun=sun)
+    after_dark = dark(sun)
+    paths: list[tuple[str, RoutedPath]] = []
+    seen: set[tuple[int, ...]] = set()
+    for route_id, path in [*(("standard", p) for p in shortest), *((f"own-{n + 1}", p) for n, p in enumerate(designs))]:
+        if path.edges not in seen:
+            seen.add(path.edges)
+            paths.append((route_id, path))
+    if not paths:
+        raise LookupError("No bike route was found between these points.")
+
+    junctions = TurnContext(junctions=router.graph)
+    candidates = []
+    for route_id, path in paths:
+        route = router.to_route_json(path)
+        features = route_features(router, path, profile, events, after_dark)
+        score, risks = safety(features)
+        lengths = router.graph.known_road_lengths.get(route["polyline"]["encodedPolyline"], {})
+        candidates.append(
+            {
+                "id": route_id,
+                "source": "own" if route_id != "standard" else "baseline",
+                "is_standard": route_id == "standard",
+                "encoded_polyline": route["polyline"]["encodedPolyline"],
+                "road_lengths": lengths,
+                "features": features,
+                "safety_score": score,
+                "safety_risks": risks,
+                "maneuvers": [m.model_dump() for m in directions(route, junctions)],
+                "stress_segments": stress_segments(router, path),
+            }
+        )
+
+    standard = candidates[0] if candidates[0]["is_standard"] else None
+    shortest_min = standard["features"]["duration_min"] if standard else min(c["features"]["duration_min"] for c in candidates)
+    limit_min = min(shortest_min * profile.max_detour_ratio, shortest_min + profile.max_extra_min)
+    for candidate in candidates:
+        candidate["eligible"] = candidate["is_standard"] or candidate["features"]["duration_min"] <= limit_min + 1e-9
+    candidates.sort(key=lambda c: (not c["eligible"], -c["safety_score"], c["features"]["duration_min"]))
+    winner = candidates[0]
+    _name_and_explain(candidates, winner, standard, profile)
+    return {"profile": profile.name, "winner": winner, "candidates": candidates}
+
+
+def _name_and_explain(candidates: list[dict], winner: dict, standard: dict | None, profile: BikeProfile) -> None:
+    """Each route's name (its longest road no better route goes by) and the reason for its place."""
+    from app.engine import short_road_name
+
+    taken: set[str] = set()
+    for candidate in candidates:
+        lengths = candidate.pop("road_lengths")
+        longest = sorted(lengths, key=lambda name: -lengths[name])
+        name = next((n for n in longest if n not in taken), longest[0] if longest else "")
+        taken.add(name)
+        candidate["via"] = short_road_name(name)
+    limit = f"within {profile.max_detour_ratio:g}x the shortest time, at most {profile.max_extra_min:g} min more"
+    for candidate in candidates:
+        busy = candidate["features"]["minutes_by_stress"][2] + candidate["features"]["minutes_by_stress"][3]
+        if candidate is winner:
+            if standard is None or candidate is standard:
+                candidate["reason"] = "the shortest route is also the lowest-stress one"
+            else:
+                theirs = standard["features"]["minutes_by_stress"][2] + standard["features"]["minutes_by_stress"][3]
+                candidate["reason"] = f"lowest stress {limit}: {busy:.0f} min on busy streets instead of {theirs:.0f}"
+        elif not candidate["eligible"]:
+            candidate["reason"] = f"too long a detour: over {profile.max_detour_ratio:g}x the shortest time or {profile.max_extra_min:g} min more"
+        elif candidate["safety_score"] < winner["safety_score"]:
+            candidate["reason"] = f"more stress: {busy:.0f} min on busy streets"
+        else:
+            candidate["reason"] = "as low-stress, but slower"

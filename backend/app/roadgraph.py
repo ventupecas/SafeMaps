@@ -155,6 +155,10 @@ class RoadGraph:
     school_zone: list[bool] = field(default_factory=list)  # per edge: within SCHOOL_ZONE_M of a school
     rail_crossing_points: list[Point] = field(default_factory=list)
     school_points: list[Point] = field(default_factory=list)
+    # "car", or "bike" for the bike map (build_graph(mode="bike")): its segments carry stress, its
+    # speeds are riding speeds, and it has trails and paths cars can't use.
+    mode: str = "car"
+    stress: list[int] = field(default_factory=list)  # per segment, bike map only: Level of Traffic Stress, 1-4
 
     time_s: list[float] = field(init=False, repr=False)
     out_edges: list[list[int]] = field(init=False, repr=False)
@@ -174,6 +178,7 @@ class RoadGraph:
     def __post_init__(self) -> None:
         self.rail_crossings = self.rail_crossings or [0] * len(self.edge_from)
         self.school_zone = self.school_zone or [False] * len(self.edge_from)
+        self.stress = self.stress or [0] * len(self.edge_from)
         self.time_s = [
             length / (speed / 3.6) + SIGNAL_DELAY_S * signals
             for length, speed, signals in zip(self.length_m, self.speed_kmh, self.signals, strict=True)
@@ -249,6 +254,16 @@ class RoadGraph:
         """Kind of the junction at point (see node_kind), or None if no junction is that close."""
         node = self._nearest(point, JUNCTION_MATCH_M, snappable_only=False)
         return None if node is None else self.node_kind(node)
+
+    def edges_in_box(self, south: float, west: float, north: float, east: float) -> list[int]:
+        """Segments with a part inside the box (as the segment index files them: about 100 m apart)."""
+        cells = self._edge_index()
+        (i0, j0), (i1, j1) = _cell((south, west), _EDGE_CELL_DEG), _cell((north, east), _EDGE_CELL_DEG)
+        found: set[int] = set()
+        for i in range(i0, i1 + 1):
+            for j in range(j0, j1 + 1):
+                found.update(cells.get((i, j), ()))
+        return sorted(found)
 
     def signal_at(self, point: Point) -> bool:
         """Whether a traffic signal controls the junction at point (one within JUNCTION_MATCH_M)."""
@@ -702,6 +717,7 @@ class RoadGraph:
         data = {
             "format": GRAPH_FORMAT,
             "area": self.area,
+            "mode": self.mode,
             "bbox": [self.bbox.south, self.bbox.west, self.bbox.north, self.bbox.east] if self.bbox else None,
             "attribution": ATTRIBUTION,
             "classes": self.classes,
@@ -724,6 +740,7 @@ class RoadGraph:
                 "geometry": self.geometry,
                 "rail_crossings": self.rail_crossings,
                 "school": [int(x) for x in self.school_zone],
+                **({"stress": self.stress} if self.mode == "bike" else {}),
             },
             "banned": [[edge, other] for edge, others in sorted(self.banned.items()) for other in sorted(others)],
             "rail_crossing_points": [[round(lat, 7), round(lng, 7)] for lat, lng in self.rail_crossing_points],
@@ -777,6 +794,8 @@ class RoadGraph:
             school_zone=[bool(x) for x in edges.get("school", [])],
             rail_crossing_points=[(lat, lng) for lat, lng in data.get("rail_crossing_points", [])],
             school_points=[(lat, lng) for lat, lng in data.get("school_points", [])],
+            mode=data.get("mode", "car"),
+            stress=edges.get("stress", []),
         )
 
 
@@ -789,7 +808,9 @@ def classify_junction(classes: Iterable[str]) -> str:
     return "busy" if classes & BUSY_CLASSES else "quiet"
 
 
-def build_graph(elements: Iterable[Mapping[str, Any]], *, area: str = "", bbox: BBox | None = None) -> RoadGraph:
+def build_graph(
+    elements: Iterable[Mapping[str, Any]], *, area: str = "", bbox: BBox | None = None, mode: str = "car"
+) -> RoadGraph:
     """Build a RoadGraph from Overpass JSON elements (nodes, ways and restriction relations)."""
     coords: dict[int, Point] = {}
     signal_nodes: set[int] = set()
@@ -812,6 +833,12 @@ def build_graph(elements: Iterable[Mapping[str, Any]], *, area: str = "", bbox: 
                 signal_nodes.add(element["id"])
             if tags.get("railway") == "level_crossing":
                 crossing_nodes.add(element["id"])
+            if mode == "bike":
+                # A trail's own signal to cross a street, and its own crossing of the tracks.
+                if tags.get("highway") == "crossing" and tags.get("crossing") == "traffic_signals":
+                    signal_nodes.add(element["id"])
+                if tags.get("railway") == "crossing":
+                    crossing_nodes.add(element["id"])
         elif kind == "way":
             ways[element["id"]] = element
         elif kind == "relation":
@@ -820,7 +847,7 @@ def build_graph(elements: Iterable[Mapping[str, Any]], *, area: str = "", bbox: 
     stats: Counter[str] = Counter()
     roads = []
     for way in ways.values():
-        road = _Road.from_way(way, coords)
+        road = _Road.from_way(way, coords) if mode == "car" else _Road.for_bikes(way, coords)
         if road is None:
             stats["ways_skipped"] += 1
         else:
@@ -834,7 +861,7 @@ def build_graph(elements: Iterable[Mapping[str, Any]], *, area: str = "", bbox: 
         uses[road.refs[0]] += 1
         uses[road.refs[-1]] += 1
 
-    builder = _EdgeBuilder(coords, signal_nodes, crossing_nodes)
+    builder = _EdgeBuilder(coords, signal_nodes, crossing_nodes, mode)
     for road in roads:
         start = 0
         for i in range(1, len(road.refs)):
@@ -842,7 +869,7 @@ def build_graph(elements: Iterable[Mapping[str, Any]], *, area: str = "", bbox: 
                 builder.add_segment(road, road.refs[start : i + 1])
                 start = i
 
-    banned = _apply_restrictions(builder, relations.values(), stats)
+    banned = _apply_restrictions(builder, relations.values(), stats, mode)
     graph = builder.finish(area, bbox, banned, stats)
     _mark_school_zones(graph, schools)
     graph.rail_crossing_points = sorted(coords[node] for node in crossing_nodes if node in coords)
@@ -851,6 +878,8 @@ def build_graph(elements: Iterable[Mapping[str, Any]], *, area: str = "", bbox: 
         schools=len(schools),
         school_zone_segments=sum(graph.school_zone),
     )
+    if mode == "bike":
+        graph.stats.update({f"stress_{level}_km": round(sum(l for l, s in zip(graph.length_m, graph.stress) if s == level) / 2000) for level in (1, 2, 3, 4)})
     logger.info("Built %s: %d junctions, %d road segments", area or "graph", graph.node_count, graph.edge_count)
     return graph
 
@@ -864,6 +893,33 @@ class _Road:
     name: str
     forward: bool
     backward: bool
+    stress: int = 0  # bike map only: Level of Traffic Stress, 1-4
+
+    @classmethod
+    def for_bikes(cls, way: Mapping[str, Any], coords: Mapping[int, Point]) -> _Road | None:
+        """The way as a bike map has it: who may ride it, which ways, how fast, and how stressful."""
+        tags = way.get("tags", {})
+        if not _bikeable(tags):
+            return None
+        direction = _bike_direction(tags)
+        if direction is None:
+            return None
+        refs: list[int] = []
+        for ref in way.get("nodes", []):
+            if ref in coords and (not refs or refs[-1] != ref):
+                refs.append(ref)
+        if len(refs) < 2:
+            return None
+        return cls(
+            way_id=way["id"],
+            refs=refs,
+            highway=tags["highway"],
+            speed_kmh=BIKE_UNPAVED_KMH if tags.get("surface") in UNPAVED_SURFACES else BIKE_SPEED_KMH,
+            name=tags.get("name") or tags.get("ref") or "",
+            forward=direction[0],
+            backward=direction[1],
+            stress=traffic_stress(tags),
+        )
 
     @classmethod
     def from_way(cls, way: Mapping[str, Any], coords: Mapping[int, Point]) -> _Road | None:
@@ -917,7 +973,10 @@ def _mark_school_zones(graph: RoadGraph, schools: Sequence[Point]) -> None:
 
 
 class _EdgeBuilder:
-    def __init__(self, coords: Mapping[int, Point], signal_nodes: set[int], crossing_nodes: set[int] = frozenset()) -> None:
+    def __init__(
+        self, coords: Mapping[int, Point], signal_nodes: set[int], crossing_nodes: set[int] = frozenset(), mode: str = "car"
+    ) -> None:
+        self.mode = mode
         self.coords = coords
         self.signal_nodes = signal_nodes
         self.crossing_nodes = crossing_nodes
@@ -925,7 +984,7 @@ class _EdgeBuilder:
         self.lat: list[float] = []
         self.lng: list[float] = []
         self.names: dict[str, int] = {"": 0}
-        self.classes = list(DRIVABLE_HIGHWAYS)
+        self.classes = list(DRIVABLE_HIGHWAYS) + (list(BIKE_ONLY_HIGHWAYS) if mode == "bike" else [])
         self.edges: dict[str, list[Any]] = defaultdict(list)
 
     def junction(self, osm_id: int) -> int:
@@ -963,6 +1022,7 @@ class _EdgeBuilder:
         e["bearing_start"].append(_departure_bearing(points))
         e["bearing_end"].append(_departure_bearing(points[::-1], reverse=True))
         e["geometry"].append(encode_polyline(points))
+        e["stress"].append(road.stress)
 
     def finish(self, area: str, bbox: BBox | None, banned: dict[int, set[int]], stats: Counter[str]) -> RoadGraph:
         e = self.edges
@@ -1004,6 +1064,8 @@ class _EdgeBuilder:
             names=sorted(self.names, key=self.names.__getitem__),
             banned=remapped_banned,
             rail_crossings=column("rail_crossings"),
+            mode=self.mode,
+            stress=column("stress") if self.mode == "bike" else [],
         )
         stats["junctions"] = graph.node_count
         stats["road_segments"] = graph.edge_count
@@ -1013,7 +1075,7 @@ class _EdgeBuilder:
 
 
 def _apply_restrictions(
-    builder: _EdgeBuilder, relations: Iterable[Mapping[str, Any]], stats: Counter[str]
+    builder: _EdgeBuilder, relations: Iterable[Mapping[str, Any]], stats: Counter[str], mode: str = "car"
 ) -> dict[int, set[int]]:
     """Turn restriction relations into banned (incoming edge, outgoing edge) pairs."""
     e = builder.edges
@@ -1025,7 +1087,7 @@ def _apply_restrictions(
 
     banned: dict[int, set[int]] = defaultdict(set)
     for relation in relations:
-        kind = _restriction_kind(relation.get("tags", {}))
+        kind = _restriction_kind(relation.get("tags", {}), mode)
         if kind is None or not kind.startswith(("no_", "only_")):
             stats["restrictions_ignored"] += 1
             continue
@@ -1055,11 +1117,12 @@ def _apply_restrictions(
     return banned
 
 
-def _restriction_kind(tags: Mapping[str, str]) -> str | None:
+def _restriction_kind(tags: Mapping[str, str], mode: str = "car") -> str | None:
     exempt = {value.strip() for value in tags.get("except", "").split(";")}
-    if exempt & {"motorcar", "motor_vehicle"}:
+    if exempt & ({"bicycle"} if mode == "bike" else {"motorcar", "motor_vehicle"}):
         return None
-    for key in ("restriction:motorcar", "restriction:motor_vehicle", "restriction"):
+    keys = ("restriction:bicycle", "restriction") if mode == "bike" else ("restriction:motorcar", "restriction:motor_vehicle", "restriction")
+    for key in keys:
         if key in tags:
             return tags[key].strip()
     if "restriction:conditional" in tags:
@@ -1067,6 +1130,93 @@ def _restriction_kind(tags: Mapping[str, str]) -> str | None:
         # legal turn, but never routes an illegal one.
         return tags["restriction:conditional"].split("@")[0].strip()
     return None
+
+
+# ---- The bike map: who may ride a way, which ways, how fast, and how stressful it is.
+
+# Ways only bikes (and people on foot) use. Footways and pedestrian streets only where bikes are
+# allowed on them; never sidewalks (whether adults may ride on them varies by city: not assumed).
+BIKE_ONLY_HIGHWAYS = ("cycleway", "path", "footway", "pedestrian", "track", "bridleway")
+NO_BIKE_HIGHWAYS = frozenset({"motorway", "motorway_link"})  # freeways: no bikes in Wisconsin
+_BIKES_WELCOME = frozenset({"yes", "designated", "permissive"})
+BIKE_SPEED_KMH = 16.0  # an everyday rider's average, stops aside
+BIKE_UNPAVED_KMH = 12.0
+UNPAVED_SURFACES = frozenset({"unpaved", "gravel", "fine_gravel", "compacted", "dirt", "earth", "ground", "grass", "sand", "mud"})
+OFF_STREET_HIGHWAYS = frozenset(BIKE_ONLY_HIGHWAYS)
+QUIET_HIGHWAYS = frozenset({"residential", "living_street", "service", "unclassified"})
+# Lanes on a road (both directions together) when OSM doesn't say: the worse case, so a busy
+# street with unknown lanes isn't taken for a quiet one.
+DEFAULT_LANES = {"trunk": 4, "primary": 4, "secondary": 4, "trunk_link": 2, "primary_link": 2, "secondary_link": 2}
+
+
+def _bikeable(tags: Mapping[str, str]) -> bool:
+    highway = tags.get("highway")
+    if highway not in DRIVABLE_HIGHWAYS and highway not in BIKE_ONLY_HIGHWAYS or highway in NO_BIKE_HIGHWAYS:
+        return False
+    if tags.get("area") == "yes" or tags.get("footway") == "sidewalk":
+        return False
+    if highway == "service" and tags.get("service") in _EXCLUDED_SERVICE:
+        return False
+    bicycle = tags.get("bicycle")
+    if highway in ("footway", "pedestrian", "bridleway") and bicycle not in _BIKES_WELCOME:
+        return False
+    if highway == "track" and bicycle not in _BIKES_WELCOME and tags.get("surface") in UNPAVED_SURFACES | {None}:
+        return False
+    if bicycle in ("no", "dismount", "use_sidepath"):
+        return False
+    if bicycle in _BIKES_WELCOME:
+        return True
+    # Otherwise the most specific general access tag decides.
+    for key in ("vehicle", "access"):
+        if key in tags:
+            return tags[key] not in _NO_ACCESS
+    return True
+
+
+def _bike_direction(tags: Mapping[str, str]) -> tuple[bool, bool] | None:
+    """Like a car's (see _direction), except where bikes may ride against a one-way street."""
+    if tags.get("oneway:bicycle") == "no":
+        return (True, True)
+    if any(tags.get(key, "").startswith("opposite") for key in ("cycleway", "cycleway:left", "cycleway:right", "cycleway:both")):
+        return (True, True)
+    if tags.get("highway") in OFF_STREET_HIGHWAYS and tags.get("oneway") not in ("yes", "-1"):
+        return (True, True)
+    return _direction(tags)
+
+
+def traffic_stress(tags: Mapping[str, str]) -> int:
+    """Level of Traffic Stress (Mekuria, Furth and Nixon, 2012): 1 for anyone (trails, protected lanes,
+    very quiet streets) to 4 for only the most confident riders (fast, multi-lane traffic).
+
+    From the way's speed limit (or its class's usual one), its lanes (or the worse case for its class),
+    and its bike facility: a separated track, a painted lane, or none (sharrows count as none).
+    """
+    highway = tags.get("highway", "")
+    if highway in OFF_STREET_HIGHWAYS:
+        return 1
+    facilities = {tags.get(key, "") for key in ("cycleway", "cycleway:both", "cycleway:left", "cycleway:right")}
+    if facilities & {"track", "opposite_track"}:
+        return 1
+    if highway == "living_street":
+        return 1
+    mph = _speed_kmh(tags) / MPH_TO_KMH
+    try:
+        lanes = int(tags.get("lanes", "").split(";")[0])
+    except ValueError:
+        lanes = DEFAULT_LANES.get(highway, 2)
+    if facilities & {"lane", "buffered_lane", "opposite_lane"}:
+        if mph <= 30 and lanes <= 2:
+            return 2
+        return 3 if mph <= 35 else 4
+    if mph <= 25:
+        if lanes <= 2:
+            return 1 if highway in QUIET_HIGHWAYS else 2
+        return 2 if lanes <= 3 else 3
+    if mph <= 30:
+        return 2 if lanes <= 2 else 3 if lanes <= 3 else 4
+    if mph <= 35:
+        return 3 if lanes <= 2 else 4
+    return 4
 
 
 def _drivable(tags: Mapping[str, str]) -> bool:

@@ -4,6 +4,7 @@ Run from the backend/ directory:
 
     python -m app.crash_data milwaukee-metro
     python -m app.crash_data milwaukee-metro --years 2018-2024
+    python -m app.crash_data milwaukee-metro --cyclists     # for bike routes: where cyclists died
     python -m app.crash_data import crashes.csv
 
 Download (the default): NHTSA's Fatality Analysis Reporting System (FARS):
@@ -65,9 +66,21 @@ def download_year(year: int, folder: Path, http: httpx.Client, *, refresh: bool 
     return path
 
 
-def crashes_in(path: Path, area: BBox) -> Iterator[dict[str, str | float | int]]:
-    """Fatal crashes inside area from one FARS yearly file (its accident table)."""
+CYCLIST_TYPES = {"6", "7"}  # FARS person types: bicyclist, other pedalcyclist
+
+
+def crashes_in(path: Path, area: BBox, *, cyclists_only: bool = False) -> Iterator[dict[str, str | float | int]]:
+    """Fatal crashes inside area from one FARS yearly file (its accident table); with cyclists_only,
+    just those where a cyclist was involved (its pbtype table)."""
     with zipfile.ZipFile(path) as archive:
+        cases: set[str] | None = None
+        if cyclists_only:
+            member = next((name for name in archive.namelist() if name.lower().endswith("pbtype.csv")), None)
+            if member is None:
+                raise ValueError(f"{path.name} has no pbtype.csv")
+            with archive.open(member) as raw:
+                reader = csv.DictReader(io.TextIOWrapper(raw, encoding="latin-1", newline=""))
+                cases = {row["ST_CASE"] for row in reader if row.get("PBPTYPE") in CYCLIST_TYPES}
         member = next((name for name in archive.namelist() if name.lower().endswith("accident.csv")), None)
         if member is None:
             raise ValueError(f"{path.name} has no accident.csv")
@@ -82,6 +95,8 @@ def crashes_in(path: Path, area: BBox) -> Iterator[dict[str, str | float | int]]
                     continue
                 # Unknown locations are coded as 77.7777, 88.8888, 99.9999 and the like: outside any area.
                 if not area.contains(lat, lng):
+                    continue
+                if cases is not None and row.get(columns.get("ST_CASE", ""), "") not in cases:
                     continue
                 yield {
                     "lat": round(lat, 6),
@@ -212,6 +227,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("area", choices=AREAS, help="area to keep crashes for")
     parser.add_argument("--years", default=DEFAULT_YEARS, help=f"years to include, e.g. 2018-2024 (default {DEFAULT_YEARS})")
     parser.add_argument("--refresh", action="store_true", help="download the yearly files again")
+    parser.add_argument("--cyclists", action="store_true", help="only crashes where a cyclist died, for bike routes")
     args = parser.parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
 
@@ -224,19 +240,22 @@ def main(argv: Sequence[str] | None = None) -> int:
             except httpx.HTTPError as exc:
                 print(f"error: couldn't download FARS {year}: {exc}", file=sys.stderr)
                 return 1
-            found = list(crashes_in(path, AREAS[args.area]))
-            logger.info("FARS %d: %d fatal crashes in %s", year, len(found), args.area)
+            found = list(crashes_in(path, AREAS[args.area], cyclists_only=args.cyclists))
+            logger.info("FARS %d: %d fatal %scrashes in %s", year, len(found), "cyclist " if args.cyclists else "", args.area)
             rows += found
 
-    out = BACKEND_DIR / "data" / "crashes" / f"{args.area}.csv"
+    out = BACKEND_DIR / "data" / "crashes" / f"{args.area}{'-bike' if args.cyclists else ''}.csv"
     with out.open("w", newline="", encoding="utf-8") as handle:
         writer = csv.DictWriter(handle, fieldnames=["lat", "lng", "crashes", "year", "fatalities"])
         writer.writeheader()
         writer.writerows(rows)
-    print(f"\nWrote {len(rows):,} fatal crashes to {out}")
+    print(f"\nWrote {len(rows):,} fatal {'cyclist ' if args.cyclists else ''}crashes to {out}")
     print("Point the server at it in backend/.env:")
-    print(f"  ROUTES_CRASH_DATA=data/crashes/{args.area}.csv")
-    print("  ROUTES_CRASH_MIN_COUNT=1")
+    if args.cyclists:
+        print(f"  ROUTES_BIKE_CRASH_DATA=data/crashes/{args.area}-bike.csv")
+    else:
+        print(f"  ROUTES_CRASH_DATA=data/crashes/{args.area}.csv")
+        print("  ROUTES_CRASH_MIN_COUNT=1")
     print("Source: NHTSA Fatality Analysis Reporting System (FARS).")
     return 0
 
