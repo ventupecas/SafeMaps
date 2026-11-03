@@ -68,6 +68,9 @@ class Settings:
     weather_alerts: bool = True
     # The bus routes the OpenStreetMap map's Transit layer draws: a GTFS feed's address. None: rail only.
     bus_routes_url: str | None = BUS_ROUTES_URL
+    # Transit trips from that feed's schedule (ROUTES_TRANSIT=off skips reading it: a minute or two
+    # in the background at startup, and about 200 MB while it reads).
+    transit: bool = True
 
     @classmethod
     def from_env(cls) -> Settings:
@@ -145,6 +148,7 @@ class Settings:
             fuel_price=fuel_price,
             weather_alerts=(os.getenv("ROUTES_WEATHER_ALERTS") or "on").strip().lower() not in {"0", "false", "no", "off"},
             bus_routes_url=_bus_routes_url(os.getenv("ROUTES_BUS_ROUTES")),
+            transit=(os.getenv("ROUTES_TRANSIT") or "on").strip().lower() not in {"0", "false", "no", "off"},
         )
 
 

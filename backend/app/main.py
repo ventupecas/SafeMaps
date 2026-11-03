@@ -83,10 +83,11 @@ from app.road_events import collect as collect_road_events
 from app.roadgraph import RoadGraph
 from app.router import Router
 from app.routes_client import DailyLimitReached, RoutesApiError, RoutesClient, daily_usage
-from app.sun import dark, low_sun
+from app.sun import dark, low_sun, sun_position
 from app.traffic_tiles import TILE_REFRESH, TileError, TrafficTiles
 from app.transit import BusRoutes
-from app import bike
+from app import bike, transit_plan
+from app.timetable import TimetableSource
 from app.expo_control import ExpoControl
 from app.trip_log import TripLog
 from app.usage import DailyUsage
@@ -241,6 +242,15 @@ class BikeTripRequest(BaseModel):
     departure_offset_min: int = Field(0, ge=0, le=24 * 60)
 
 
+class TransitTripRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    origin: LatLng
+    destination: LatLng
+    departure_offset_min: int = Field(0, ge=0, le=24 * 60)
+    leave_at: datetime | None = Field(None, description="Leave then (local time) instead: within the coming week.")
+
+
 class Guess(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -303,6 +313,7 @@ class Engine:
     walk_hotspots: CrashHotspots | None = None  # fatal crashes where a pedestrian died
     _walk_router: bike.BikeRouter | None = None
     bike_hotspots: CrashHotspots | None = None  # fatal crashes where a cyclist died
+    schedule: TimetableSource | None = None  # the buses' timetable, for transit trips (app.timetable)
     _bike_router: bike.BikeRouter | None = None
     warmed_up: bool = False  # the road events across the map are matched to it (warm_up)
     _routers: dict[DrivingSide, Router] = field(default_factory=dict)
@@ -511,11 +522,16 @@ def create_app(settings: Settings | None = None, *, http: httpx.Client | None = 
             buses=BusRoutes(client, settings.bus_routes_url, settings.cache_dir / "bus-routes.json")
             if settings.bus_routes_url and settings.map == "osm"
             else None,
+            schedule=TimetableSource(client, settings.bus_routes_url, settings.cache_dir / "transit-feed.zip")
+            if settings.bus_routes_url and settings.transit
+            else None,
         )
         app.state.engine = engine
         Thread(target=engine.warm_up, name="road-events-warm-up", daemon=True).start()
         if engine.buses:  # fetched ahead, so the Transit layer shows at once
             Thread(target=engine.buses.routes, name="bus-routes", daemon=True).start()
+        if engine.schedule:  # read in the background: transit trips wait for it, nothing else does
+            Thread(target=engine.schedule.load, name="bus-schedule", daemon=True).start()
         logger.info(
             "Started: %s map, road graph %s, crash data %s, cache %s, road events from %s%s",
             "OpenStreetMap" if settings.map == "osm" else "Google",
@@ -577,6 +593,13 @@ def create_app(settings: Settings | None = None, *, http: httpx.Client | None = 
             "weather_alerts": engine.weather is not None,
             "bus_routes": engine.buses is not None,
             "bus_routes_ready": bool(engine.buses and engine.buses.routes_now()),
+            "transit": {
+                "ready": engine.schedule.table is not None,
+                "stops": len(engine.schedule.table.stop_ids) if engine.schedule.table else 0,
+                "error": engine.schedule.error,
+            }
+            if engine.schedule
+            else None,
             "walk_map": {
                 "segments": engine.walk_graph.edge_count,
                 "pedestrian_crash_locations": engine.walk_hotspots.locations if engine.walk_hotspots else 0,
@@ -608,6 +631,7 @@ def create_app(settings: Settings | None = None, *, http: httpx.Client | None = 
             "bus_routes": request.app.state.engine.buses is not None,
             "bike": request.app.state.engine.bike_graph is not None,
             "walk": request.app.state.engine.walk_graph is not None,
+            "transit": request.app.state.engine.schedule is not None,
             "fuel_price": settings.fuel_price,
         }
 
@@ -900,6 +924,36 @@ def create_app(settings: Settings | None = None, *, http: httpx.Client | None = 
         """Walking routes for one trip, the same way: the calmest route (sidewalks and paths, signals to cross
         busy roads) within the walker's detour limit, beside the shortest."""
         return active_route("walk", trip, request.app.state.engine, x_access_code)
+
+    @app.post("/transit-route")
+    def transit_route(
+        trip: TransitTripRequest, request: Request, x_access_code: str | None = Header(None, include_in_schema=False)
+    ) -> dict[str, Any]:
+        """Bus trips by the schedule: walk, ride, maybe transfer, walk; the safest of those arriving near the
+        earliest first. The walks are planned on the walking map when there is one."""
+        check_access(x_access_code)
+        engine: Engine = request.app.state.engine
+        if engine.schedule is None:
+            raise HTTPException(status_code=503, detail="Transit trips need a bus schedule (ROUTES_BUS_ROUTES).")
+        table = engine.schedule.table
+        if table is None:
+            detail = "The bus schedule couldn't be loaded." if engine.schedule.error else "The bus schedule is still loading: try again in a minute."
+            raise HTTPException(status_code=503, detail=detail)
+        departure = trip.leave_at.replace(tzinfo=None) if trip.leave_at else datetime.now() + timedelta(minutes=trip.departure_offset_min)
+        walker = engine.walk_router() if engine.walk_graph is not None else None
+        try:
+            result = transit_plan.plan(
+                table, walker, trip.origin, trip.destination, departure, lambda moment, point: sun_position(moment, *point)
+            )
+        except LookupError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from None
+        return {
+            "plan": result,
+            "attribution": ["Bus schedule: Milwaukee County Transit System", f"Walking routes: map data {ATTRIBUTION}"],
+            "leaving_at": departure.isoformat(timespec="minutes"),
+            "after_dark": dark(sun_position(departure, trip.origin.lat, trip.origin.lng)),
+            "scheduled": True,  # times are the timetable's, not live
+        }
 
     def active_route(mode: str, trip: BikeTripRequest, engine: Engine, x_access_code: str | None) -> dict[str, Any]:
         check_access(x_access_code)
