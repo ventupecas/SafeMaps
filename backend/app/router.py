@@ -119,6 +119,7 @@ class _Costs:
     table: dict[tuple[str, bool], float]
     zones: dict[int, frozenset[int]]  # segment -> the zones it's in: lane closures (by event number), school zones
     zone_costs: dict[int, float]  # zone -> what driving into it costs
+    extra: Any = None  # the bike router's own (app.bike): the rider's profile, and whether it's dark
 
 
 class OutsideGraphError(LookupError):
@@ -222,7 +223,7 @@ class Router:
         if heading is None and g.edge_from[departures[0]] == end:
             return []
 
-        costs = self._costs(design_profile(profile), events, keep=departures, school_hours=school_hours, sun=sun)
+        costs = self._trip_costs(profile, events, keep=departures, school_hours=school_hours, sun=sun)
         on_offer = [edges for edges in (g.edges_along(points) for points in avoid) if edges]
         penalties: dict[int, float] = {}
         found: list[RoutedPath] = []
@@ -420,6 +421,12 @@ class Router:
             edges = frozenset(self.graph.event_edges(event))
             self._event_edges[key] = edges
         return edges
+
+    def _trip_costs(
+        self, profile: Any, events: Sequence[RoadEvent], *, keep: Iterable[int], school_hours: bool, sun: Sun | None
+    ) -> _Costs:
+        """What a trip costs to search: a driver's, from their profile. The bike router (app.bike) costs it its own way."""
+        return self._costs(design_profile(profile), events, keep=keep, school_hours=school_hours, sun=sun)
 
     def _costs(
         self,

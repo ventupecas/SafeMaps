@@ -2014,6 +2014,101 @@ body:not(.map-osm) .osm-only {
   }
 }
 
+/* ---- Bike mode (bike.js): car-only and bike-only controls, the switch, stress bars */
+
+body.mode-bike .car-only,
+body:not(.mode-bike) .bike-only {
+  display: none !important;
+}
+
+.mode {
+  display: flex;
+  padding: 3px;
+  border-radius: 999px;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+}
+
+.mode label {
+  position: relative;
+  flex: 1;
+  cursor: pointer;
+}
+
+.mode input {
+  position: absolute;
+  opacity: 0;
+}
+
+.mode span {
+  display: block;
+  padding: 7px 12px;
+  border-radius: 999px;
+  text-align: center;
+  font-weight: 700;
+  color: var(--muted);
+}
+
+.mode input:checked + span {
+  background: var(--accent);
+  color: #fff;
+  box-shadow: var(--shadow-sm);
+}
+
+.mode input:focus-visible + span {
+  outline: 3px solid var(--focus);
+  outline-offset: 1px;
+}
+
+.stress {
+  margin-top: 12px;
+}
+
+.stress-bar {
+  display: flex;
+  height: 10px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: var(--surface-2);
+}
+
+.route .stress-bar {
+  height: 6px;
+  margin-top: 6px;
+}
+
+.stress__key {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 14px;
+  margin: 8px 0 0;
+  padding: 0;
+  list-style: none;
+  font-size: 0.78rem;
+  color: var(--muted);
+}
+
+.stress__key li {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.stress__key .key {
+  width: 14px;
+  height: 8px;
+}
+
+.key--stress {
+  background: linear-gradient(90deg, #1a9850, #8bbd2a, #f08c00, #d7191c);
+}
+
+.layers__hint {
+  margin: 0;
+  font-size: 0.75rem;
+  color: var(--muted);
+}
+
 /* ---- "Which route is safer?" (game.html) */
 
 .game__round {

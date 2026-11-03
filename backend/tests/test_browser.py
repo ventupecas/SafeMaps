@@ -20,7 +20,9 @@ import pytest
 import uvicorn
 
 from app.main import create_app
+from app.roadgraph import build_graph
 from tests.osm_factory import point
+from tests.test_bike import city_with_a_trail
 from tests.test_api import FakeGoogle, make_settings
 
 sync_api = pytest.importorskip("playwright.sync_api")
@@ -31,7 +33,10 @@ TRIP = f"?from={FROM[0]:.5f},{FROM[1]:.5f}&to={TO[0]:.5f},{TO[1]:.5f}"
 
 @pytest.fixture(scope="module")
 def site(tmp_path_factory):
-    settings = make_settings(tmp_path_factory.mktemp("site"), map="osm")
+    folder = tmp_path_factory.mktemp("site")
+    bike_map = folder / "grid-bike.json.gz"
+    build_graph(city_with_a_trail().osm.elements, area="grid", mode="bike").save(bike_map)
+    settings = make_settings(folder, map="osm", bike_graph_path=bike_map)
     app = create_app(settings, http=httpx.Client(transport=httpx.MockTransport(FakeGoogle())))
     with socket.socket() as probe:
         probe.bind(("127.0.0.1", 0))
@@ -262,3 +267,20 @@ def test_the_safer_route_game_asks_for_free_uncounted_routes_and_shows_two(page,
         with page.expect_request("**/guess"):
             page.click("#pick-a")
         assert page.locator("#game-tally").text_content() == "You: 1 of 1 right" or "0 of 1" in page.locator("#game-tally").text_content()
+
+
+def test_bike_mode_plans_a_bike_route_colored_by_stress(page, site):
+    asked = route_request_to(page, "/bike-route", lambda: open_map(page, site + TRIP + "&mode=bike"))
+    assert asked["profile"] == "everyday"
+    wait_for_routes(page)
+    assert page.evaluate("document.body.classList.contains('mode-bike')")
+    assert page.locator("#drive").text_content() == "Start riding" and page.locator(".stress-bar").count() >= 1
+    assert page.locator("#profile").is_hidden() and page.locator("#bike-profile").is_visible()
+    page.click('input[name="mode"][value="car"] + span')  # back to the car: the bike routes go
+    assert page.locator(".route").count() == 0 and page.locator("#profile").is_visible()
+
+
+def route_request_to(page, path, action):
+    with page.expect_request(lambda request: request.url.endswith(path) and request.method == "POST") as asked:
+        action()
+    return asked.value.post_data_json

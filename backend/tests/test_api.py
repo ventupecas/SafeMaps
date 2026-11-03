@@ -360,7 +360,7 @@ def test_routes_come_with_turn_by_turn_directions(api):
 def test_the_openstreetmap_map_never_asks_google(tmp_path, google):
     app = create_app(make_settings(tmp_path, map="osm"), http=httpx.Client(transport=httpx.MockTransport(google)))
     with TestClient(app) as client:
-        assert client.get("/app-config").json() == {"map": "osm", "traffic_tiles": False, "bus_routes": False, "fuel_price": 3.25}  # no TomTom key
+        assert client.get("/app-config").json() == {"map": "osm", "traffic_tiles": False, "bus_routes": False, "bike": False, "fuel_price": 3.25}  # no TomTom key
         trip = client.post("/route", json={"origin": ORIGIN, "destination": DESTINATION, "live_traffic": True}).json()
     assert google.requests == []  # no Google: not even with live traffic asked for
     standard = [route for route in trip["plan"]["candidates"] if route["is_standard"]]
@@ -372,7 +372,7 @@ def test_the_openstreetmap_map_never_asks_google(tmp_path, google):
 def test_googles_default_is_the_standard_route_on_the_google_map(api):
     trip = api.post("/route", json={"origin": ORIGIN, "destination": DESTINATION}).json()
     assert [r["id"] for r in trip["plan"]["candidates"] if r["is_standard"]] == ["google-1"]
-    assert api.get("/app-config").json() == {"map": "google", "traffic_tiles": False, "bus_routes": False, "fuel_price": 3.25}
+    assert api.get("/app-config").json() == {"map": "google", "traffic_tiles": False, "bus_routes": False, "bike": False, "fuel_price": 3.25}
 
 
 class FakeTomTom:
@@ -401,7 +401,7 @@ def test_tomtom_traffic_on_the_openstreetmap_map(tmp_path, google):
     tomtom = FakeTomTom(main_st_closed_both_ways(), google)
     settings = make_settings(tmp_path, map="osm", tomtom_api_key="tt-key")
     with TestClient(create_app(settings, http=httpx.Client(transport=httpx.MockTransport(tomtom)))) as client:
-        assert client.get("/app-config").json() == {"map": "osm", "traffic_tiles": True, "bus_routes": False, "fuel_price": 3.25}
+        assert client.get("/app-config").json() == {"map": "osm", "traffic_tiles": True, "bus_routes": False, "bike": False, "fuel_price": 3.25}
         trip = client.post("/route", json={"origin": ORIGIN, "destination": DESTINATION}).json()
         first = client.get("/traffic-tiles/12/1047/1504.png")
         again = client.get("/traffic-tiles/12/1047/1504.png")
@@ -511,3 +511,26 @@ def test_guesses_in_the_safer_route_game_are_counted(tmp_path, google):
         assert client.post("/guess", json={"right": True, "picked_score": 180, "other_score": 4}).status_code == 422
         guesses = client.get("/expo-stats").json()["guesses"]
     assert guesses == {"total": 2, "right": 1, "right_share": 0.5}
+
+
+def test_bike_routes_through_the_api(tmp_path, google):
+    from tests.test_bike import city_with_a_trail
+
+    bike_map = tmp_path / "grid-bike.json.gz"
+    build_graph(city_with_a_trail().osm.elements, area="grid", mode="bike").save(bike_map)
+    app = create_app(make_settings(tmp_path, map="osm", bike_graph_path=bike_map), http=httpx.Client(transport=httpx.MockTransport(google)))
+    with TestClient(app) as client:
+        assert client.get("/app-config").json()["bike"] is True
+        trip = client.post("/bike-route", json={"origin": ORIGIN, "destination": DESTINATION, "profile": "family"}).json()
+        assert client.post("/bike-route", json={"origin": ORIGIN, "destination": DESTINATION, "profile": "racing"}).status_code == 422
+        box = {"south": 43.03, "west": -87.91, "north": 43.05, "east": -87.89}
+        stress = client.get("/bike-stress", params=box).json()
+    winner = trip["plan"]["winner"]
+    assert 0 <= winner["safety_score"] <= 100 and winner["stress_segments"] and winner["features"]["duration_min"] > 0
+    assert any(c["is_standard"] for c in trip["plan"]["candidates"])
+    assert stress["lines"]["1"] and stress["lines"]["4"]  # quiet avenues, and Main St
+
+
+def test_no_bike_map_no_bike_routes(api):
+    assert api.get("/app-config").json()["bike"] is False
+    assert api.post("/bike-route", json={"origin": ORIGIN, "destination": DESTINATION}).status_code == 503

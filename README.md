@@ -71,7 +71,7 @@ Without the router, each new trip costs 2 Essentials requests (plain + avoid-hig
 
 With the router (see below), each trip costs 1 live-traffic request for Google's own suggestions plus 1 per route our router designs: up to 4, all at the **Pro** tier. Live-traffic answers are only reused for 5 minutes in record mode. Size `ROUTES_DAILY_LIMIT` for the expo: 4 × the number of trips you expect.
 
-Planned next: safe bicycle routes, see [BIKE_MODE.md](BIKE_MODE.md).
+**Bike routes** (Car / Bike switch at the top of the planner): the lowest-stress route a rider is comfortable on, within a detour they accept, compared with the shortest. See "Bike routes" below and [BIKE_MODE.md](BIKE_MODE.md).
 
 ## Web map and API
 
@@ -154,6 +154,27 @@ Until then, the page shows these steps in place of the map. On the page:
   Leaflet loads from unpkg.com, map tiles from tile.openstreetmap.org, and search from photon.komoot.io. All three are free for light use like a demo, with fair-use policies, so don't use them for heavy traffic. TomTom's traffic tiles come through this server, so the TomTom key never reaches a browser.
 
 **Sharing the demo over a link.** A free tunnel gives the laptop a public https address, so visitors can open the app on their phones, driving mode included. Anyone with the address could use your Google requests, so set an access code: with `ROUTES_ACCESS_CODE=...` in `backend/.env`, route requests without it are refused (401). Share the address with `?code=...` on the end; the page remembers the code. EXPO.md has the step-by-step instructions.
+
+## Bike routes
+
+With the bike map built, the planner gets a **Car / Bike** switch:
+
+```powershell
+.\.venv\Scripts\python.exe -m app.build_graph milwaukee-metro --bike      # the bike map: roads plus trails and paths
+.\.venv\Scripts\python.exe -m app.crash_data milwaukee-metro --cyclists   # fatal crashes where a cyclist died (FARS)
+```
+
+The first writes `data/graphs/milwaukee-metro-bike.json.gz`, which the server loads by itself (`ROUTES_BIKE_GRAPH` to point elsewhere, `off` for no bike mode); the second prints the `ROUTES_BIKE_CRASH_DATA` line for `backend\.env`. The bike map takes about 240 MB of memory in each server process.
+
+- **Stress, not speed:** every street and trail gets a Level of Traffic Stress, 1 (anyone: trails, protected lanes, quiet streets) to 4 (only the most confident: fast, multi-lane traffic), from its speed limit, lanes and bike lane or trail. Where OpenStreetMap doesn't say, the worse case is assumed. Freeways and sidewalks are never used; footways only where bikes are allowed.
+- **The route:** our router searches the bike map with each stretch costing its riding time times a weight for its stress, and crossing a busy (stress 3 or 4) road without a signal costing extra, as do places where a cyclist was killed and railroad tracks. Closures are avoided; a lane closure counts as one stress level worse.
+- **Riders:** Most adults (the default: some traffic is fine), Family (the quietest streets, long detours accepted), Confident (busier streets are fine) and E-bike (like most adults, faster). Each has a detour limit, such as 1.5 times the shortest time and at most 15 minutes more for most adults.
+- **The page:** the recommended route colored by stress, its busy crossings marked (and the shortest route's it avoids), minutes at each stress level, the safety score and what it counts, beside the shortest route. Turn-by-turn and spoken directions work as for cars. **Bike stress** under Map layers colors every street in view (zoomed in). From December to March, a note says trails may not be cleared.
+- **Stops and the dark:** trips with stops are planned leg by leg, as for cars. After dark, unlit stretches cost more and count in the score: lit as OpenStreetMap says, else streets count as lit and trails as unlit.
+- **Not yet:** hills. Trails come from a separate download (see BIKE_MODE.md, "Status").
+- **Results:** `python -m app.bike_evaluate` plans 20 Milwaukee bike trips on the running server and compares each with the shortest route, into [BIKE_RESULTS.md](BIKE_RESULTS.md).
+- **All bike crashes:** a Community Maps export (see "All reported crashes") cut down to bike crashes: `python -m app.crash_data import <file> --cyclists`.
+- **API:** `POST /bike-route` (`origin`, `destination`, `profile`), `GET /bike-stress?south=&west=&north=&east=`.
 
 ## Running the engine
 

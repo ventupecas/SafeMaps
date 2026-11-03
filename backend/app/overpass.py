@@ -114,12 +114,30 @@ def build_query(bbox: BBox, timeout_s: int = 600) -> str:
     )
 
 
+def build_bike_query(bbox: BBox, timeout_s: int = 600) -> str:
+    """For the bike map, what the road query leaves out: trails, cycleways and paths bikes may use,
+    their nodes, and their own street and railroad crossings. Combined with the road tiles."""
+    box = f"{bbox.south},{bbox.west},{bbox.north},{bbox.east}"
+    return (
+        f"[out:json][timeout:{timeout_s}];\n"
+        f'way["highway"~"^(cycleway|path|footway|pedestrian|track|bridleway)$"]["footway"!="sidewalk"]({box})->.paths;\n'
+        ".paths out body qt;\n"
+        "node(w.paths)->.path_nodes;\n"
+        ".path_nodes out skel qt;\n"
+        'node.path_nodes["highway"~"^(traffic_signals|crossing)$"];\n'
+        "out body qt;\n"
+        'node.path_nodes["railway"~"^(level_crossing|crossing)$"];\n'
+        "out body qt;\n"
+    )
+
+
 def download_area(
     area: str,
     bbox: BBox,
     raw_dir: Path,
     *,
     tiles: int = 3,
+    query: Callable[[BBox], str] | None = None,
     endpoint: str = DEFAULT_ENDPOINT,
     refresh: bool = False,
     http: httpx.Client | None = None,
@@ -132,7 +150,7 @@ def download_area(
     """
     raw_dir.mkdir(parents=True, exist_ok=True)
     client = http or httpx.Client(timeout=httpx.Timeout(900.0, connect=30.0), headers={"User-Agent": USER_AGENT})
-    downloader = _TileDownloader(client, endpoint, raw_dir, refresh, sleep)
+    downloader = _TileDownloader(client, endpoint, raw_dir, refresh, sleep, query or build_query)
     paths: list[Path] = []
     try:
         for index, tile in enumerate(bbox.tiles(tiles, tiles)):
@@ -157,6 +175,7 @@ class _TileDownloader:
     raw_dir: Path
     refresh: bool
     sleep: Callable[[float], None]
+    query: Callable[[BBox], str] = build_query
 
     def fetch(self, tile: BBox, name: str, label: str, depth: int = 0) -> list[Path]:
         path = self.raw_dir / f"{name}.json.gz"
@@ -171,7 +190,7 @@ class _TileDownloader:
 
         logger.info("%s: downloading", label)
         try:
-            data = _fetch(self.client, self.endpoint, build_query(tile), self.sleep)
+            data = _fetch(self.client, self.endpoint, self.query(tile), self.sleep)
         except OverpassError as exc:
             if not exc.splittable or depth >= MAX_SPLIT_DEPTH:
                 raise

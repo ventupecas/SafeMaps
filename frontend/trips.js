@@ -3,6 +3,7 @@
 import { $, MAX_RECENT, MAX_STOPS, RECENT_KEY, element, state } from "./core.js";
 import { accessCode, clearTrip, findRoute } from "./app.js";
 import { addStop, chosenStops, removeStop, setPoint } from "./editing.js";
+import { setMode } from "./bike.js";
 
 function recentTrips() {
   try {
@@ -16,7 +17,7 @@ function recentTrips() {
 export function rememberTrip() {
   if ($("demo-mode").checked || state.demo.running || !state.origin || !state.destination) return;
   const keep = ({ lat, lng, label }) => ({ lat, lng, label: /^(My|Current) location$/.test(label || "") ? null : label });
-  const trip = { from: keep(state.origin), to: keep(state.destination), stops: chosenStops().map(keep) };
+  const trip = { from: keep(state.origin), to: keep(state.destination), stops: chosenStops().map(keep), mode: state.mode };
   const key = (t) => JSON.stringify([t.from, t.to, t.stops].flat().map((p) => [p.lat.toFixed(4), p.lng.toFixed(4)]));
   const trips = [trip, ...recentTrips().filter((other) => key(other) !== key(trip))].slice(0, MAX_RECENT);
   try {
@@ -63,6 +64,7 @@ export function tripLink() {
     if (point.label && !/^(My|Current) location$/.test(point.label)) params.set(`${key}Name`, point.label.slice(0, 80));
   }
   for (const stop of chosenStops()) params.append("stop", where(stop));
+  if (state.mode === "bike") params.set("mode", "bike");
   const query = params.toString();
   return `${window.location.origin}${window.location.pathname}${query ? `?${query}` : ""}`;
 }
@@ -80,7 +82,8 @@ export function openTripFromLink() {
 }
 
 // A whole trip in place of the one on the map, planned at once.
-function loadTrip({ from, to, stops = [] }) {
+function loadTrip({ from, to, stops = [], mode = null }) {
+  if (mode) setMode(mode);
   if (state.nav.active) return;
   const copy = ({ lat, lng, label = null }) => ({ lat, lng, label, countryCode: null });
   clearTrip();

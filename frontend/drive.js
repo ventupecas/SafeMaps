@@ -7,6 +7,7 @@ import { chosenStops, placePin, setPoint } from "./editing.js";
 import { selectRoute, showTrip } from "./results.js";
 import { stopDemo } from "./expo.js";
 import { locale, translate } from "./i18n.js";
+import { requestBikeTrip, showBikeTrip } from "./bike.js";
 
 function locationProblem() {
   if (!window.isSecureContext) return "Location only works on a secure page: https, or this computer's own address.";
@@ -63,7 +64,7 @@ export async function startDriving() {
   });
   keepScreenOn();
   if (state.pins.origin) state.pins.origin.remove(); // the car marks the start while driving
-  $("drive").textContent = "Stop driving";
+  $("drive").textContent = state.mode === "bike" ? "Stop riding" : "Stop driving";
   document.body.classList.add("driving");
   setNavStatus("Waiting for your location…");
 }
@@ -78,7 +79,7 @@ export function stopDriving(message = null) {
   if (state.origin) placePin("origin", state.origin);
   if (nav.wakeLock) nav.wakeLock.release().catch(() => {});
   nav.wakeLock = null;
-  $("drive").textContent = "Start driving";
+  $("drive").textContent = state.mode === "bike" ? "Start riding" : "Start driving";
   $("recenter").hidden = true;
   document.body.classList.remove("driving");
   setNavStatus(message);
@@ -154,11 +155,15 @@ async function reroute(here) {
   const countryCode = (state.origin && state.origin.countryCode) || null;
   const origin = { ...here, label: "Current location", countryCode };
   try {
-    const trip = await requestTrip(origin, state.destination, { heading: nav.heading, stops: nav.stopsLeft, counted: false });
+    const bike = state.mode === "bike";
+    const trip = bike
+      ? await requestBikeTrip(origin, state.destination, { stops: nav.stopsLeft })
+      : await requestTrip(origin, state.destination, { heading: nav.heading, stops: nav.stopsLeft, counted: false });
     if (!nav.active) return;
     state.origin = origin; // its pin returns when driving stops
     $("origin-picked").textContent = origin.label;
-    showTrip(trip, { fit: false });
+    if (bike) showBikeTrip(trip, { fit: false });
+    else showTrip(trip, { fit: false });
     nav.offRoute = 0;
     const reason = trip.plan.winner.reason;
     setNavStatus(reason ? `New route: ${reason}` : "New route found");

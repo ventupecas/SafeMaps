@@ -51,3 +51,35 @@ def test_an_export_without_coordinates_names_the_columns_it_has(tmp_path, capsys
         import_crashes(export, METRO)
     assert main(["import", str(export)]) == 1
     assert "latitude and longitude" in capsys.readouterr().err
+
+
+def test_cyclist_crashes_are_picked_out_by_their_person_type(tmp_path):
+    import zipfile
+
+    from app.crash_data import crashes_in
+    from app.overpass import BBox
+
+    archive = tmp_path / "FARS2022NationalCSV.zip"
+    with zipfile.ZipFile(archive, "w") as fars:
+        fars.writestr("FARS2022NationalCSV/accident.csv", "ST_CASE,LATITUDE,LONGITUD,YEAR,FATALS\n1,43.04,-87.91,2022,1\n2,43.05,-87.92,2022,1\n")
+        fars.writestr("FARS2022NationalCSV/pbtype.csv", "ST_CASE,PBPTYPE,PBPTYPENAME\n1,5,Pedestrian\n2,6,Bicyclist\n")
+    area = BBox(42.9, -88.1, 43.2, -87.8)
+    assert len(list(crashes_in(archive, area))) == 2
+    (cyclist,) = crashes_in(archive, area, cyclists_only=True)
+    assert (cyclist["lat"], cyclist["lng"]) == (43.05, -87.92)
+
+
+def test_an_export_can_be_cut_down_to_bike_crashes(tmp_path):
+    export = tmp_path / "crashes.csv"
+    export.write_text(
+        "CRSHDATE,LATDECDG,LONDECDG,INJSVR,BIKEFLAG\n"
+        "2021-04-02,43.04,-87.91,Fatal,N\n"
+        "2022-06-01,43.05,-87.92,Possible Injury,Y\n",
+        encoding="utf-8",
+    )
+    (bike,), _ = import_crashes(export, METRO, cyclists_only=True)
+    assert (bike["lat"], bike["severity"]) == (43.05, "injury")
+    no_flag = tmp_path / "no-flag.csv"
+    no_flag.write_text("LATDECDG,LONDECDG\n43.04,-87.91\n", encoding="utf-8")
+    with pytest.raises(ValueError, match="bike"):
+        import_crashes(no_flag, METRO, cyclists_only=True)

@@ -39,6 +39,10 @@
         </header>
 
         <section class="trip" aria-label="Trip">
+          <div id="mode" class="mode" role="radiogroup" aria-label="How you're going" hidden>
+            <label><input type="radio" name="mode" value="car" checked /><span>Car</span></label>
+            <label><input type="radio" name="mode" value="bike" /><span>Bike</span></label>
+          </div>
           <div class="trip-card">
             <div class="stop stop--a">
               <span class="pin pin--a" aria-hidden="true">A</span>
@@ -77,11 +81,20 @@
           </details>
 
           <div class="prefs">
-            <div class="field">
+            <div class="field car-only">
               <label class="field__label" for="profile">Driver profile</label>
               <select id="profile"></select>
             </div>
-            <div class="field">
+            <div class="field bike-only">
+              <label class="field__label" for="bike-profile">Rider</label>
+              <select id="bike-profile">
+                <option value="everyday" selected>Most adults: some traffic is OK</option>
+                <option value="family">Family: the quietest streets, even if longer</option>
+                <option value="confident">Confident: busier streets are fine</option>
+                <option value="ebike">E-bike: like most adults, but faster</option>
+              </select>
+            </div>
+            <div class="field car-only">
               <label class="field__label" for="extra-time">Extra time you'd accept for a safer route</label>
               <select id="extra-time">
                 <option value="" selected>No fixed limit</option>
@@ -168,6 +181,10 @@
               <label class="switch"><input type="checkbox" id="traffic-layer" /><span class="switch__track"></span>Traffic</label>
               <label class="switch"><input type="checkbox" id="transit-layer" /><span class="switch__track"></span>Transit</label>
               <label class="switch"><input type="checkbox" id="biking-layer" /><span class="switch__track"></span>Biking</label>
+              <label id="bike-stress-switch" class="switch" hidden>
+                <input type="checkbox" id="bike-stress-layer" /><span class="switch__track"></span>Bike stress
+              </label>
+              <p id="stress-hint" class="layers__hint" hidden>Zoom in to see each street's stress.</p>
               <label class="switch osm-only"><input type="checkbox" id="buses-near" checked /><span class="switch__track"></span>Only buses near the trip</label>
               <label class="switch">
                 <input type="checkbox" id="dark-at-night" checked /><span class="switch__track"></span>Dark map at night
@@ -179,17 +196,21 @@
           <summary>Map key</summary>
           <ul class="legend__items">
             <li><span class="key key--winner"></span>Recommended route</li>
-            <li><span class="key key--standard"></span>Standard (fastest) route</li>
+            <li class="car-only"><span class="key key--standard"></span>Standard (fastest) route</li>
+            <li class="bike-only"><span class="key key--standard"></span>Shortest route</li>
             <li><span class="key key--alternative"></span>Other routes</li>
             <li><span class="key key--closed"></span>Road closed</li>
             <li><span class="key key--lanes"></span>Lane closure</li>
             <li class="osm-only"><span class="key key--hazard"></span>Weather hazard: fog, ice, flooding</li>
             <li class="osm-only"><span class="key key--cluster">3</span>Several closures: zoom in</li>
-            <li><span class="key key--turn"></span>Risky turn across traffic</li>
-            <li><span class="key key--turn key--avoided"></span>Risky turn the recommended route avoids</li>
-            <li><span class="key spot spot--rail"></span>Railroad crossing (faded: one it avoids)</li>
-            <li><span class="key spot spot--school"></span>School zone at school times (faded: one it avoids)</li>
+            <li class="car-only"><span class="key key--turn"></span>Risky turn across traffic</li>
+            <li class="car-only"><span class="key key--turn key--avoided"></span>Risky turn the recommended route avoids</li>
+            <li class="car-only"><span class="key spot spot--rail"></span>Railroad crossing (faded: one it avoids)</li>
+            <li class="car-only"><span class="key spot spot--school"></span>School zone at school times (faded: one it avoids)</li>
+            <li class="bike-only"><span class="key key--turn"></span>Busy crossing without a signal</li>
+            <li class="bike-only"><span class="key key--turn key--avoided"></span>Busy crossing the recommended route avoids</li>
             <li id="legend-traffic" hidden><span class="key key--traffic"></span>Traffic: flowing → jammed</li>
+            <li id="legend-stress" hidden><span class="key key--stress"></span>Bike stress: low → very busy</li>
             <li id="legend-buses" class="osm-only" hidden><span class="key key--buses"></span>Bus routes, each its own color</li>
           </ul>
         </details>

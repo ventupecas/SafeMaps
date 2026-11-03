@@ -4,6 +4,7 @@ Run from the backend/ directory:
 
     python -m app.crash_data milwaukee-metro
     python -m app.crash_data milwaukee-metro --years 2018-2024
+    python -m app.crash_data milwaukee-metro --cyclists     # for bike routes: where cyclists died
     python -m app.crash_data import crashes.csv
 
 Download (the default): NHTSA's Fatality Analysis Reporting System (FARS):
@@ -65,9 +66,21 @@ def download_year(year: int, folder: Path, http: httpx.Client, *, refresh: bool 
     return path
 
 
-def crashes_in(path: Path, area: BBox) -> Iterator[dict[str, str | float | int]]:
-    """Fatal crashes inside area from one FARS yearly file (its accident table)."""
+CYCLIST_TYPES = {"6", "7"}  # FARS person types: bicyclist, other pedalcyclist
+
+
+def crashes_in(path: Path, area: BBox, *, cyclists_only: bool = False) -> Iterator[dict[str, str | float | int]]:
+    """Fatal crashes inside area from one FARS yearly file (its accident table); with cyclists_only,
+    just those where a cyclist was involved (its pbtype table)."""
     with zipfile.ZipFile(path) as archive:
+        cases: set[str] | None = None
+        if cyclists_only:
+            member = next((name for name in archive.namelist() if name.lower().endswith("pbtype.csv")), None)
+            if member is None:
+                raise ValueError(f"{path.name} has no pbtype.csv")
+            with archive.open(member) as raw:
+                reader = csv.DictReader(io.TextIOWrapper(raw, encoding="latin-1", newline=""))
+                cases = {row["ST_CASE"] for row in reader if row.get("PBPTYPE") in CYCLIST_TYPES}
         member = next((name for name in archive.namelist() if name.lower().endswith("accident.csv")), None)
         if member is None:
             raise ValueError(f"{path.name} has no accident.csv")
@@ -83,6 +96,8 @@ def crashes_in(path: Path, area: BBox) -> Iterator[dict[str, str | float | int]]
                 # Unknown locations are coded as 77.7777, 88.8888, 99.9999 and the like: outside any area.
                 if not area.contains(lat, lng):
                     continue
+                if cases is not None and row.get(columns.get("ST_CASE", ""), "") not in cases:
+                    continue
                 yield {
                     "lat": round(lat, 6),
                     "lng": round(lng, 6),
@@ -97,6 +112,9 @@ _LAT_NAMES = ("lat", "latitude", "latdecdg", "lat_dd", "y_coord")
 _LNG_NAMES = ("lng", "lon", "long", "longitude", "londecdg", "lon_dd", "x_coord")
 _SEVERITY_HINTS = ("injsvr", "severity", "svr", "kabco", "injury")
 _DATE_HINTS = ("date", "crshdate", "year")
+# A column flagging crashes that involved a bike, by name, and the values that mean yes.
+_CYCLIST_HINTS = ("bicycl", "bike", "pedalcycl", "cyclist")
+_YES = {"y", "yes", "1", "true", "x"}
 SEVERITY_WEIGHTS = {"fatal": 3.0, "serious": 2.0, "injury": 1.0, "unknown": 1.0, "property": 0.0}
 PROPERTY_DAMAGE_WEIGHT = 0.25
 
@@ -126,9 +144,10 @@ def severity_of(value: str) -> str:
 
 
 def import_crashes(
-    path: Path, area: BBox, *, include_property_damage: bool = False
+    path: Path, area: BBox, *, include_property_damage: bool = False, cyclists_only: bool = False
 ) -> tuple[list[dict[str, str | float | int]], set[int]]:
-    """The crashes in area from an exported CSV, weighed by severity; and the years they span."""
+    """The crashes in area from an exported CSV, weighed by severity; and the years they span.
+    With cyclists_only, just the crashes its bike column flags (a column named for bicycles)."""
     with path.open(newline="", encoding="utf-8-sig", errors="replace") as handle:
         reader = csv.DictReader(handle)
         names = reader.fieldnames or []
@@ -138,6 +157,9 @@ def import_crashes(
             raise ValueError(f"{path.name} needs latitude and longitude columns; it has: {', '.join(names)}")
         severity_col = _column(names, (), _SEVERITY_HINTS)
         date_col = _column(names, (), _DATE_HINTS)
+        cyclist_col = _column(names, (), _CYCLIST_HINTS) if cyclists_only else None
+        if cyclists_only and cyclist_col is None:
+            raise ValueError(f"{path.name} has no column saying which crashes involved a bike; it has: {', '.join(names)}")
         rows: list[dict[str, str | float | int]] = []
         years: set[int] = set()
         for row in reader:
@@ -147,6 +169,10 @@ def import_crashes(
                 continue
             if not area.contains(lat, lng):
                 continue
+            if cyclist_col is not None:
+                flag = (row.get(cyclist_col) or "").strip().lower()
+                if flag not in _YES and not any(hint in flag for hint in _CYCLIST_HINTS):
+                    continue
             severity = severity_of(row.get(severity_col) or "") if severity_col else "unknown"
             weight = SEVERITY_WEIGHTS[severity]
             if severity == "property" and include_property_damage:
@@ -165,16 +191,19 @@ def import_main(argv: Sequence[str]) -> int:
     parser.add_argument("file", type=Path, help="the exported CSV")
     parser.add_argument("--area", choices=AREAS, default="milwaukee-metro", help="area to keep crashes for")
     parser.add_argument("--include-property-damage", action="store_true", help="count crashes without injuries too")
+    parser.add_argument("--cyclists", action="store_true", help="only crashes involving a bike, for bike routes")
     args = parser.parse_args(argv)
     try:
-        rows, years = import_crashes(args.file, AREAS[args.area], include_property_damage=args.include_property_damage)
+        rows, years = import_crashes(
+            args.file, AREAS[args.area], include_property_damage=args.include_property_damage, cyclists_only=args.cyclists
+        )
     except (OSError, ValueError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
     if not rows:
         print(f"error: no crashes with injuries inside {args.area} in {args.file.name}", file=sys.stderr)
         return 1
-    out = BACKEND_DIR / "data" / "crashes" / f"{args.area}-all.csv"
+    out = BACKEND_DIR / "data" / "crashes" / f"{args.area}-{'bike-' if args.cyclists else ''}all.csv"
     out.parent.mkdir(parents=True, exist_ok=True)
     with out.open("w", newline="", encoding="utf-8") as handle:
         writer = csv.DictWriter(handle, fieldnames=["lat", "lng", "crashes", "severity", "year"])
@@ -189,6 +218,10 @@ def import_main(argv: Sequence[str]) -> int:
     if span:
         print(f"  covering {min(years)}-{max(years)} ({span} year{'s' if span > 1 else ''})")
     print("Point the server at it in backend/.env:")
+    if args.cyclists:
+        # Bike routes count any spot with a bike crash (bike crashes are rarer than car ones).
+        print(f"  ROUTES_BIKE_CRASH_DATA=data/crashes/{args.area}-bike-all.csv")
+        return 0
     print(f"  ROUTES_CRASH_DATA=data/crashes/{args.area}-all.csv")
     print(f"  ROUTES_CRASH_MIN_COUNT={min_count}")
     print("Then check /health (hazards.crash_locations) and raise the count if too many junctions are flagged.")
@@ -212,6 +245,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("area", choices=AREAS, help="area to keep crashes for")
     parser.add_argument("--years", default=DEFAULT_YEARS, help=f"years to include, e.g. 2018-2024 (default {DEFAULT_YEARS})")
     parser.add_argument("--refresh", action="store_true", help="download the yearly files again")
+    parser.add_argument("--cyclists", action="store_true", help="only crashes where a cyclist died, for bike routes")
     args = parser.parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
 
@@ -224,19 +258,22 @@ def main(argv: Sequence[str] | None = None) -> int:
             except httpx.HTTPError as exc:
                 print(f"error: couldn't download FARS {year}: {exc}", file=sys.stderr)
                 return 1
-            found = list(crashes_in(path, AREAS[args.area]))
-            logger.info("FARS %d: %d fatal crashes in %s", year, len(found), args.area)
+            found = list(crashes_in(path, AREAS[args.area], cyclists_only=args.cyclists))
+            logger.info("FARS %d: %d fatal %scrashes in %s", year, len(found), "cyclist " if args.cyclists else "", args.area)
             rows += found
 
-    out = BACKEND_DIR / "data" / "crashes" / f"{args.area}.csv"
+    out = BACKEND_DIR / "data" / "crashes" / f"{args.area}{'-bike' if args.cyclists else ''}.csv"
     with out.open("w", newline="", encoding="utf-8") as handle:
         writer = csv.DictWriter(handle, fieldnames=["lat", "lng", "crashes", "year", "fatalities"])
         writer.writeheader()
         writer.writerows(rows)
-    print(f"\nWrote {len(rows):,} fatal crashes to {out}")
+    print(f"\nWrote {len(rows):,} fatal {'cyclist ' if args.cyclists else ''}crashes to {out}")
     print("Point the server at it in backend/.env:")
-    print(f"  ROUTES_CRASH_DATA=data/crashes/{args.area}.csv")
-    print("  ROUTES_CRASH_MIN_COUNT=1")
+    if args.cyclists:
+        print(f"  ROUTES_BIKE_CRASH_DATA=data/crashes/{args.area}-bike.csv")
+    else:
+        print(f"  ROUTES_CRASH_DATA=data/crashes/{args.area}.csv")
+        print("  ROUTES_CRASH_MIN_COUNT=1")
     print("Source: NHTSA Fatality Analysis Reporting System (FARS).")
     return 0
 

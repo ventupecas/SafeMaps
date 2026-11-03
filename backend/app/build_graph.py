@@ -4,10 +4,15 @@ Run from the backend/ directory:
 
     python -m app.build_graph milwaukee-metro
     python -m app.build_graph milwaukee-metro --tiles 4 --refresh
+    python -m app.build_graph milwaukee-metro --bike      # the bike map, for bike routes
 
 Raw Overpass tiles are kept under data/osm/<area>/, so a rebuild after a code
 change reuses them. The graph is written to data/graphs/<area>.json.gz, which
 is where ROUTES_GRAPH points by default.
+
+With --bike, the bike map: the same road tiles plus trails, cycleways and paths
+(kept under data/osm/<area>-bike/), with bike rules and each segment's traffic
+stress, written to data/graphs/<area>-bike.json.gz (ROUTES_BIKE_GRAPH).
 """
 
 from __future__ import annotations
@@ -19,7 +24,7 @@ import time
 from collections.abc import Sequence
 
 from app.config import BACKEND_DIR
-from app.overpass import AREAS, DEFAULT_ENDPOINT, OverpassError, download_area, iter_elements
+from app.overpass import AREAS, DEFAULT_ENDPOINT, OverpassError, build_bike_query, download_area, iter_elements
 from app.roadgraph import build_graph
 
 
@@ -30,6 +35,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--refresh", action="store_true", help="download again even if tiles are on disk")
     parser.add_argument("--download-only", action="store_true", help="fetch the tiles but don't build")
     parser.add_argument("--endpoint", default=DEFAULT_ENDPOINT, help="Overpass API URL")
+    parser.add_argument("--bike", action="store_true", help="build the bike map (roads plus trails and paths)")
     args = parser.parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
 
@@ -39,14 +45,25 @@ def main(argv: Sequence[str] | None = None) -> int:
         paths = download_area(
             args.area, AREAS[args.area], raw_dir, tiles=args.tiles, endpoint=args.endpoint, refresh=args.refresh
         )
+        if args.bike:
+            paths += download_area(
+                f"{args.area} trails and paths",
+                AREAS[args.area],
+                BACKEND_DIR / "data" / "osm" / f"{args.area}-bike",
+                tiles=args.tiles,
+                endpoint=args.endpoint,
+                refresh=args.refresh,
+                query=build_bike_query,
+            )
     except OverpassError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
     if args.download_only:
         return 0
 
-    graph = build_graph(iter_elements(paths), area=args.area, bbox=AREAS[args.area])
-    out = BACKEND_DIR / "data" / "graphs" / f"{args.area}.json.gz"
+    mode = "bike" if args.bike else "car"
+    graph = build_graph(iter_elements(paths), area=args.area, bbox=AREAS[args.area], mode=mode)
+    out = BACKEND_DIR / "data" / "graphs" / f"{args.area}{'-bike' if args.bike else ''}.json.gz"
     graph.save(out)
 
     print(f"\nWrote {out} ({out.stat().st_size / 1e6:.1f} MB) in {time.monotonic() - started:.0f} s")
