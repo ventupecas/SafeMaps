@@ -878,11 +878,18 @@ def build_graph(
                 builder.add_segment(road, road.refs[start : i + 1])
                 start = i
 
+    # The ways are segments now: let them go before the map is finished (a metro's worth is large).
+    del uses
+    roads.clear()
+    ways.clear()
+
     # Turn restrictions are for vehicles: none apply on foot.
     banned = _apply_restrictions(builder, relations.values(), stats, mode) if mode != "walk" else {}
+    relations.clear()
+    rail_crossing_points = sorted(coords[node] for node in crossing_nodes if node in coords)
     graph = builder.finish(area, bbox, banned, stats)
     _mark_school_zones(graph, schools)
-    graph.rail_crossing_points = sorted(coords[node] for node in crossing_nodes if node in coords)
+    graph.rail_crossing_points = rail_crossing_points
     graph.stats.update(
         rail_crossings=len(graph.rail_crossing_points),
         schools=len(schools),

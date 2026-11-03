@@ -3,3 +3,4 @@ httpx>=0.28
 pydantic>=2.12,<3
 python-dotenv>=1.0
 uvicorn>=0.32
+osmium>=4.0  # reading OpenStreetMap extracts: python -m app.build_graph <area> --pbf <file>

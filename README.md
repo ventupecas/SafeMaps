@@ -171,7 +171,7 @@ The first writes `data/graphs/milwaukee-metro-bike.json.gz`, which the server lo
 - **Riders:** Most adults (the default: some traffic is fine), Family (the quietest streets, long detours accepted), Confident (busier streets are fine) and E-bike (like most adults, faster). Each has a detour limit, such as 1.5 times the shortest time and at most 15 minutes more for most adults.
 - **The page:** the recommended route colored by stress, its busy crossings marked (and the shortest route's it avoids), minutes at each stress level, the safety score and what it counts, beside the shortest route. Turn-by-turn and spoken directions work as for cars. **Bike stress** under Map layers colors every street in view (zoomed in). From December to March, a note says trails may not be cleared.
 - **Stops and the dark:** trips with stops are planned leg by leg, as for cars. After dark, unlit stretches cost more and count in the score: lit as OpenStreetMap says, else streets count as lit and trails as unlit.
-- **Not yet:** hills. Trails come from a separate download (see BIKE_MODE.md, "Status").
+- **Not yet:** hills.
 - **Results:** `python -m app.bike_evaluate` plans 20 Milwaukee bike trips on the running server and compares each with the shortest route, into [BIKE_RESULTS.md](BIKE_RESULTS.md).
 - **All bike crashes:** a Community Maps export (see "All reported crashes") cut down to bike crashes: `python -m app.crash_data import <file> --cyclists`.
 - **API:** `POST /bike-route` (`origin`, `destination`, `profile`), `GET /bike-stress?south=&west=&north=&east=`.
@@ -401,6 +401,16 @@ This command:
 - with `--endpoint https://overpass.kumi.systems/api/interpreter`, uses a mirror if the main server is busy
 
 Routes built from this data must credit **"© OpenStreetMap contributors"** (ODbL) on the map.
+
+
+**From an extract instead of Overpass.** Where Overpass can't be reached, `--pbf <file>` builds any of the maps from an OpenStreetMap extract (`.osm.pbf`, needs `pip install osmium`): it picks out what each Overpass query asks for (roads with their signals, rail crossings, turn restrictions and schools; trails and paths; sidewalks and steps) and builds from that exactly as from downloaded tiles. OpenStreetMap US's Slice service cuts an extract of any area from the day's planet data:
+
+```powershell
+curl.exe -X POST https://slice.openstreetmap.us/api/ -d '{\"Name\":\"milwaukee-metro\",\"RegionType\":\"geojson\",\"RegionData\":{\"type\":\"Polygon\",\"coordinates\":[[[-88.55,42.83],[-87.75,42.83],[-87.75,43.55],[-88.55,43.55],[-88.55,42.83]]]}}'
+# prints an id; when https://slice.openstreetmap.us/api/<id> says "Complete":true (two or three minutes):
+curl.exe -o data\osm\pbf\milwaukee-metro.osm.pbf https://slice.openstreetmap.us/files/<id>.osm.pbf
+.\.venv\Scripts\python.exe -m app.build_graph milwaukee-metro --walk --pbf data\osm\pbf\milwaukee-metro.osm.pbf
+```
 
 ### How a trip works
 

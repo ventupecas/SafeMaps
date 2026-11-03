@@ -6,6 +6,7 @@ Run from the backend/ directory:
     python -m app.build_graph milwaukee-metro --tiles 4 --refresh
     python -m app.build_graph milwaukee-metro --bike      # the bike map, for bike routes
     python -m app.build_graph milwaukee-metro --walk      # the walking map, for walking routes
+    python -m app.build_graph milwaukee-metro --pbf data/osm/pbf/milwaukee-metro.osm.pbf   # from an extract
 
 Raw Overpass tiles are kept under data/osm/<area>/, so a rebuild after a code
 change reuses them. The graph is written to data/graphs/<area>.json.gz, which
@@ -14,6 +15,9 @@ is where ROUTES_GRAPH points by default.
 With --bike, the bike map: the same road tiles plus trails, cycleways and paths
 (kept under data/osm/<area>-bike/), with bike rules and each segment's traffic
 stress, written to data/graphs/<area>-bike.json.gz (ROUTES_BIKE_GRAPH).
+
+With --pbf, the same data from an OpenStreetMap extract instead of Overpass (where Overpass can't be
+reached; see app.osm_extract), converted once into data/osm/<area>-pbf/.
 """
 
 from __future__ import annotations
@@ -23,9 +27,11 @@ import logging
 import sys
 import time
 from collections.abc import Sequence
+from pathlib import Path
 
 from app.config import BACKEND_DIR
 from app.overpass import AREAS, DEFAULT_ENDPOINT, OverpassError, build_bike_query, build_walk_query, download_area, iter_elements
+from app.osm_extract import extract
 from app.roadgraph import build_graph
 
 
@@ -39,11 +45,21 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--bike", action="store_true", help="build the bike map (roads plus trails and paths)")
     parser.add_argument("--walk", action="store_true", help="build the walking map (roads plus footways, sidewalks and steps)")
     parser.add_argument("--roads-only", action="store_true", help="with --bike or --walk: skip the paths download (streets only)")
+    parser.add_argument("--pbf", type=Path, help="read an OpenStreetMap extract (.osm.pbf) instead of downloading from Overpass")
     args = parser.parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
 
     raw_dir = BACKEND_DIR / "data" / "osm" / args.area
     started = time.monotonic()
+    if args.pbf:
+        if not args.pbf.exists():
+            print(f"error: no such file: {args.pbf}", file=sys.stderr)
+            return 1
+        converted = extract(args.pbf, BACKEND_DIR / "data" / "osm" / f"{args.area}-pbf")
+        paths = [converted["roads"]]
+        if not args.roads_only:
+            paths += [converted["walk"]] if args.walk else [converted["bike"]] if args.bike else []
+        return _build(args, paths, started)
     try:
         paths = download_area(
             args.area, AREAS[args.area], raw_dir, tiles=args.tiles, endpoint=args.endpoint, refresh=args.refresh
@@ -73,7 +89,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 1
     if args.download_only:
         return 0
+    return _build(args, paths, started)
 
+
+def _build(args: argparse.Namespace, paths: list[Path], started: float) -> int:
     mode = "bike" if args.bike else "walk" if args.walk else "car"
     graph = build_graph(iter_elements(paths), area=args.area, bbox=AREAS[args.area], mode=mode)
     out = BACKEND_DIR / "data" / "graphs" / f"{args.area}{'' if mode == 'car' else '-' + mode}.json.gz"

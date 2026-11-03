@@ -180,9 +180,18 @@ def download_area(
 
 
 def iter_elements(paths: Iterable[Path]) -> Iterator[dict[str, Any]]:
+    """Every element in the files. Files written one element a line (app.osm_extract) are read a line
+    at a time, so a whole metro's nodes never sit in memory at once; Overpass's own, whole."""
     for path in paths:
         with gzip.open(path, "rt", encoding="utf-8") as handle:
-            yield from json.load(handle).get("elements", [])
+            first = handle.readline()
+            if first.strip() == '{"elements": [':
+                for line in handle:
+                    line = line.strip().rstrip(",")
+                    if line and line != "]}":
+                        yield json.loads(line)
+            else:
+                yield from json.loads(first + handle.read()).get("elements", [])
 
 
 @dataclass

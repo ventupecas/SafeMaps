@@ -50,6 +50,13 @@ It takes a while.
 
 - **Network:** some workplace networks block the download (Overpass). Use another network if it times out.
 - **If the server is busy:** add `--endpoint https://overpass.kumi.systems/api/interpreter`.
+- **If Overpass can't be reached at all** (this computer's network blocks it and Geofabrik): get an extract instead. At https://slice.openstreetmap.us draw a box from 42.83, -88.55 to 43.55, -87.75 (or send it with `curl.exe -X POST https://slice.openstreetmap.us/api/` and a GeoJSON polygon, as in the README), download the `.osm.pbf` into `backend\data\osm\pbf\`, then build every map from it: about a minute each, from the same file.
+
+  ```powershell
+  .\.venv\Scripts\python.exe -m app.build_graph milwaukee-metro --pbf data\osm\pbf\milwaukee-metro.osm.pbf
+  .\.venv\Scripts\python.exe -m app.build_graph milwaukee-metro --bike --pbf data\osm\pbf\milwaukee-metro.osm.pbf
+  .\.venv\Scripts\python.exe -m app.build_graph milwaukee-metro --walk --pbf data\osm\pbf\milwaukee-metro.osm.pbf
+  ```
 - **Afterwards:** restart the server so it loads the new map. `curl.exe http://127.0.0.1:3143/health` should then show `rail_crossings` and `schools` above 0 under `hazards`.
 
 ### Build the bike map (for the Car / Bike switch)
@@ -59,7 +66,7 @@ It takes a while.
 .\.venv\Scripts\python.exe -m app.crash_data milwaukee-metro --cyclists
 ```
 
-The first downloads Milwaukee's trails and paths (on top of the road tiles above) and builds the bike map; the second picks the crashes where a cyclist died out of the crash files already downloaded and prints a line to add to `backend\.env`. Restart the server: the planner shows a **Car / Bike** switch, and `/health` shows `bike_map` with `trails` above 0. Without the trails download (if Overpass is unreachable), bike routes still work on streets, but miss the Oak Leaf, Hank Aaron and other trails.
+The first downloads Milwaukee's trails and paths (on top of the road tiles above) and builds the bike map; the second picks the crashes where a cyclist died out of the crash files already downloaded and prints a line to add to `backend\.env`. Restart the server: the planner shows a **Car / Bike** switch, and `/health` shows `bike_map` with `trails` above 0. Without the trails download (if Overpass is unreachable), bike routes still work on streets, but miss the Oak Leaf, Hank Aaron and other trails: build from an extract instead (`--pbf`, above).
 
 ### Build the walking map (for Walk, and the walks on bus trips)
 
