@@ -1,4 +1,8 @@
-"""Bike routes: the lowest-stress route a rider would be comfortable on, within a detour they accept.
+"""Bike and walking routes: the lowest-stress route a rider (or walker) is comfortable on, within a detour they accept.
+
+The same router and plans serve the walking map (build_graph(mode="walk")): there, stress is walking
+along a street (a sidewalk or a path is calm, a busy road without one is not), crossings are judged by
+the traffic crossed (RoadGraph.cross), and the profiles are walkers' (WALK_PROFILES).
 
 See BIKE_MODE.md for the reasoning. In short:
 
@@ -20,13 +24,13 @@ from __future__ import annotations
 
 import math
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 from app.features import TurnContext, directions
 from app.geo import encode_polyline
 from app.models import LatLng, ScoringProfile
 from app.road_events import RoadEvent
-from app.roadgraph import BIKE_SPEED_KMH, RoadGraph
+from app.roadgraph import BIKE_SPEED_KMH, WALK_SPEED_KMH, RoadGraph
 from app.router import RoutedPath, Router, _Costs
 from app.sun import DARK_TURN_FACTOR, Sun, dark
 
@@ -42,6 +46,7 @@ class BikeProfile:
     unlit_weight: float  # after dark, a minute on an unlit stretch feels like this many more
     max_detour_ratio: float  # at most this many times the shortest route's time ...
     max_extra_min: float  # ... and at most this many minutes more
+    avoid_steps: bool = False  # walking with a stroller or a wheelchair
 
 
 PROFILES = {
@@ -51,6 +56,14 @@ PROFILES = {
     "ebike": BikeProfile("ebike", 22.0, (1.0, 1.4, 3.0, 8.0), (3.0, 8.0), 5.0, 1.0, 0.5, 1.5, 15.0),
 }
 DEFAULT_PROFILE = "everyday"
+# Walkers: most people; careful (children, older walkers: quiet streets, signals to cross); step-free
+# (strollers, wheelchairs: no steps).
+WALK_PROFILES = {
+    "everyday": BikeProfile("everyday", 4.8, (1.0, 1.5, 3.0, 6.0), (2.0, 5.0), 5.0, 0.5, 0.5, 1.4, 10.0),
+    "careful": BikeProfile("careful", 3.6, (1.0, 2.0, 6.0, 15.0), (5.0, 15.0), 10.0, 1.0, 1.0, 1.8, 15.0),
+    "stepfree": BikeProfile("stepfree", 4.0, (1.0, 1.5, 3.0, 6.0), (2.0, 5.0), 5.0, 0.5, 0.5, 1.6, 12.0, avoid_steps=True),
+}
+MAP_SPEED_KMH = {"bike": BIKE_SPEED_KMH, "walk": WALK_SPEED_KMH}  # the speed each map's times are at
 # The standard route: the shortest ride, stress ignored.
 SHORTEST = BikeProfile("shortest", 16.0, (1.0, 1.0, 1.0, 1.0), (0.0, 0.0), 0.0, 0.0, 0.0, math.inf, math.inf)
 
@@ -81,8 +94,8 @@ class BikeRouter(Router):
     """The car router's search, costed for a rider (see the module docstring)."""
 
     def __init__(self, graph: RoadGraph, context: TurnContext = TurnContext()) -> None:
-        if graph.mode != "bike":
-            raise ValueError("BikeRouter needs the bike map (python -m app.build_graph <area> --bike)")
+        if graph.mode not in MAP_SPEED_KMH:
+            raise ValueError("BikeRouter needs the bike or walking map (python -m app.build_graph <area> --bike or --walk)")
         super().__init__(graph, context)
         self._crossings: dict[tuple[int, int, str], int] = {}
 
@@ -101,14 +114,19 @@ class BikeRouter(Router):
 
     def _trip_costs(self, profile, events, *, keep, school_hours=False, sun=None) -> _Costs:  # type: ignore[override]
         g = self.graph
-        slower = BIKE_SPEED_KMH / profile.speed_kmh  # the map's times are at BIKE_SPEED_KMH
+        slower = MAP_SPEED_KMH[g.mode] / profile.speed_kmh  # the map's times are at its own speed
         weights = profile.stress_weights
+        steps = g.classes.index("steps") if profile.avoid_steps and "steps" in g.classes else None
         night = dark(sun)
         edges = [
             g.time_s[edge] / 60 * slower * (weights[max(1, g.stress[edge]) - 1] + (profile.unlit_weight if night and not g.lit[edge] else 0.0))
             + g.rail_crossings[edge] * profile.rail_minutes
             for edge in range(g.edge_count)
         ]
+        if steps is not None:
+            for edge in range(g.edge_count):
+                if g.road_class[edge] == steps:
+                    edges[edge] = math.inf
         keep = set(keep)
         for event in events:
             for edge in self.event_edges(event):
@@ -159,9 +177,9 @@ class BikeRouter(Router):
             names = {g.name[edge], g.name[nxt]} - {0}
             for other in (*g.out_edges[node], *g.in_edges[node]):
                 if g.way_id[other] not in riding and not (g.name[other] and g.name[other] in names):
-                    stress = max(stress, g.stress[other])
+                    stress = max(stress, g.cross[other])
             if maneuver.startswith(LEFT_TURNS):
-                stress = max(stress, g.stress[edge])
+                stress = max(stress, g.cross[edge])
         if len(self._crossings) > 200_000:
             self._crossings.clear()
         self._crossings[key] = stress
@@ -173,7 +191,7 @@ class BikeRouter(Router):
 
 def route_features(router: BikeRouter, path: RoutedPath, profile: BikeProfile, events: Sequence[RoadEvent], after_dark: bool) -> dict:
     g = router.graph
-    slower = BIKE_SPEED_KMH / profile.speed_kmh
+    slower = MAP_SPEED_KMH[g.mode] / profile.speed_kmh
     minutes = [0.0, 0.0, 0.0, 0.0]
     unlit = 0.0
     for edge in path.edges:
@@ -252,7 +270,8 @@ def plan(
 ) -> dict:
     """Bike routes for one trip, best first: {"winner", "candidates"}, each candidate a dict the page draws."""
     start, end = origin.as_tuple(), destination.as_tuple()
-    shortest = router.bike_routes(start, end, SHORTEST, count=1, events=events, sun=sun)
+    # The shortest at the traveler's own speed, so turns weigh against minutes as they do for them.
+    shortest = router.bike_routes(start, end, replace(SHORTEST, speed_kmh=profile.speed_kmh), count=1, events=events, sun=sun)
     designs = router.bike_routes(start, end, profile, count=3, events=events, sun=sun)
     after_dark = dark(sun)
     paths: list[tuple[str, RoutedPath]] = []
@@ -293,11 +312,11 @@ def plan(
         candidate["eligible"] = candidate["is_standard"] or candidate["features"]["duration_min"] <= limit_min + 1e-9
     candidates.sort(key=lambda c: (not c["eligible"], -c["safety_score"], c["features"]["duration_min"]))
     winner = candidates[0]
-    _name_and_explain(candidates, winner, standard, profile)
+    _name_and_explain(candidates, winner, standard, profile, "streets without sidewalks" if router.graph.mode == "walk" else "busy streets")
     return {"profile": profile.name, "winner": winner, "candidates": candidates}
 
 
-def _name_and_explain(candidates: list[dict], winner: dict, standard: dict | None, profile: BikeProfile) -> None:
+def _name_and_explain(candidates: list[dict], winner: dict, standard: dict | None, profile: BikeProfile, busy_words: str) -> None:
     """Each route's name (its longest road no better route goes by) and the reason for its place."""
     from app.engine import short_road_name
 
@@ -316,11 +335,18 @@ def _name_and_explain(candidates: list[dict], winner: dict, standard: dict | Non
                 candidate["reason"] = "the shortest route is also the lowest-stress one"
             else:
                 theirs = standard["features"]["minutes_by_stress"][2] + standard["features"]["minutes_by_stress"][3]
-                candidate["reason"] = f"lowest stress {limit}: {busy:.0f} min on busy streets instead of {theirs:.0f}"
+                if round(theirs) > round(busy):
+                    candidate["reason"] = f"lowest stress {limit}: {busy:.0f} min on {busy_words} instead of {theirs:.0f}"
+                else:
+                    candidate["reason"] = f"safest {limit}"
         elif not candidate["eligible"]:
             candidate["reason"] = f"too long a detour: over {profile.max_detour_ratio:g}x the shortest time or {profile.max_extra_min:g} min more"
         elif candidate["safety_score"] < winner["safety_score"]:
-            candidate["reason"] = f"more stress: {busy:.0f} min on busy streets"
+            mine = winner["features"]["minutes_by_stress"][2] + winner["features"]["minutes_by_stress"][3]
+            if round(busy) > round(mine):
+                candidate["reason"] = f"more stress: {busy:.0f} min on {busy_words}"
+            else:
+                candidate["reason"] = f"less safe: safety score {candidate['safety_score']}"
         else:
             candidate["reason"] = "as low-stress, but slower"
 

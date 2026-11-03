@@ -360,7 +360,7 @@ def test_routes_come_with_turn_by_turn_directions(api):
 def test_the_openstreetmap_map_never_asks_google(tmp_path, google):
     app = create_app(make_settings(tmp_path, map="osm"), http=httpx.Client(transport=httpx.MockTransport(google)))
     with TestClient(app) as client:
-        assert client.get("/app-config").json() == {"map": "osm", "traffic_tiles": False, "bus_routes": False, "bike": False, "fuel_price": 3.25}  # no TomTom key
+        assert client.get("/app-config").json() == {"map": "osm", "traffic_tiles": False, "bus_routes": False, "bike": False, "walk": False, "fuel_price": 3.25}  # no TomTom key
         trip = client.post("/route", json={"origin": ORIGIN, "destination": DESTINATION, "live_traffic": True}).json()
     assert google.requests == []  # no Google: not even with live traffic asked for
     standard = [route for route in trip["plan"]["candidates"] if route["is_standard"]]
@@ -372,7 +372,7 @@ def test_the_openstreetmap_map_never_asks_google(tmp_path, google):
 def test_googles_default_is_the_standard_route_on_the_google_map(api):
     trip = api.post("/route", json={"origin": ORIGIN, "destination": DESTINATION}).json()
     assert [r["id"] for r in trip["plan"]["candidates"] if r["is_standard"]] == ["google-1"]
-    assert api.get("/app-config").json() == {"map": "google", "traffic_tiles": False, "bus_routes": False, "bike": False, "fuel_price": 3.25}
+    assert api.get("/app-config").json() == {"map": "google", "traffic_tiles": False, "bus_routes": False, "bike": False, "walk": False, "fuel_price": 3.25}
 
 
 class FakeTomTom:
@@ -401,7 +401,7 @@ def test_tomtom_traffic_on_the_openstreetmap_map(tmp_path, google):
     tomtom = FakeTomTom(main_st_closed_both_ways(), google)
     settings = make_settings(tmp_path, map="osm", tomtom_api_key="tt-key")
     with TestClient(create_app(settings, http=httpx.Client(transport=httpx.MockTransport(tomtom)))) as client:
-        assert client.get("/app-config").json() == {"map": "osm", "traffic_tiles": True, "bus_routes": False, "bike": False, "fuel_price": 3.25}
+        assert client.get("/app-config").json() == {"map": "osm", "traffic_tiles": True, "bus_routes": False, "bike": False, "walk": False, "fuel_price": 3.25}
         trip = client.post("/route", json={"origin": ORIGIN, "destination": DESTINATION}).json()
         first = client.get("/traffic-tiles/12/1047/1504.png")
         again = client.get("/traffic-tiles/12/1047/1504.png")
@@ -534,3 +534,16 @@ def test_bike_routes_through_the_api(tmp_path, google):
 def test_no_bike_map_no_bike_routes(api):
     assert api.get("/app-config").json()["bike"] is False
     assert api.post("/bike-route", json={"origin": ORIGIN, "destination": DESTINATION}).status_code == 503
+
+
+def test_walking_routes_through_the_api(tmp_path, google):
+    walk_map = tmp_path / "grid-walk.json.gz"
+    build_graph(grid_city().osm.elements, area="grid", mode="walk").save(walk_map)
+    app = create_app(make_settings(tmp_path, map="osm", walk_graph_path=walk_map), http=httpx.Client(transport=httpx.MockTransport(google)))
+    with TestClient(app) as client:
+        assert client.get("/app-config").json()["walk"] is True
+        trip = client.post("/walk-route", json={"origin": ORIGIN, "destination": DESTINATION, "profile": "careful"}).json()
+        assert client.post("/walk-route", json={"origin": ORIGIN, "destination": DESTINATION, "profile": "family"}).status_code == 422
+    winner = trip["plan"]["winner"]
+    assert winner["features"]["duration_min"] >= 9  # 600 m or so at a careful walker's pace
+    assert trip["attribution"][0].startswith("Walking routes")

@@ -123,3 +123,44 @@ def test_a_bike_trip_with_a_stop_goes_through_it():
     winner = result["winner"]
     assert min(haversine_m(p, stop) for p in decode_polyline(winner["encoded_polyline"])) < 30
     assert [m["instruction"] for m in winner["maneuvers"] if m["maneuver"] == "WAYPOINT"] == ["Arrive at stop 1"]
+
+
+def test_walking_stress_comes_from_sidewalks():
+    from app.roadgraph import walking_stress
+
+    assert walking_stress({"highway": "footway"}) == 1
+    assert walking_stress({"highway": "primary", "sidewalk": "both"}) == 1
+    assert walking_stress({"highway": "primary", "sidewalk": "no"}) == 4
+    assert walking_stress({"highway": "residential", "sidewalk": "no"}) == 2
+    assert walking_stress({"highway": "residential"}) == 1 and walking_stress({"highway": "primary"}) == 3
+
+
+def test_the_walking_map_goes_both_ways_and_crosses_by_traffic():
+    city = grid_city(main={"oneway": "yes", "sidewalk": "both"})
+    walk = build_graph(city.osm.elements, area="grid", mode="walk")
+    main = [e for e in range(walk.edge_count) if walk.names[walk.name[e]] == "Main St"]
+    assert len(main) == 6  # three blocks, both ways: one-way is for vehicles
+    assert {walk.stress[e] for e in main} == {1} and {walk.cross[e] for e in main} == {4}  # easy along, hard to cross
+    router = BikeRouter(walk)
+    up = next(e for e in walk.in_edges[node_at(walk, 1, 2)] if walk.edge_from[e] == node_at(walk, 0, 2))
+    on = next(e for e in walk.out_edges[node_at(walk, 1, 2)] if walk.edge_to[e] == node_at(walk, 2, 2))
+    assert router.crossing_stress(up, on, "STRAIGHT") == 4
+
+
+def test_step_free_walking_rules_out_steps():
+    import math
+
+    from app.bike import WALK_PROFILES
+
+    city = grid_city()
+    city.osm.way([junction(1, 1), junction(2, 2)], highway="steps")
+    walk = build_graph(city.osm.elements, area="grid", mode="walk")
+    router = BikeRouter(walk)
+    steps = [e for e in range(walk.edge_count) if walk.class_name(e) == "steps"]
+    assert steps
+
+    def cost(profile):
+        return router._trip_costs(WALK_PROFILES[profile], [], keep=[], school_hours=False, sun=None).edges
+
+    everyday, stepfree = cost("everyday"), cost("stepfree")
+    assert all(math.isfinite(everyday[e]) for e in steps) and all(stepfree[e] == math.inf for e in steps)

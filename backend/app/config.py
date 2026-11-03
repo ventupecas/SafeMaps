@@ -51,6 +51,9 @@ class Settings:
     # cyclist died (python -m app.crash_data <area> --cyclists). No bike map: no bike mode.
     bike_graph_path: Path | None = None
     bike_crash_data_path: Path | None = None
+    # Walking routes: the walking map (--walk) and fatal crashes where a pedestrian died (--pedestrians).
+    walk_graph_path: Path | None = None
+    walk_crash_data_path: Path | None = None
     # For the expo's control page (pausing demo mode, restarting the stats). Unset: only this
     # computer itself may use it, not visitors coming through the tunnel.
     admin_code: str | None = None
@@ -135,6 +138,8 @@ class Settings:
             admin_code=os.getenv("ROUTES_ADMIN_CODE") or None,
             bike_graph_path=_bike_graph_path(os.getenv("ROUTES_BIKE_GRAPH"), os.getenv("ROUTES_GRAPH")),
             bike_crash_data_path=_backend_path(os.getenv("ROUTES_BIKE_CRASH_DATA")) if os.getenv("ROUTES_BIKE_CRASH_DATA") else None,
+            walk_graph_path=_bike_graph_path(os.getenv("ROUTES_WALK_GRAPH"), os.getenv("ROUTES_GRAPH"), "-walk"),
+            walk_crash_data_path=_backend_path(os.getenv("ROUTES_WALK_CRASH_DATA")) if os.getenv("ROUTES_WALK_CRASH_DATA") else None,
             map=map_kind,
             school_hours=school_hours,
             fuel_price=fuel_price,
@@ -157,15 +162,16 @@ def _time_windows(text: str) -> tuple[tuple[time, time], ...]:
     return tuple(windows)
 
 
-def _bike_graph_path(value: str | None, car_graph: str | None) -> Path | None:
-    """ROUTES_BIKE_GRAPH: off for no bike mode; unset, the car map's file with -bike (built with --bike)."""
+def _bike_graph_path(value: str | None, car_graph: str | None, suffix: str = "-bike") -> Path | None:
+    """ROUTES_BIKE_GRAPH (or _WALK_): off for no bike (walking) mode; unset, the car map's file with
+    -bike (-walk), as built with --bike (--walk)."""
     value = (value or "").strip()
     if value.lower() in {"0", "false", "no", "off"}:
         return None
     if value:
         return _backend_path(value)
     car = car_graph or "data/graphs/milwaukee-metro.json.gz"
-    return _backend_path(car.replace(".json.gz", "-bike.json.gz"))
+    return _backend_path(car.replace(".json.gz", f"{suffix}.json.gz"))
 
 
 def _bus_routes_url(value: str | None) -> str | None:

@@ -5,6 +5,7 @@ Run from the backend/ directory:
     python -m app.build_graph milwaukee-metro
     python -m app.build_graph milwaukee-metro --tiles 4 --refresh
     python -m app.build_graph milwaukee-metro --bike      # the bike map, for bike routes
+    python -m app.build_graph milwaukee-metro --walk      # the walking map, for walking routes
 
 Raw Overpass tiles are kept under data/osm/<area>/, so a rebuild after a code
 change reuses them. The graph is written to data/graphs/<area>.json.gz, which
@@ -24,7 +25,7 @@ import time
 from collections.abc import Sequence
 
 from app.config import BACKEND_DIR
-from app.overpass import AREAS, DEFAULT_ENDPOINT, OverpassError, build_bike_query, download_area, iter_elements
+from app.overpass import AREAS, DEFAULT_ENDPOINT, OverpassError, build_bike_query, build_walk_query, download_area, iter_elements
 from app.roadgraph import build_graph
 
 
@@ -36,6 +37,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--download-only", action="store_true", help="fetch the tiles but don't build")
     parser.add_argument("--endpoint", default=DEFAULT_ENDPOINT, help="Overpass API URL")
     parser.add_argument("--bike", action="store_true", help="build the bike map (roads plus trails and paths)")
+    parser.add_argument("--walk", action="store_true", help="build the walking map (roads plus footways, sidewalks and steps)")
+    parser.add_argument("--roads-only", action="store_true", help="with --bike or --walk: skip the paths download (streets only)")
     args = parser.parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
 
@@ -45,7 +48,17 @@ def main(argv: Sequence[str] | None = None) -> int:
         paths = download_area(
             args.area, AREAS[args.area], raw_dir, tiles=args.tiles, endpoint=args.endpoint, refresh=args.refresh
         )
-        if args.bike:
+        if args.walk and not args.roads_only:
+            paths += download_area(
+                f"{args.area} footways and sidewalks",
+                AREAS[args.area],
+                BACKEND_DIR / "data" / "osm" / f"{args.area}-walk",
+                tiles=args.tiles,
+                endpoint=args.endpoint,
+                refresh=args.refresh,
+                query=build_walk_query,
+            )
+        if args.bike and not args.roads_only:
             paths += download_area(
                 f"{args.area} trails and paths",
                 AREAS[args.area],
@@ -61,9 +74,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     if args.download_only:
         return 0
 
-    mode = "bike" if args.bike else "car"
+    mode = "bike" if args.bike else "walk" if args.walk else "car"
     graph = build_graph(iter_elements(paths), area=args.area, bbox=AREAS[args.area], mode=mode)
-    out = BACKEND_DIR / "data" / "graphs" / f"{args.area}{'-bike' if args.bike else ''}.json.gz"
+    out = BACKEND_DIR / "data" / "graphs" / f"{args.area}{'' if mode == 'car' else '-' + mode}.json.gz"
     graph.save(out)
 
     print(f"\nWrote {out} ({out.stat().st_size / 1e6:.1f} MB) in {time.monotonic() - started:.0f} s")
