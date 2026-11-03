@@ -2,7 +2,7 @@
 
 ## Status
 
-Built: phases 1 to 3, and the cyclist crashes of phase 4. The decisions below were made as recommended:
+Built: phases 1 to 3, and of phase 4 the cyclist crashes (fatal ones from FARS, and a `--cyclists` option for Community Maps exports) and the evaluation. Its first run, on streets without trails, is in [BIKE_RESULTS.md](BIKE_RESULTS.md): over 20 trips, the safety score went from 55 to 92 on average, minutes on busy streets from 147 to 32, and busy crossings without a signal from 22 to 0, for 2.7 minutes more on average. The decisions below were made as recommended:
 
 1. **Default rider:** most adults ("interested but concerned"), with Family, Confident and E-bike to choose from.
 2. **Sidewalks:** not used, until Milwaukee's ordinance is checked.
@@ -16,8 +16,8 @@ One change from the plan: the bike map is a separate map, not bike columns on th
 Still to do:
 
 - **The trails download:** `python -m app.build_graph milwaukee-metro --bike` needs Overpass, which wasn't reachable when the bike map was first built; until it's rerun, the bike map has streets but no trails.
-- **The evaluation** (20 trips against the shortest route) and **the ride check**, then tuning the stress weights.
-- **Bike crashes from Wisconsin's Community Maps**, a "bike crashes only" filter on the importer.
+- **The ride check**, then tuning the stress weights if routes feel wrong: rerun `python -m app.bike_evaluate` after any change.
+- **Bike crashes from Wisconsin's Community Maps:** export by hand, then `python -m app.crash_data import <file> --cyclists`.
 - **Stops on bike trips, lighting (`lit`), hills.**
 
 ## The plan

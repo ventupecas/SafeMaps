@@ -112,6 +112,9 @@ _LAT_NAMES = ("lat", "latitude", "latdecdg", "lat_dd", "y_coord")
 _LNG_NAMES = ("lng", "lon", "long", "longitude", "londecdg", "lon_dd", "x_coord")
 _SEVERITY_HINTS = ("injsvr", "severity", "svr", "kabco", "injury")
 _DATE_HINTS = ("date", "crshdate", "year")
+# A column flagging crashes that involved a bike, by name, and the values that mean yes.
+_CYCLIST_HINTS = ("bicycl", "bike", "pedalcycl", "cyclist")
+_YES = {"y", "yes", "1", "true", "x"}
 SEVERITY_WEIGHTS = {"fatal": 3.0, "serious": 2.0, "injury": 1.0, "unknown": 1.0, "property": 0.0}
 PROPERTY_DAMAGE_WEIGHT = 0.25
 
@@ -141,9 +144,10 @@ def severity_of(value: str) -> str:
 
 
 def import_crashes(
-    path: Path, area: BBox, *, include_property_damage: bool = False
+    path: Path, area: BBox, *, include_property_damage: bool = False, cyclists_only: bool = False
 ) -> tuple[list[dict[str, str | float | int]], set[int]]:
-    """The crashes in area from an exported CSV, weighed by severity; and the years they span."""
+    """The crashes in area from an exported CSV, weighed by severity; and the years they span.
+    With cyclists_only, just the crashes its bike column flags (a column named for bicycles)."""
     with path.open(newline="", encoding="utf-8-sig", errors="replace") as handle:
         reader = csv.DictReader(handle)
         names = reader.fieldnames or []
@@ -153,6 +157,9 @@ def import_crashes(
             raise ValueError(f"{path.name} needs latitude and longitude columns; it has: {', '.join(names)}")
         severity_col = _column(names, (), _SEVERITY_HINTS)
         date_col = _column(names, (), _DATE_HINTS)
+        cyclist_col = _column(names, (), _CYCLIST_HINTS) if cyclists_only else None
+        if cyclists_only and cyclist_col is None:
+            raise ValueError(f"{path.name} has no column saying which crashes involved a bike; it has: {', '.join(names)}")
         rows: list[dict[str, str | float | int]] = []
         years: set[int] = set()
         for row in reader:
@@ -162,6 +169,10 @@ def import_crashes(
                 continue
             if not area.contains(lat, lng):
                 continue
+            if cyclist_col is not None:
+                flag = (row.get(cyclist_col) or "").strip().lower()
+                if flag not in _YES and not any(hint in flag for hint in _CYCLIST_HINTS):
+                    continue
             severity = severity_of(row.get(severity_col) or "") if severity_col else "unknown"
             weight = SEVERITY_WEIGHTS[severity]
             if severity == "property" and include_property_damage:
@@ -180,16 +191,19 @@ def import_main(argv: Sequence[str]) -> int:
     parser.add_argument("file", type=Path, help="the exported CSV")
     parser.add_argument("--area", choices=AREAS, default="milwaukee-metro", help="area to keep crashes for")
     parser.add_argument("--include-property-damage", action="store_true", help="count crashes without injuries too")
+    parser.add_argument("--cyclists", action="store_true", help="only crashes involving a bike, for bike routes")
     args = parser.parse_args(argv)
     try:
-        rows, years = import_crashes(args.file, AREAS[args.area], include_property_damage=args.include_property_damage)
+        rows, years = import_crashes(
+            args.file, AREAS[args.area], include_property_damage=args.include_property_damage, cyclists_only=args.cyclists
+        )
     except (OSError, ValueError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
     if not rows:
         print(f"error: no crashes with injuries inside {args.area} in {args.file.name}", file=sys.stderr)
         return 1
-    out = BACKEND_DIR / "data" / "crashes" / f"{args.area}-all.csv"
+    out = BACKEND_DIR / "data" / "crashes" / f"{args.area}-{'bike-' if args.cyclists else ''}all.csv"
     out.parent.mkdir(parents=True, exist_ok=True)
     with out.open("w", newline="", encoding="utf-8") as handle:
         writer = csv.DictWriter(handle, fieldnames=["lat", "lng", "crashes", "severity", "year"])
@@ -204,6 +218,10 @@ def import_main(argv: Sequence[str]) -> int:
     if span:
         print(f"  covering {min(years)}-{max(years)} ({span} year{'s' if span > 1 else ''})")
     print("Point the server at it in backend/.env:")
+    if args.cyclists:
+        # Bike routes count any spot with a bike crash (bike crashes are rarer than car ones).
+        print(f"  ROUTES_BIKE_CRASH_DATA=data/crashes/{args.area}-bike-all.csv")
+        return 0
     print(f"  ROUTES_CRASH_DATA=data/crashes/{args.area}-all.csv")
     print(f"  ROUTES_CRASH_MIN_COUNT={min_count}")
     print("Then check /health (hazards.crash_locations) and raise the count if too many junctions are flagged.")
