@@ -23,6 +23,7 @@ streets, long detours accepted), confident (busier streets are fine) or e-bike (
 from __future__ import annotations
 
 import math
+from array import array
 from collections.abc import Sequence
 from dataclasses import dataclass, replace
 
@@ -81,6 +82,7 @@ RISK_POINTS = {
 SAFETY_SCALE = 10.0
 LEFT_TURNS = ("TURN_LEFT", "TURN_SLIGHT_LEFT", "TURN_SHARP_LEFT", "UTURN_LEFT")
 RIGHT_TURNS = ("TURN_RIGHT", "TURN_SLIGHT_RIGHT", "TURN_SHARP_RIGHT", "UTURN_RIGHT")
+BASE_COSTS_KEPT = 4  # segment costs kept per router, by traveler and dark: 5 MB each on Milwaukee's walking map
 MIN_CRASHES = 1.0  # fatal cyclist crashes (FARS) are rare: one near a junction counts
 
 
@@ -98,6 +100,7 @@ class BikeRouter(Router):
             raise ValueError("BikeRouter needs the bike or walking map (python -m app.build_graph <area> --bike or --walk)")
         super().__init__(graph, context)
         self._crossings: dict[tuple[int, int, str], int] = {}
+        self._base_costs: dict[tuple[BikeProfile, bool], array] = {}
 
     def bike_routes(
         self,
@@ -116,17 +119,7 @@ class BikeRouter(Router):
         g = self.graph
         slower = MAP_SPEED_KMH[g.mode] / profile.speed_kmh  # the map's times are at its own speed
         weights = profile.stress_weights
-        steps = g.classes.index("steps") if profile.avoid_steps and "steps" in g.classes else None
-        night = dark(sun)
-        edges = [
-            g.time_s[edge] / 60 * slower * (weights[max(1, g.stress[edge]) - 1] + (profile.unlit_weight if night and not g.lit[edge] else 0.0))
-            + g.rail_crossings[edge] * profile.rail_minutes
-            for edge in range(g.edge_count)
-        ]
-        if steps is not None:
-            for edge in range(g.edge_count):
-                if g.road_class[edge] == steps:
-                    edges[edge] = math.inf
+        edges = array("d", self._base(profile, dark(sun)))  # a copy: this trip's closures change it
         keep = set(keep)
         for event in events:
             for edge in self.event_edges(event):
@@ -143,6 +136,33 @@ class BikeRouter(Router):
         return _Costs(
             profile=search, edges=edges, table=self._turn_table(search), zones={}, zone_costs={}, extra=_BikeTrip(profile, dark(sun))
         )
+
+    def _base(self, profile: BikeProfile, night: bool) -> array:
+        """Each segment's cost for this traveler, before road events: built once (a pass over every
+        segment of the map) and kept for the next trips."""
+        key = (profile, night)
+        base = self._base_costs.get(key)
+        if base is None:
+            g = self.graph
+            slower = MAP_SPEED_KMH[g.mode] / profile.speed_kmh
+            weights = profile.stress_weights
+            base = array(
+                "d",
+                (
+                    g.time_s[edge] / 60 * slower * (weights[max(1, g.stress[edge]) - 1] + (profile.unlit_weight if night and not g.lit[edge] else 0.0))
+                    + g.rail_crossings[edge] * profile.rail_minutes
+                    for edge in range(g.edge_count)
+                ),
+            )
+            if profile.avoid_steps and "steps" in g.classes:
+                steps = g.classes.index("steps")
+                for edge in range(g.edge_count):
+                    if g.road_class[edge] == steps:
+                        base[edge] = math.inf
+            if len(self._base_costs) >= BASE_COSTS_KEPT:
+                self._base_costs.pop(next(iter(self._base_costs)), None)
+            self._base_costs[key] = base
+        return base
 
     def _cut_through_cost(self, edge: int, nxt: int) -> float:
         return 0.0  # quiet service roads and alleys are welcome on a bike

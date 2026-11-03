@@ -151,7 +151,8 @@ export function drawClosures() {
 
 // The routes and closures drawn again for a new map look (see drawRoutes), keeping the route being followed.
 export function redrawLines() {
-  if (state.plan) {
+  if (state.plan && state.redrawPlan) state.redrawPlan();
+  else if (state.plan) {
     const active = state.activeRouteId;
     for (const entry of state.routeLines) entry.lines.forEach((line) => line.remove());
     state.routeLines = [];
@@ -255,9 +256,11 @@ export function selectRoute(id) {
 
 export function clearRoutes() {
   for (const entry of state.routeLines) entry.lines.forEach((line) => line.remove());
-  for (const marker of state.turnMarkers) marker.remove();
+  for (const marker of [...state.turnMarkers, ...state.modeMarks]) marker.remove();
   state.routeLines = [];
   state.turnMarkers = [];
+  state.modeMarks = [];
+  state.redrawPlan = null;
   state.closures = [];
   drawClosures();
   state.paths = {};
@@ -490,7 +493,7 @@ export function routeKind(route, plan) {
     const several = plan.candidates.filter((candidate) => candidate.source === "own").length > 1;
     return several ? `Our safer design ${route.id.split("-").pop()}` : "Our safer design";
   }
-  if (isStandard(route)) return state.mode === "bike" ? "Shortest route" : "Standard route";
+  if (isStandard(route)) return state.mode === "car" ? "Standard route" : "Shortest route";
   return "Alternative route";
 }
 

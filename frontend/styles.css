@@ -2014,10 +2014,12 @@ body:not(.map-osm) .osm-only {
   }
 }
 
-/* ---- Bike mode (bike.js): car-only and bike-only controls, the switch, stress bars */
+/* ---- Modes (bike.js, transit.js): controls for some modes only (data-modes), the switch, stress bars */
 
-body.mode-bike .car-only,
-body:not(.mode-bike) .bike-only {
+body[data-mode="car"] [data-modes]:not([data-modes~="car"]),
+body[data-mode="bike"] [data-modes]:not([data-modes~="bike"]),
+body[data-mode="walk"] [data-modes]:not([data-modes~="walk"]),
+body[data-mode="transit"] [data-modes]:not([data-modes~="transit"]) {
   display: none !important;
 }
 
@@ -2101,6 +2103,112 @@ body:not(.mode-bike) .bike-only {
 
 .key--stress {
   background: linear-gradient(90deg, #1a9850, #8bbd2a, #f08c00, #d7191c);
+}
+
+.key--walk {
+  background: linear-gradient(90deg, #1a9850, #8bbd2a, #f08c00, #d7191c);
+}
+
+.key--bus {
+  height: 6px;
+  background: linear-gradient(90deg, #00a650 50%, #863399 50%);
+}
+
+.key--bus-walk {
+  width: 20px;
+  height: 0;
+  border-top: 3px dotted #4a5a6a;
+  border-radius: 0;
+}
+
+/* ---- Transit trips (transit.js) */
+
+.bus-chip {
+  display: inline-block;
+  min-width: 2.2em;
+  padding: 1px 6px;
+  border-radius: 4px;
+  font-weight: 700;
+  font-size: 0.85em;
+  text-align: center;
+  color: #fff;
+}
+
+.bus-chip--light {
+  color: #111;
+}
+
+.bus-chips {
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px;
+}
+
+.bus-chips__then {
+  color: var(--muted);
+  font-size: 0.8em;
+}
+
+.legs {
+  list-style: none;
+  margin: 12px 0 0;
+  padding: 0;
+  display: grid;
+  gap: 2px;
+}
+
+.leg {
+  position: relative;
+  display: grid;
+  grid-template-columns: 3.6em 1fr;
+  gap: 10px;
+  padding: 6px 0;
+}
+
+.leg__time {
+  font-variant-numeric: tabular-nums;
+  font-size: 0.85rem;
+  color: var(--muted);
+  text-align: right;
+}
+
+.leg__body {
+  border-left: 4px dotted #8a96a3;
+  padding-left: 10px;
+}
+
+.leg--ride .leg__body {
+  border-left-style: solid;
+}
+
+.leg__title {
+  font-weight: 600;
+}
+
+.leg__detail {
+  font-size: 0.85rem;
+  color: var(--muted);
+}
+
+.leg__wait {
+  font-size: 0.85rem;
+  color: var(--muted);
+  font-style: italic;
+}
+
+.leg__wait--dark {
+  color: var(--risk);
+}
+
+.transit-stop {
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  background: #fff;
+  border: 3px solid var(--stop-color, #1a73e8);
+  box-sizing: border-box;
+  box-shadow: 0 1px 3px rgb(0 0 0 / 0.35);
 }
 
 .layers__hint {

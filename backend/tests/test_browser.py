@@ -21,9 +21,10 @@ import uvicorn
 
 from app.main import create_app
 from app.roadgraph import build_graph
-from tests.osm_factory import point
+from tests.osm_factory import grid_city, point
 from tests.test_bike import city_with_a_trail
 from tests.test_api import FakeGoogle, make_settings
+from tests.test_timetable import feed
 
 sync_api = pytest.importorskip("playwright.sync_api")
 
@@ -36,8 +37,15 @@ def site(tmp_path_factory):
     folder = tmp_path_factory.mktemp("site")
     bike_map = folder / "grid-bike.json.gz"
     build_graph(city_with_a_trail().osm.elements, area="grid", mode="bike").save(bike_map)
-    settings = make_settings(folder, map="osm", bike_graph_path=bike_map)
-    app = create_app(settings, http=httpx.Client(transport=httpx.MockTransport(FakeGoogle())))
+    walk_map = folder / "grid-walk.json.gz"
+    build_graph(grid_city().osm.elements, area="grid", mode="walk").save(walk_map)
+    google = FakeGoogle()
+
+    def answer(request: httpx.Request) -> httpx.Response:  # the bus schedule: the GreenLine east from 1 Ave
+        return httpx.Response(200, content=feed(point(1, 1))) if request.url.host == "transit.example" else google(request)
+
+    settings = make_settings(folder, map="osm", bike_graph_path=bike_map, walk_graph_path=walk_map, bus_routes_url="https://transit.example/gtfs.zip")
+    app = create_app(settings, http=httpx.Client(transport=httpx.MockTransport(answer)))
     with socket.socket() as probe:
         probe.bind(("127.0.0.1", 0))
         port = probe.getsockname()[1]
@@ -273,7 +281,7 @@ def test_bike_mode_plans_a_bike_route_colored_by_stress(page, site):
     asked = route_request_to(page, "/bike-route", lambda: open_map(page, site + TRIP + "&mode=bike"))
     assert asked["profile"] == "everyday"
     wait_for_routes(page)
-    assert page.evaluate("document.body.classList.contains('mode-bike')")
+    assert page.evaluate("document.body.dataset.mode") == "bike"
     assert page.locator("#drive").text_content() == "Start riding" and page.locator(".stress-bar").count() >= 1
     assert page.locator("#profile").is_hidden() and page.locator("#bike-profile").is_visible()
     page.click('input[name="mode"][value="car"] + span')  # back to the car: the bike routes go
@@ -284,3 +292,40 @@ def route_request_to(page, path, action):
     with page.expect_request(lambda request: request.url.endswith(path) and request.method == "POST") as asked:
         action()
     return asked.value.post_data_json
+
+
+def test_walking_mode_plans_a_walk_colored_by_sidewalks(page, site):
+    asked = route_request_to(page, "/walk-route", lambda: open_map(page, site + TRIP + "&mode=walk"))
+    assert asked["profile"] == "everyday"
+    wait_for_routes(page)
+    assert page.locator("#drive").text_content() == "Start walking" and page.locator(".stress-bar").count() >= 1
+    assert page.locator("#walk-profile").is_visible() and page.locator("#bike-profile").is_hidden() and page.locator("#profile").is_hidden()
+    with page.expect_request(lambda request: request.url.endswith("/walk-route")) as again:
+        page.select_option("#walk-profile", "stepfree")
+        page.click("#find")
+    assert again.value.post_data_json["profile"] == "stepfree"
+
+
+def test_transit_mode_shows_bus_trips_step_by_step(page, site):
+    deadline = time.monotonic() + 30
+    while not httpx.get(site + "health").json()["transit"]["ready"]:  # the schedule is read at startup
+        assert time.monotonic() < deadline, "the bus schedule didn't load"
+        time.sleep(0.1)
+
+    # Tuesday morning, whenever the test runs: the test schedule's buses run 6 AM to 11 PM.
+    def on_tuesday_morning(route):
+        route.continue_(post_data={**route.request.post_data_json, "leave_at": "2026-11-10T10:00:00"})
+
+    page.route("**/transit-route", on_tuesday_morning)
+    far_east = (point(1, 1)[0], point(1, 1)[1] + 0.0367)  # past the GreenLine's last stop, 3 km on
+    trip = f"?from={FROM[0]:.5f},{FROM[1]:.5f}&to={far_east[0]:.5f},{far_east[1]:.5f}&mode=transit"
+    route_request_to(page, "/transit-route", lambda: open_map(page, site + trip))
+    wait_for_routes(page)
+    assert page.locator(".winner .bus-chip").first.text_content() == "GRE"
+    assert page.locator("#drive").is_hidden() and page.locator("#add-stop").is_hidden()
+    steps = page.locator("#transit-steps .leg")
+    assert steps.count() == 3  # walk, ride, arrive: the last stop is at the destination
+    assert "Get on at Stop 0 & Main" in page.locator("#transit-steps").text_content()
+    assert page.locator(".transit-stop").count() == 2  # where to get on and off
+    page.click('input[name="mode"][value="walk"] + span')  # another mode: the bus trip goes
+    assert page.locator(".route").count() == 0 and page.locator(".transit-stop").count() == 0

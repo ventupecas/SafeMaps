@@ -157,17 +157,17 @@ def _option(table, walker, walks, origin: LatLng, destination: LatLng, journey: 
 
 
 def _walk_leg(walker: bike.BikeRouter | None, start: Point, end: Point, sun: Sun | None) -> dict:
-    """A walk planned on the walking map (the calmest within an everyday walker's detour), or, without
-    the map, a straight line at walking pace with its risks unknown."""
+    """A walk planned on the walking map (the calmest for an everyday walker: one search, not a
+    walking route's comparison with the shortest), or, without the map, a straight line at walking
+    pace with its risks unknown."""
     profile = bike.WALK_PROFILES["everyday"]
     if walker is not None and haversine_m(start, end) > 20:
         try:
-            result = bike.plan(walker, LatLng(lat=start[0], lng=start[1]), LatLng(lat=end[0], lng=end[1]), profile, sun=sun)
-        except (LookupError, ValueError):
-            result = None
-        if result is not None:
-            route = result["winner"]
-            features = route["features"]
+            paths = walker.bike_routes(start, end, profile, count=1, sun=sun)
+        except LookupError:
+            paths = []
+        if paths:
+            features = bike.route_features(walker, paths[0], profile, (), dark(sun))
             _, risks = bike.safety(features)
             return {
                 "kind": "walk",
@@ -176,8 +176,7 @@ def _walk_leg(walker: bike.BikeRouter | None, start: Point, end: Point, sun: Sun
                 "busy_crossings": features["busy_crossings"],
                 "crossings": features["crossings"],
                 "minutes_by_stress": features["minutes_by_stress"],
-                "encoded_polyline": route["encoded_polyline"],
-                "maneuvers": route["maneuvers"],
+                "encoded_polyline": encode_polyline(walker._points(paths[0].edges)),
                 "risks": risks,
             }
     meters = haversine_m(start, end)
@@ -189,7 +188,5 @@ def _walk_leg(walker: bike.BikeRouter | None, start: Point, end: Point, sun: Sun
         "crossings": [],
         "minutes_by_stress": [round(walk_seconds(meters) / 60, 1), 0, 0, 0],
         "encoded_polyline": encode_polyline([start, end]),
-        "maneuvers": [],
         "risks": {},
     }
-

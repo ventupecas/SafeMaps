@@ -20,6 +20,8 @@ Still to do:
 - **Bike crashes from Wisconsin's Community Maps:** export by hand, then `python -m app.crash_data import <file> --cyclists`.
 - **Hills:** they need elevation data, another download. (Stops on bike trips and lighting after dark are built.)
 
+The same router now plans walks on a walking map (`--walk`), and bus trips use those walks to and from the stops; see the README, "Walking and bus trips".
+
 ## The plan
 
 A plan for safe bicycle routes. It covers what "safe" should mean for someone on a bike, the data it needs, how it fits the code that plans car trips today, how to check it works, and what to decide first.

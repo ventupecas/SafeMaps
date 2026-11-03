@@ -61,6 +61,17 @@ It takes a while.
 
 The first downloads Milwaukee's trails and paths (on top of the road tiles above) and builds the bike map; the second picks the crashes where a cyclist died out of the crash files already downloaded and prints a line to add to `backend\.env`. Restart the server: the planner shows a **Car / Bike** switch, and `/health` shows `bike_map` with `trails` above 0. Without the trails download (if Overpass is unreachable), bike routes still work on streets, but miss the Oak Leaf, Hank Aaron and other trails.
 
+### Build the walking map (for Walk, and the walks on bus trips)
+
+```powershell
+.\.venv\Scripts\python.exe -m app.build_graph milwaukee-metro --walk
+.\.venv\Scripts\python.exe -m app.crash_data milwaukee-metro --pedestrians
+```
+
+The first downloads Milwaukee's sidewalks, paths and stairs and builds the walking map; the second picks the crashes where a pedestrian died and prints a line for `backend\.env`. Restart the server: the switch shows **Walk**, and `/health` shows `walk_map`. Without the sidewalks download (Overpass unreachable: `--roads-only`), walks still work on streets, but every busy street counts as having no sidewalk mapped.
+
+**Transit** needs nothing built: the server fetches MCTS's bus schedule by itself (once a week) and reads it in the background after starting. `/health` shows `transit` with `ready: true` once it's read, a minute or two after `Started`. Until then, bus trips say to try again in a minute. The schedule covers the dates in MCTS's feed (to December 2026 for the current one). If bus trips can't be found at all, `transit` in `/health` has an `error` saying why the schedule couldn't be read.
+
 ### Optional: all reported crashes, not only fatal ones
 
 The crash-prone junction rule uses fatal crashes (NHTSA). Wisconsin's Community Maps has every reported crash: export the Milwaukee-area crashes as CSV from <https://transportal.cee.wisc.edu/partners/community-maps/crash/> (by hand: its terms forbid automated downloading), then:
@@ -136,6 +147,7 @@ Look for:
 - `google_api_key_set: true` (on Google's map)
 - `wi511_key_set: true` (once you have the 511 key)
 - `tomtom_key_set: true` (on the OpenStreetMap map)
+- `transit` showing `ready: true` (a minute or two after starting), for bus trips
 - `matched_ahead: true`: the closures and jams across the metro are matched to the road map, so trips don't wait for it. It takes about a minute after the server starts; check again if it's still `false`.
 - `google_requests_today` well under your daily limit, and `tomtom_requests_today` under 80
 

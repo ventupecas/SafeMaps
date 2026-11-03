@@ -74,7 +74,7 @@ function startDemo() {
 
 async function demoStep() {
   if (!state.demo.running) return;
-  if (state.mode === "bike") setMode("car"); // the sample trips are car trips
+  if (state.mode !== "car") setMode("car"); // the sample trips are car trips
   const trip = DEMO.trips[state.demo.index % DEMO.trips.length];
   state.demo.index += 1;
   for (const stop of [...state.stops]) removeStop(stop.id);

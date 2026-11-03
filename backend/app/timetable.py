@@ -399,6 +399,9 @@ def _cell(point: Point) -> tuple[int, int]:
 
 
 def _title(text: str) -> str:
-    """MCTS writes names in capitals: "GREENFIELD & S101" reads "Greenfield & S101"."""
+    """MCTS writes names in capitals: "GREENFIELD & S101" reads "Greenfield & S101", "LOGAN-RUSSELL" "Logan-Russell"."""
     text = " ".join(text.split())
-    return " ".join(word if any(c.isdigit() for c in word) and len(word) <= 4 else word.capitalize() for word in text.split(" ")) if text.isupper() else text
+    if not text.isupper():
+        return text
+    word = lambda w: w if any(c.isdigit() for c in w) and len(w) <= 4 else "-".join(part.capitalize() for part in w.split("-"))  # noqa: E731
+    return " ".join(word(w) for w in text.split(" "))

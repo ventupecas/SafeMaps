@@ -97,7 +97,7 @@ export const PROFILE_LABELS = {
 export const state = {
   view: null, // the map (see maps.js)
   mapKind: "google", // or "osm": no Google at all; traffic from 511 and TomTom
-  mode: "car", // or "bike" (bike.js), when the server has the bike map
+  mode: "car", // or "bike" or "walk" (bike.js), or "transit" (transit.js): as the server has maps for
   origin: null, // { lat, lng, label, countryCode }
   destination: null,
   pins: { origin: null, destination: null },
@@ -115,6 +115,8 @@ export const state = {
   demo: { on: false, running: false, paused: false, index: 0, idleTimer: null, stepTimer: null }, // paused: from the control page
   routeLines: [], // { id, lines: [line handle] }
   turnMarkers: [],
+  modeMarks: [], // what a bike, walking or bus trip draws besides its routes (stress, crossings, stops)
+  redrawPlan: null, // draws the plan again for a new map look, when results.js's drawRoutes can't (bus trips)
   closures: [], // closures and lane closures from the last trip
   closureLines: [], // ...drawn, when "Show closures" is on
   closureMarkers: null, // their markers, a group that clusters where crowded

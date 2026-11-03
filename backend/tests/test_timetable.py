@@ -84,6 +84,7 @@ def test_the_schedule_reads_stops_routes_and_service_days(schedule):
     assert {schedule.service_names[s] for s in schedule.dates[datetime(2026, 11, 7).date()]} == {"sat"}
     assert not schedule.dates.get(datetime(2026, 11, 26).date())  # no buses on Thanksgiving
     assert _title("GREENFIELD & S101") == "Greenfield & S101" and _title("Holton") == "Holton"
+    assert _title("KINNICKINNIC & LOGAN-RUSSELL") == "Kinnickinnic & Logan-Russell"
 
 
 def test_one_bus_there(schedule):
