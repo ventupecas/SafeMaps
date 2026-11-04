@@ -51,19 +51,21 @@ from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from functools import lru_cache
 from typing import Any, Literal
 
 import httpx
+import numpy as np
 
+import app.geo_kernel as kernel
 from app.geo import (
+    columns,
     Point,
     angle_between_deg,
     decode_polyline,
     densify,
     destination_point,
     haversine_m,
-    initial_bearing_deg,
-    path_length_m,
 )
 from app.models import LatLng
 from app.overpass import BBox
@@ -997,41 +999,37 @@ def count_on_route(points: Sequence[Point], events: Iterable[RoadEvent]) -> tupl
     """(closures, lane closures, lane closures with workers present) a route drives through, the way their traffic goes."""
     if len(points) < 2:
         return 0, 0, 0
-    relevant = _near(points, [event for event in events if event.kind in ("closed", "lanes")])
-    if not relevant:
+    table = _event_table(events)
+    wanted = table.closed | table.lanes
+    if not wanted.any():
         return 0, 0, 0
-    route = _RouteIndex(points)
-    closures = lane_closures = with_workers = 0
-    for event in relevant:
-        if route.runs_along(event):
-            if event.kind == "closed":
-                closures += 1
-            else:
-                lane_closures += 1
-                with_workers += event.workers
-    return closures, lane_closures, with_workers
+    driven = _route_index(tuple(points)).runs_along_each(table, wanted)
+    return (
+        int((driven & table.closed).sum()),
+        int((driven & table.lanes).sum()),
+        int((driven & table.lanes & table.workers).sum()),
+    )
 
 
 def weather_on_route(points: Sequence[Point], events: Iterable[RoadEvent]) -> int:
     """Weather hazards (fog, ice, flooding) a route drives through, the way their traffic goes."""
     if len(points) < 2:
         return 0
-    relevant = _near(points, [event for event in events if event.kind == "hazard"])
-    if not relevant:
+    table = _event_table(events)
+    if not table.hazard.any():
         return 0
-    route = _RouteIndex(points)
-    return sum(route.runs_along(event) for event in relevant)
+    return int(_route_index(tuple(points)).runs_along_each(table, table.hazard).sum())
 
 
 def delay_on_route(points: Sequence[Point], events: Iterable[RoadEvent]) -> float:
     """Minutes of measured traffic delay a route picks up: each slow segment's delay, for the share of it driven."""
     if len(points) < 2:
         return 0.0
-    traffic = _near(points, [event for event in events if event.delay_min > 0 and len(event.path) > 1])
-    if not traffic:
+    table = _event_table(events)
+    if not table.delayed.any():
         return 0.0
-    route = _RouteIndex(points)
-    return sum(event.delay_min * route.share_along(event) for event in traffic)
+    shares = _route_index(tuple(points)).share_along_each(table, table.delayed)
+    return sum(table.delay_min[event] * shares[event] for event in np.flatnonzero(table.delayed).tolist())
 
 
 def without_repeats(events: Sequence[RoadEvent]) -> list[RoadEvent]:
@@ -1048,28 +1046,19 @@ def without_repeats(events: Sequence[RoadEvent]) -> list[RoadEvent]:
     ]
     if not official:
         return list(events)
-    indexes: dict[int, _RouteIndex] = {}
-
-    def index(event: RoadEvent) -> _RouteIndex:
-        if id(event) not in indexes:
-            indexes[id(event)] = _RouteIndex(event.path)
-        return indexes[id(event)]
 
     def repeated(event: RoadEvent) -> bool:
-        lines = [index(other) for other in _near(event.path, official) if other.kind in ("closed", event.kind)]
+        lines = [_route_index(other.path) for other in _near(event.path, official) if other.kind in ("closed", event.kind)]
         if not lines:
             return False
-        samples = densify(event.path, EVENT_MATCH_M / 2)
-        covered = 0
-        for i, point in enumerate(samples):
-            a, b = (point, samples[i + 1]) if i + 1 < len(samples) else (samples[i - 1], point)
-            line = initial_bearing_deg(a, b)
-            covered += any(
-                carries(bearing, line, event.direction, event.along)
-                for other in lines
-                for bearing in other.bearings_near(point, ON_ROUTE_M)
-            )
-        return covered >= REPEAT_SHARE * len(samples)
+        samples_lat, samples_lng = kernel.densified(*columns(event.path), EVENT_MATCH_M / 2)
+        bearings = kernel.bearings_of(samples_lat, samples_lng)
+        covered = np.zeros(samples_lat.size, dtype=np.bool_)
+        has_direction = event.direction is not None
+        direction = event.direction if has_direction else 0.0
+        for other in lines:
+            kernel.mark_carried(other.line, samples_lat, samples_lng, bearings, has_direction, direction, event.along, MATCHING, covered)
+        return int(covered.sum()) >= REPEAT_SHARE * samples_lat.size
 
     return [
         event
@@ -1108,68 +1097,101 @@ def _near(points: Sequence[Point], events: Iterable[RoadEvent]) -> list[RoadEven
     ]
 
 
+class _EventTable:
+    """Road events as flat columns, for the compiled matching, with which kind each one is."""
+
+    def __init__(self, events: Sequence[RoadEvent]) -> None:
+        ends = np.cumsum([0, *(len(event.path) for event in events)], dtype=np.int64)
+        points = np.array([point for event in events for point in event.path], dtype=np.float64).reshape(-1, 2)
+        lat, lng = points[:, 0].copy(), points[:, 1].copy()
+        starts = ends[:-1]
+        count = len(events)
+        empty = count == 0
+        self.columns = kernel.EventColumns(
+            ends,
+            lat,
+            lng,
+            np.minimum.reduceat(lat, starts) if not empty else np.empty(0),
+            np.minimum.reduceat(lng, starts) if not empty else np.empty(0),
+            np.maximum.reduceat(lat, starts) if not empty else np.empty(0),
+            np.maximum.reduceat(lng, starts) if not empty else np.empty(0),
+            np.fromiter((event.direction is not None for event in events), dtype=np.bool_, count=count),
+            np.fromiter((event.direction or 0.0 for event in events), dtype=np.float64, count=count),
+            np.fromiter((event.along for event in events), dtype=np.bool_, count=count),
+            np.fromiter((event.road in RAMP_KINDS for event in events), dtype=np.bool_, count=count),
+        )
+        self.count = count
+        self.closed = np.fromiter((event.kind == "closed" for event in events), dtype=np.bool_, count=count)
+        self.lanes = np.fromiter((event.kind == "lanes" for event in events), dtype=np.bool_, count=count)
+        self.hazard = np.fromiter((event.kind == "hazard" for event in events), dtype=np.bool_, count=count)
+        self.workers = np.fromiter((bool(event.workers) for event in events), dtype=np.bool_, count=count)
+        self.delay_min = [event.delay_min for event in events]
+        self.delayed = np.fromiter((event.delay_min > 0 and len(event.path) > 1 for event in events), dtype=np.bool_, count=count)
+
+
+_TABLES_KEPT = 16
+_event_tables: dict[int, tuple[tuple[RoadEvent, ...], _EventTable]] = {}
+
+
+def _event_table(events: Iterable[RoadEvent]) -> _EventTable:
+    """A trip's events, flattened once: every route of the trip is judged against the same tuple of them."""
+    if not isinstance(events, tuple):
+        return _EventTable(tuple(events))
+    kept = _event_tables.get(id(events))
+    if kept is not None and kept[0] is events:
+        return kept[1]
+    table = _EventTable(events)
+    if len(_event_tables) >= _TABLES_KEPT:
+        _event_tables.pop(next(iter(_event_tables)), None)
+    _event_tables[id(events)] = (events, table)
+    return table
+
+
 class _RouteIndex:
     """A route's points with their direction of travel, in a grid for "is the route near here?" lookups."""
 
     def __init__(self, points: Sequence[Point]) -> None:
-        dense = densify(points, EVENT_MATCH_M / 3)
-        self.cell_deg = EVENT_MATCH_M / 111_320.0
-        self.reach_lng = math.ceil(1 / max(math.cos(math.radians(dense[0][0])), 0.01))
-        self.cells: dict[tuple[int, int], list[tuple[Point, float]]] = defaultdict(list)
-        for i, point in enumerate(dense):
-            a, b = (point, dense[i + 1]) if i + 1 < len(dense) else (dense[i - 1], point)
-            self.cells[self._cell(point)].append((point, initial_bearing_deg(a, b)))
+        lat, lng = columns(points)
+        dense_lat, dense_lng = kernel.densified(lat, lng, EVENT_MATCH_M / 3)
+        grid = kernel.make_grid(dense_lat, dense_lng, EVENT_MATCH_M / 111_320.0)
+        self.line = kernel.RouteLine(
+            grid,
+            kernel.bearings_of(dense_lat, dense_lng)[grid.items],
+            kernel.reach_lng_at(float(dense_lat[0])),
+            float(lat.min()),
+            float(lng.min()),
+            float(lat.max()),
+            float(lng.max()),
+        )
 
-    def bearings_near(self, point: Point, within_m: float) -> list[float]:
-        """Directions of travel of the route's points within within_m (at most EVENT_MATCH_M) of point."""
-        ci, cj = self._cell(point)
-        return [
-            bearing
-            for i in range(ci - 1, ci + 2)
-            for j in range(cj - self.reach_lng, cj + self.reach_lng + 1)
-            for other, bearing in self.cells.get((i, j), ())
-            if haversine_m(point, other) <= within_m
-        ]
+    def runs_along_each(self, table: _EventTable, wanted: np.ndarray) -> np.ndarray:
+        """For each of the wanted events, whether the route drives through it, the way its traffic goes."""
+        driven = np.zeros(table.count, dtype=np.bool_)
+        kernel.runs_along_each(self.line, table.columns, wanted, MATCHING, driven)
+        return driven
 
-    def runs_along(self, event: RoadEvent) -> bool:
-        if len(event.path) == 1:
-            # A source's point may sit a little off the road: the looser match.
-            near = self.bearings_near(event.path[0], EVENT_MATCH_M)
-            return any(carries(bearing, None, event.direction, event.along) for bearing in near)
-        if event.road in RAMP_KINDS and not (
-            self.bearings_near(event.path[0], ON_ROUTE_M) and self.bearings_near(event.path[-1], ON_ROUTE_M)
-        ):
-            return False  # a ramp runs beside its freeway for a while: using it means passing both its ends
-        spacing = EVENT_MATCH_M / 2
-        samples = densify(event.path, spacing)
-        longest = run = misses = 0
-        for i, point in enumerate(samples):
-            a, b = (point, samples[i + 1]) if i + 1 < len(samples) else (samples[i - 1], point)
-            line = initial_bearing_deg(a, b)
-            near = self.bearings_near(point, ON_ROUTE_M)
-            if any(carries(bearing, line, event.direction, event.along) for bearing in near):
-                run += 1 + misses  # a single missed sample (a curve drawn differently) doesn't break the run
-                misses = 0
-            elif run and not misses:
-                misses = 1
-            else:
-                run = misses = 0
-            longest = max(longest, run)
-        return longest * spacing >= min(EVENT_ON_ROUTE_M, path_length_m(event.path) / 2)
+    def share_along_each(self, table: _EventTable, wanted: np.ndarray) -> np.ndarray:
+        """For each of the wanted events, the share of its stretch the route drives, the way its traffic goes."""
+        shares = np.zeros(table.count)
+        kernel.share_along_each(self.line, table.columns, wanted, MATCHING, shares)
+        return shares
 
-    def share_along(self, event: RoadEvent) -> float:
-        """The share of an event's stretch the route drives, the way its traffic goes."""
-        samples = densify(event.path, EVENT_MATCH_M / 2)
-        matched = 0
-        for i, point in enumerate(samples):
-            a, b = (point, samples[i + 1]) if i + 1 < len(samples) else (samples[i - 1], point)
-            line = initial_bearing_deg(a, b)
-            if any(carries(bearing, line, event.direction, event.along) for bearing in self.bearings_near(point, ON_ROUTE_M)):
-                matched += 1
-        return matched / len(samples)
 
-    def _cell(self, point: Point) -> tuple[int, int]:
-        return math.floor(point[0] / self.cell_deg), math.floor(point[1] / self.cell_deg)
+@lru_cache(maxsize=64)
+def _route_index(points: tuple[Point, ...]) -> _RouteIndex:
+    """Kept for a while: a route is judged for closures, for hazards and for delays, and event lines come back trip after trip."""
+    return _RouteIndex(points)
+
+
+MATCHING = kernel.Matching(
+    EVENT_MATCH_M,
+    ON_ROUTE_M,
+    EVENT_ON_ROUTE_M,
+    EVENT_MATCH_DEG,
+    PARALLEL_DEG,
+    EVENT_MATCH_M / 111_320.0 * 2,
+    EVENT_MATCH_M / 111_320.0 * 2 * 1.5,
+)
 
 
 def carries(travel: float, line: float | None, direction: float | None, along: bool) -> bool:

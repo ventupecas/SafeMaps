@@ -778,9 +778,5 @@ class Router:
         return sum(self.graph.length_m[e] for e in edges if e in shared) / total if total else 1.0
 
     def _points(self, edges: Iterable[int]) -> list[Point]:
-        points: list[Point] = []
-        for edge in edges:
-            segment = self.graph.edge_points(edge)
-            points.extend(segment if not points else segment[1:])
-        return points
+        return self.graph.path_points(list(edges))
 

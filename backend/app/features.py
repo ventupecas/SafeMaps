@@ -32,11 +32,11 @@ from typing import Any, Protocol
 
 from app.driving_side import DrivingSide
 from app.fuel import CONGESTION_L_PER_HOUR, SIGNAL_L, TURN_L, cruise_liters
+import app.geo_kernel as geo_kernel
 from app.geo import (
     Point,
+    columns,
     decode_polyline,
-    haversine_m,
-    initial_bearing_deg,
     path_length_m,
     point_along,
     total_heading_change_deg,
@@ -44,7 +44,7 @@ from app.geo import (
 from app.hotspots import CrashHotspots
 from app.models import CrossingTurn, LatLng, Maneuver, RouteFeatures
 from app.road_events import RoadEvent, count_on_route, weather_on_route
-from app.sun import Sun, dark, glare, low_sun
+from app.sun import GLARE_ANGLE_DEG, Sun, dark, low_sun
 
 # Calibration knobs. Tune them against routes you have recorded in the cache.
 HIGHWAY_SPEED_KMH = 80.0
@@ -260,13 +260,9 @@ def extract_features(route: Mapping[str, Any], context: TurnContext = TurnContex
 
 def _share_into_sun(points: Sequence[Point], sun: Sun | None) -> float:
     """The share of a stretch's length driven toward a low sun."""
-    total = into = 0.0
-    for a, b in zip(points, points[1:]):
-        length = haversine_m(a, b)
-        total += length
-        if length > 1 and glare(initial_bearing_deg(a, b), sun):
-            into += length
-    return into / total if total else 0.0
+    if sun is None or len(points) < 2:
+        return 0.0
+    return float(geo_kernel.share_into_sun(*columns(points), sun[0], GLARE_ANGLE_DEG))
 
 
 # Turn-by-turn wording per maneuver; "onto <road>" follows when the road has a name.

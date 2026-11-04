@@ -1,7 +1,8 @@
 """Pure geometry helpers: polyline codec, great-circle math and path curvature.
 
-Dependency-free and side-effect-free, so feature extraction and candidate
-generation can share them and tests can check them in isolation.
+Side-effect-free, so feature extraction and candidate generation can share
+them and tests can check them in isolation. Whole paths go through the compiled
+app.geo_kernel; a single sum is as quick here.
 """
 
 from __future__ import annotations
@@ -11,6 +12,8 @@ from collections.abc import Iterable, Sequence
 from itertools import pairwise
 
 import numpy as np
+
+import app.geo_kernel as kernel
 
 EARTH_RADIUS_M = 6_371_008.8
 
@@ -22,45 +25,23 @@ def decode_polyline(encoded: str, precision: int = 5) -> list[Point]:
 
     See https://developers.google.com/maps/documentation/utilities/polylinealgorithm
     """
-    factor = 10**precision
-    points: list[Point] = []
-    index = lat = lng = 0
-    while index < len(encoded):
-        deltas = []
-        for _ in range(2):
-            shift = result = 0
-            while True:
-                if index >= len(encoded):
-                    raise ValueError("Truncated polyline string")
-                chunk = ord(encoded[index]) - 63
-                index += 1
-                result |= (chunk & 0x1F) << shift
-                shift += 5
-                if chunk < 0x20:
-                    break
-            # The lowest bit carries the sign; the value is stored inverted when negative.
-            deltas.append(~(result >> 1) if result & 1 else result >> 1)
-        lat += deltas[0]
-        lng += deltas[1]
-        points.append((lat / factor, lng / factor))
-    return points
+    if not encoded:
+        return []
+    data = np.frombuffer(encoded.encode("latin-1"), dtype=np.uint8)
+    lat, lng = kernel.decoded(data, 0, data.size, float(10**precision))
+    return list(zip(lat.tolist(), lng.tolist()))
 
 
 def encode_polyline(points: Iterable[Point], precision: int = 5) -> str:
     """Encode (lat, lng) pairs as a Google encoded polyline."""
-    factor = 10**precision
-    chunks: list[str] = []
-    prev_lat = prev_lng = 0
-    for lat, lng in points:
-        ilat, ilng = round(lat * factor), round(lng * factor)
-        for delta in (ilat - prev_lat, ilng - prev_lng):
-            value = ~(delta << 1) if delta < 0 else delta << 1
-            while value >= 0x20:
-                chunks.append(chr((0x20 | (value & 0x1F)) + 63))
-                value >>= 5
-            chunks.append(chr(value + 63))
-        prev_lat, prev_lng = ilat, ilng
-    return "".join(chunks)
+    lat, lng = columns(points if isinstance(points, (list, tuple)) else list(points))
+    return kernel.encoded(lat, lng, float(10**precision)).tobytes().decode("ascii")
+
+
+def columns(points: Sequence[Point]) -> tuple[np.ndarray, np.ndarray]:
+    """A path's latitudes and longitudes, for the compiled functions."""
+    table = np.array(points, dtype=np.float64).reshape(-1, 2)
+    return table[:, 0].copy(), table[:, 1].copy()
 
 
 def haversine_m(a: Point, b: Point) -> float:
@@ -143,7 +124,7 @@ def midpoint(a: Point, b: Point) -> Point:
 
 def path_length_m(points: Sequence[Point]) -> float:
     """Total length of a polyline, in meters."""
-    return sum(haversine_m(p, q) for p, q in pairwise(points))
+    return float(kernel.path_length(*columns(points)))
 
 
 def point_along(points: Sequence[Point], distance_m: float) -> tuple[Point, float]:
@@ -164,14 +145,8 @@ def densify(points: Sequence[Point], spacing_m: float) -> list[Point]:
     """The path's points, plus extra ones so no gap is longer than spacing_m."""
     if not points:
         return []
-    dense = [points[0]]
-    for a, b in pairwise(points):
-        segment = haversine_m(a, b)
-        steps = max(1, math.ceil(segment / spacing_m))
-        bearing = initial_bearing_deg(a, b)
-        dense.extend(destination_point(a, bearing, segment * k / steps) for k in range(1, steps))
-        dense.append(b)
-    return dense
+    lat, lng = kernel.densified(*columns(points), spacing_m)
+    return list(zip(lat.tolist(), lng.tolist()))
 
 
 def total_heading_change_deg(points: Sequence[Point], min_segment_m: float = 30.0) -> float:
@@ -183,17 +158,7 @@ def total_heading_change_deg(points: Sequence[Point], min_segment_m: float = 30.
     """
     if not points:
         return 0.0
-    kept = [points[0]]
-    for point in points[1:]:
-        if haversine_m(kept[-1], point) >= min_segment_m:
-            kept.append(point)
-
-    headings = [initial_bearing_deg(p, q) for p, q in pairwise(kept)]
-    total = 0.0
-    for h1, h2 in pairwise(headings):
-        diff = abs(h2 - h1) % 360
-        total += min(diff, 360 - diff)
-    return total
+    return float(kernel.heading_change(*columns(points), min_segment_m))
 
 
 def simplify(points: Sequence[Point], tolerance_m: float) -> list[Point]:

@@ -28,21 +28,22 @@ from typing import Any
 
 import numpy as np
 
+import app.geo_kernel as geo_kernel
 import app.search_kernel as kernel
 from app.features import is_winding
 from app.geo import (
+    EARTH_RADIUS_M,
     Point,
     angle_between_deg,
-    decode_polyline,
+    columns,
     densify,
-    distance_to_path_m,
     encode_polyline,
     haversine_m,
     initial_bearing_deg,
     path_length_m,
 )
 from app.overpass import ATTRIBUTION, DRIVABLE_HIGHWAYS, BBox
-from app.road_events import EVENT_MATCH_DEG, EVENT_MATCH_M, RAMP_KINDS, RoadEvent, carries, road_words
+from app.road_events import EVENT_MATCH_DEG, MATCHING, RAMP_KINDS, RoadEvent, road_words
 
 logger = logging.getLogger(__name__)
 
@@ -129,6 +130,9 @@ _EXCLUDED_SERVICE = frozenset({"parking_aisle", "parking", "driveway", "drive-th
 _MAXSPEED = re.compile(r"^\s*(\d+(?:\.\d+)?)\s*(mph|km/h|kmh|kph)?\s*$")
 _SNAP_CELL_DEG = 0.005
 _M_PER_DEG_LAT = 111_320.0
+_M_PER_DEG_GEO = math.radians(1) * EARTH_RADIUS_M  # what app.geo.distance_to_path_m measures with
+_VEHICLE_SEARCH_ARRAY = np.array(_VEHICLE_SEARCH_M)
+_POLYLINE_FACTOR = 1e5
 
 
 # The kinds a junction can be, in the order RoadGraph.node_kinds numbers them (app.search_kernel's KIND_ names).
@@ -155,6 +159,26 @@ _COLUMN_TYPES = {
     "lit": "b",
     "cross": "b",
 }
+
+
+class PackedStrings:
+    """A list of short strings as one block of bytes: a segment's polyline takes a quarter of the memory this way."""
+
+    __slots__ = ("blob", "ptr")
+
+    def __init__(self, strings: Iterable[str]) -> None:
+        strings = list(strings)
+        self.blob = np.frombuffer("".join(strings).encode("latin-1"), dtype=np.uint8) if strings else np.empty(0, dtype=np.uint8)
+        self.ptr = np.concatenate(([0], np.cumsum(np.fromiter(map(len, strings), dtype=np.int64, count=len(strings))))).astype(np.int64)
+
+    def __getitem__(self, index: int) -> str:
+        return self.blob[self.ptr[index] : self.ptr[index + 1]].tobytes().decode("latin-1")
+
+    def __len__(self) -> int:
+        return self.ptr.size - 1
+
+    def __iter__(self) -> Iterator[str]:
+        return (self[index] for index in range(len(self)))
 
 
 class Adjacency:
@@ -200,7 +224,7 @@ class RoadGraph:
     winding: list[bool]
     bearing_start: list[float]  # heading when leaving the start junction
     bearing_end: list[float]  # heading when arriving at the end junction
-    geometry: list[str]  # encoded polyline, in the direction of travel
+    geometry: PackedStrings  # encoded polyline, in the direction of travel
     classes: list[str]
     names: list[str]
     banned: dict[int, frozenset[int]]  # edge -> edges it may not turn onto
@@ -222,13 +246,12 @@ class RoadGraph:
     time_s: array = field(init=False, repr=False)
     out_edges: Adjacency = field(init=False, repr=False)
     in_edges: Adjacency = field(init=False, repr=False)
-    _cell_indexes: dict[tuple[bool, float], dict[tuple[int, int], list[int]]] = field(
-        init=False, default_factory=dict, repr=False
-    )
+    _node_grids: dict[tuple[bool, float], geo_kernel.Grid] = field(init=False, default_factory=dict, repr=False)
     _kinds: np.ndarray | None = field(init=False, default=None, repr=False)
-    _signal_cells: dict[tuple[int, int], list[int]] | None = field(init=False, default=None, repr=False)
-    _edge_cells: dict[tuple[int, int], list[int]] | None = field(init=False, default=None, repr=False)
-    _point_cells: dict[str, dict[tuple[int, int], list[Point]]] = field(init=False, default_factory=dict, repr=False)
+    _signal_grid: geo_kernel.Grid | None = field(init=False, default=None, repr=False)
+    _edge_cells: tuple[np.ndarray, np.ndarray] | None = field(init=False, default=None, repr=False)
+    _link_column: np.ndarray | None = field(init=False, default=None, repr=False)
+    _point_grids: dict[str, geo_kernel.Grid] = field(init=False, default_factory=dict, repr=False)
     # Meters on each named road of the routes our router built, by their encoded polyline: naming a
     # route (engine.name_routes) reads them here instead of looking its road up every 100 m.
     known_road_lengths: dict[str, dict[str, float]] = field(init=False, default_factory=dict, repr=False)
@@ -242,6 +265,7 @@ class RoadGraph:
         # The columns, compactly: a list of a million floats takes four times the memory.
         for name, code in _COLUMN_TYPES.items():
             setattr(self, name, array(code, getattr(self, name)))
+        self.geometry = PackedStrings(self.geometry)
         self.time_s = array(
             "d",
             (
@@ -269,7 +293,13 @@ class RoadGraph:
         return (self.lat[node], self.lng[node])
 
     def edge_points(self, edge: int) -> list[Point]:
-        return decode_polyline(self.geometry[edge])
+        lat, lng = geo_kernel.decoded(self.geometry.blob, self.geometry.ptr[edge], self.geometry.ptr[edge + 1], _POLYLINE_FACTOR)
+        return list(zip(lat.tolist(), lng.tolist()))
+
+    def path_points(self, edges: Sequence[int]) -> list[Point]:
+        """The points of segments that follow one another."""
+        lat, lng = geo_kernel.path_points(np.array(edges, dtype=np.int32), self.geometry.ptr, self.geometry.blob, _POLYLINE_FACTOR)
+        return list(zip(lat.tolist(), lng.tolist()))
 
     def class_name(self, edge: int) -> str:
         return self.classes[self.road_class[edge]]
@@ -339,25 +369,19 @@ class RoadGraph:
 
     def edges_in_box(self, south: float, west: float, north: float, east: float) -> list[int]:
         """Segments with a part inside the box (as the segment index files them: about 100 m apart)."""
-        cells = self._edge_index()
+        keys, edges = self._edge_index()
         (i0, j0), (i1, j1) = _cell((south, west), _EDGE_CELL_DEG), _cell((north, east), _EDGE_CELL_DEG)
         found: set[int] = set()
         for i in range(i0, i1 + 1):
             for j in range(j0, j1 + 1):
-                found.update(cells.get((i, j), ()))
+                key = (i << 32) ^ (j & 0xFFFFFFFF)
+                found.update(edges[np.searchsorted(keys, key, side="left") : np.searchsorted(keys, key, side="right")].tolist())
         return sorted(found)
 
     def signal_at(self, point: Point) -> bool:
         """Whether a traffic signal controls the junction at point (one within JUNCTION_MATCH_M)."""
-        ci, cj = _cell(point, _SIGNAL_CELL_DEG)
-        reach_lng = math.ceil(1 / max(math.cos(math.radians(point[0])), 0.01))
-        cells = self._signal_index()
-        return any(
-            haversine_m(point, self.point(node)) <= JUNCTION_MATCH_M
-            for i in range(ci - 1, ci + 2)
-            for j in range(cj - reach_lng, cj + reach_lng + 1)
-            for node in cells.get((i, j), ())
-        )
+        reach_lng = geo_kernel.reach_lng_at(point[0])
+        return bool(geo_kernel.any_within(self._signal_index(), point[0], point[1], JUNCTION_MATCH_M, reach_lng))
 
     def signals_along(self, stretches: Iterable[Sequence[Point]]) -> int:
         """Distinct traffic signals within SIGNAL_MATCH_M of the given stretches of road.
@@ -366,21 +390,10 @@ class RoadGraph:
         where OSM usually tags it. Pass only surface-street stretches: a freeway
         bridging a signalized street would otherwise pick its signal up.
         """
-        cells = self._signal_index()
-        reach_lng = 1
-        found: set[int] = set()
-        for stretch in stretches:
-            if not stretch:
-                continue
-            reach_lng = math.ceil(1 / max(math.cos(math.radians(stretch[0][0])), 0.01))
-            for point in densify(stretch, SIGNAL_MATCH_M / 2):
-                ci, cj = _cell(point, _SIGNAL_CELL_DEG)
-                for i in range(ci - 1, ci + 2):
-                    for j in range(cj - reach_lng, cj + reach_lng + 1):
-                        for node in cells.get((i, j), ()):
-                            if node not in found and haversine_m(point, self.point(node)) <= SIGNAL_MATCH_M:
-                                found.add(node)
-        return len(found)
+        grid = self._signal_index()
+        found = np.zeros(grid.items.size, dtype=np.bool_)
+        geo_kernel.mark_near_stretches(grid, *_flat_stretches(stretches), SIGNAL_MATCH_M / 2, SIGNAL_MATCH_M, found)
+        return int(found.sum())
 
     def road_name_at(self, point: Point, heading: float) -> str:
         """The name of the road at point running along heading ("" if unnamed or none is near), for directions."""
@@ -409,34 +422,19 @@ class RoadGraph:
     ) -> list[Point]:
         if not points:
             return []
-        cell_deg = within_m / _M_PER_DEG_LAT
-        cells = self._point_cells.get(kind)
-        if cells is None:
-            grouped: dict[tuple[int, int], list[Point]] = defaultdict(list)
-            for point in points:
-                grouped[_cell(point, cell_deg)].append(point)
-            cells = self._point_cells[kind] = dict(grouped)
-        found: set[Point] = set()
-        for stretch in stretches:
-            if not stretch:
-                continue
-            reach_lng = math.ceil(1 / max(math.cos(math.radians(stretch[0][0])), 0.01))
-            for sample in densify(stretch, within_m / 2):
-                ci, cj = _cell(sample, cell_deg)
-                for i in range(ci - 1, ci + 2):
-                    for j in range(cj - reach_lng, cj + reach_lng + 1):
-                        for point in cells.get((i, j), ()):
-                            if point not in found and haversine_m(sample, point) <= within_m:
-                                found.add(point)
-        return sorted(found)
+        grid = self._point_grids.get(kind)
+        if grid is None:
+            lat, lng = columns(points)
+            grid = self._point_grids[kind] = geo_kernel.make_grid(lat, lng, within_m / _M_PER_DEG_LAT)
+        found = np.zeros(len(points), dtype=np.bool_)
+        geo_kernel.mark_near_stretches(grid, *_flat_stretches(stretches), within_m / 2, within_m, found)
+        return sorted({points[index] for index in np.flatnonzero(found).tolist()})
 
-    def _signal_index(self) -> dict[tuple[int, int], list[int]]:
-        if self._signal_cells is None:
-            cells: dict[tuple[int, int], list[int]] = defaultdict(list)
-            for node in {self.edge_to[edge] for edge in range(self.edge_count) if self.signals[edge]}:
-                cells[_cell(self.point(node), _SIGNAL_CELL_DEG)].append(node)
-            self._signal_cells = dict(cells)
-        return self._signal_cells
+    def _signal_index(self) -> geo_kernel.Grid:
+        if self._signal_grid is None:
+            nodes = np.unique(self.column("edge_to")[self.column("signals") != 0]).astype(np.int32)
+            self._signal_grid = geo_kernel.make_grid(self.column("lat")[nodes], self.column("lng")[nodes], _SIGNAL_CELL_DEG)
+        return self._signal_grid
 
     def segment_under(self, point: Point, heading: float) -> int | None:
         """The segment a car at point, driving along heading, is on; None if no segment fits.
@@ -453,29 +451,33 @@ class RoadGraph:
         leaving, a ramp merging), so there's often more than one. road limits
         them to ramps ("ramp") or to everything else ("mainline").
         """
-        offsets: dict[int, float] = {}
-        checked: set[int] = set()
-        for radius in _VEHICLE_SEARCH_M:
-            for node in self._nodes_near(point, radius, snappable_only=False):
-                # The car drives toward the end of its segment, so skip junctions behind it.
-                if node in checked or (
-                    haversine_m(point, self.point(node)) > VEHICLE_MATCH_M
-                    and angle_between_deg(initial_bearing_deg(point, self.point(node)), heading) > 90
-                ):
-                    continue
-                checked.add(node)
-                for edge in self.in_edges[node]:
-                    if not self._is_road(edge, road):
-                        continue
-                    offset, bearing = distance_to_path_m(point, self.edge_points(edge))
-                    if offset <= VEHICLE_MATCH_M and angle_between_deg(bearing, heading) <= VEHICLE_MATCH_DEG:
-                        offsets[edge] = offset
-            if offsets and min(offsets.values()) <= _VEHICLE_SURE_M:
-                break  # a wider search could only find roads farther from the car
-        if not offsets:
-            return []
-        nearest = min(offsets.values())
-        return sorted((edge for edge, offset in offsets.items() if offset <= nearest + SAME_ROAD_M), key=offsets.get)
+        return geo_kernel.segments_under(
+            point[0],
+            point[1],
+            heading,
+            road == "any",
+            road in RAMP_KINDS,
+            self._links(),
+            _VEHICLE_SEARCH_ARRAY,
+            VEHICLE_MATCH_M,
+            VEHICLE_MATCH_DEG,
+            _VEHICLE_SURE_M,
+            SAME_ROAD_M,
+            self._node_grid(False, _FINE_CELL_DEG),
+            self._node_grid(False, _SNAP_CELL_DEG),
+            _FINE_LOOKUP_M,
+            self.in_edges.column_ptr(),
+            self.in_edges.column_edges(),
+            self.column("lat"),
+            self.column("lng"),
+            self.geometry.ptr,
+            self.geometry.blob,
+            _POLYLINE_FACTOR,
+            _M_PER_DEG_LAT,
+            _M_PER_DEG_GEO,
+            np.zeros(self.node_count, dtype=np.bool_),
+            np.zeros(self.edge_count),
+        ).tolist()
 
     def _is_road(self, edge: int, road: str) -> bool:
         """Whether edge is the kind of road an event says it's on (see RoadEvent.road)."""
@@ -593,12 +595,22 @@ class RoadGraph:
 
     def edges_along(self, points: Sequence[Point], within_m: float = ALONG_MATCH_M) -> set[int]:
         """Segments a route given as points follows: both of their junctions lie on it."""
-        on_route: set[int] = set()
-        for point in densify(points, within_m):
-            for node in self._nodes_near(point, within_m, snappable_only=False):
-                if node not in on_route and haversine_m(point, self.point(node)) <= within_m:
-                    on_route.add(node)
-        return {edge for node in on_route for edge in self.out_edges[node] if self.edge_to[edge] in on_route}
+        if not points:
+            return set()
+        lat, lng = geo_kernel.densified(*columns(points), within_m)
+        grid = self._node_grid(False, _FINE_CELL_DEG if within_m <= _FINE_LOOKUP_M else _SNAP_CELL_DEG)
+        found = geo_kernel.edges_along(
+            grid,
+            lat,
+            lng,
+            within_m,
+            _M_PER_DEG_LAT,
+            self.out_edges.column_ptr(),
+            self.out_edges.column_edges(),
+            self.column("edge_to"),
+            np.zeros(self.node_count, dtype=np.bool_),
+        )
+        return set(found.tolist())
 
     def event_edges(self, event: RoadEvent) -> set[int]:
         """The segments a road event (a closure, a jam) lies on, in the directions of traffic it affects."""
@@ -729,71 +741,81 @@ class RoadGraph:
 
     def _roads_at(self, point: Point, direction: float | None, road: str = "any") -> set[int]:
         """Segments of the road nearest point (both ways of it unless direction says), within EVENT_MATCH_M."""
-        cells = self._edge_index()
-        ci, cj = _cell(point, _EDGE_CELL_DEG)
-        offsets: dict[int, float] = {}
-        for edge in {e for i in (ci - 1, ci, ci + 1) for j in (cj - 1, cj, cj + 1) for e in cells.get((i, j), ())}:
-            if not self._is_road(edge, road):
-                continue
-            chord = (self.point(self.edge_from[edge]), self.point(self.edge_to[edge]))
-            if _flat_distance_m(point, *chord) > EVENT_MATCH_M + min(self.length_m[edge] / 2, _EDGE_SAMPLE_M):
-                continue  # far even allowing for a curve: skip decoding its shape
-            offset, bearing = distance_to_path_m(point, self.edge_points(edge))
-            if offset <= EVENT_MATCH_M and carries(bearing, None, direction, False):
-                offsets[edge] = offset
-        nearest = min(offsets.values(), default=0.0)
-        return {edge for edge, offset in offsets.items() if offset <= nearest + SAME_ROAD_M}
+        keys, edges = self._edge_index()
+        return set(
+            geo_kernel.roads_at(
+                point[0],
+                point[1],
+                direction if direction is not None else 0.0,
+                direction is not None,
+                road in RAMP_KINDS,
+                road == "any",
+                keys,
+                edges,
+                _EDGE_CELL_DEG,
+                self._links(),
+                self.column("edge_from"),
+                self.column("edge_to"),
+                self.column("lat"),
+                self.column("lng"),
+                self.column("length_m"),
+                self.geometry.ptr,
+                self.geometry.blob,
+                _POLYLINE_FACTOR,
+                MATCHING,
+                _M_PER_DEG_GEO,
+                _M_PER_DEG_LAT,
+                _EDGE_SAMPLE_M,
+                SAME_ROAD_M,
+            ).tolist()
+        )
 
-    def _edge_index(self) -> dict[tuple[int, int], list[int]]:
+    def _links(self) -> np.ndarray:
+        """Which segments are ramps and other links, for telling a ramp's event from its freeway's."""
+        if self._link_column is None:
+            links = np.array([name.endswith("_link") for name in self.classes], dtype=np.bool_)
+            self._link_column = links[self.column("road_class")]
+        return self._link_column
+
+    def _edge_index(self) -> tuple[np.ndarray, np.ndarray]:
+        """Each segment by every cell along its chord: the cells sorted, and the segments beside them."""
         if self._edge_cells is None:
-            cells: dict[tuple[int, int], list[int]] = defaultdict(list)
-            for edge in range(self.edge_count):
-                (lat1, lng1), (lat2, lng2) = self.point(self.edge_from[edge]), self.point(self.edge_to[edge])
-                steps = max(1, math.ceil(self.length_m[edge] / _EDGE_SAMPLE_M))
-                filed = {_cell((lat1 + (lat2 - lat1) * k / steps, lng1 + (lng2 - lng1) * k / steps), _EDGE_CELL_DEG)
-                         for k in range(steps + 1)}  # fmt: skip
-                for cell in filed:
-                    cells[cell].append(edge)
-            self._edge_cells = dict(cells)
+            keys, edges = geo_kernel.segment_cells(
+                self.column("edge_from"),
+                self.column("edge_to"),
+                self.column("lat"),
+                self.column("lng"),
+                self.column("length_m"),
+                _EDGE_SAMPLE_M,
+                _EDGE_CELL_DEG,
+            )
+            order = np.argsort(keys, kind="stable")
+            self._edge_cells = keys[order], edges[order]
         return self._edge_cells
 
     def _nearest(self, point: Point, max_distance_m: float, *, snappable_only: bool) -> int | None:
-        best, best_m = None, max_distance_m
-        for node in self._nodes_near(point, max_distance_m, snappable_only=snappable_only):
-            distance = haversine_m(point, self.point(node))
-            if distance <= best_m:
-                best, best_m = node, distance
-        return best
+        cell_deg = _FINE_CELL_DEG if max_distance_m <= _FINE_LOOKUP_M else _SNAP_CELL_DEG
+        grid = self._node_grid(snappable_only, cell_deg)
+        node = int(geo_kernel.nearest_item(grid, point[0], point[1], max_distance_m, _M_PER_DEG_LAT))
+        return None if node < 0 else node
 
-    def _nodes_near(self, point: Point, distance_m: float, *, snappable_only: bool) -> Iterator[int]:
+    def _nodes_near(self, point: Point, distance_m: float, *, snappable_only: bool) -> list[int]:
         """Junctions in the grid cells within distance_m of point: a superset of those within distance_m."""
         cell_deg = _FINE_CELL_DEG if distance_m <= _FINE_LOOKUP_M else _SNAP_CELL_DEG
-        cells = self._cell_index(snappable_only, cell_deg)
-        cell_lat, cell_lng = _cell(point, cell_deg)
-        reach_lat = math.ceil(distance_m / (_M_PER_DEG_LAT * cell_deg))
-        lng_cell_m = _M_PER_DEG_LAT * cell_deg * max(math.cos(math.radians(point[0])), 0.01)
-        reach_lng = math.ceil(distance_m / lng_cell_m)
-        for i in range(cell_lat - reach_lat, cell_lat + reach_lat + 1):
-            for j in range(cell_lng - reach_lng, cell_lng + reach_lng + 1):
-                yield from cells.get((i, j), ())
+        grid = self._node_grid(snappable_only, cell_deg)
+        return geo_kernel.items_near(grid, point[0], point[1], distance_m, _M_PER_DEG_LAT).tolist()
 
-    def _cell_index(self, snappable_only: bool, cell_deg: float) -> dict[tuple[int, int], list[int]]:
-        index = self._cell_indexes.get((snappable_only, cell_deg))
-        if index is None:
+    def _node_grid(self, snappable_only: bool, cell_deg: float) -> geo_kernel.Grid:
+        grid = self._node_grids.get((snappable_only, cell_deg))
+        if grid is None:
+            lat, lng = self.column("lat"), self.column("lng")
+            nodes = None
             if snappable_only:
-                nodes: Iterable[int] = {
-                    node
-                    for edge in range(self.edge_count)
-                    if self.class_name(edge) not in NO_SNAP_CLASSES
-                    for node in (self.edge_from[edge], self.edge_to[edge])
-                }
-            else:
-                nodes = range(self.node_count)
-            cells: dict[tuple[int, int], list[int]] = defaultdict(list)
-            for node in nodes:
-                cells[_cell(self.point(node), cell_deg)].append(node)
-            index = self._cell_indexes[snappable_only, cell_deg] = dict(cells)
-        return index
+                snappable = np.array([name not in NO_SNAP_CLASSES for name in self.classes], dtype=np.bool_)[self.column("road_class")]
+                nodes = np.unique(np.concatenate((self.column("edge_from")[snappable], self.column("edge_to")[snappable]))).astype(np.int32)
+                lat, lng = lat[nodes], lng[nodes]
+            grid = self._node_grids[snappable_only, cell_deg] = geo_kernel.make_grid(lat, lng, cell_deg, nodes)
+        return grid
 
     def save(self, path: Path) -> None:
         data = {
@@ -819,7 +841,7 @@ class RoadGraph:
                 "winding": [int(x) for x in self.winding],
                 "bearing_start": [round(x, 1) for x in self.bearing_start],
                 "bearing_end": [round(x, 1) for x in self.bearing_end],
-                "geometry": self.geometry,
+                "geometry": list(self.geometry),
                 "rail_crossings": self.rail_crossings.tolist(),
                 "school": [int(x) for x in self.school_zone],
                 **({"stress": self.stress.tolist(), "lit": [int(x) for x in self.lit]} if self.mode != "car" else {}),
@@ -1500,15 +1522,15 @@ def _largest_strongly_connected(count: int, sources: list[int], targets: list[in
     return {node for node in range(count) if component[node] == largest}
 
 
-def _flat_distance_m(point: Point, a: Point, b: Point) -> float:
-    """Distance from point to the segment a-b on a flat projection around point: no bearing, little
-    trigonometry. For ruling out far segments quickly; distance_to_path_m measures the near ones."""
-    m_per_deg_lng = _M_PER_DEG_LAT * math.cos(math.radians(point[0]))
-    ax, ay = (a[1] - point[1]) * m_per_deg_lng, (a[0] - point[0]) * _M_PER_DEG_LAT
-    dx, dy = (b[1] - point[1]) * m_per_deg_lng - ax, (b[0] - point[0]) * _M_PER_DEG_LAT - ay
-    length_sq = dx * dx + dy * dy
-    t = 0.0 if length_sq == 0 else max(0.0, min(1.0, -(ax * dx + ay * dy) / length_sq))
-    return math.hypot(ax + t * dx, ay + t * dy)
+def _flat_stretches(stretches: Iterable[Sequence[Point]]) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Stretches of road as flat columns: where each starts, and all of their latitudes and longitudes."""
+    points: list[Point] = []
+    ends = [0]
+    for stretch in stretches:
+        points.extend(stretch)
+        ends.append(len(points))
+    lat, lng = columns(points)
+    return np.array(ends, dtype=np.int64), lat, lng
 
 
 def _cell(point: Point, size_deg: float) -> tuple[int, int]:
