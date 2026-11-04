@@ -1710,6 +1710,12 @@ body:not(.map-osm) .osm-only {
   display: none;
 }
 
+/* The dark map: light for dark, with colors kept (water stays blue, parks green). Only the base map: routes and pins stay as drawn. */
+
+.map-tiles--dark {
+  filter: invert(1) hue-rotate(180deg) brightness(0.95) contrast(0.9);
+}
+
 /* Leaflet's own controls and popups, in the same style. */
 
 .leaflet-bar {

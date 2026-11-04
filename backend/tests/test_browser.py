@@ -201,6 +201,15 @@ def test_map_layers_are_remembered(page, site):
     assert page.locator('input[value="satellite"]').is_checked() and page.locator("#transit-layer").is_checked()
 
 
+def test_the_map_at_night_darkens_openstreetmaps_own_tiles(page, site):
+    page.clock.set_fixed_time("2026-11-04T06:00:00Z")  # midnight in Milwaukee
+    with page.expect_request(lambda request: request.resource_type == "image" and "127.0.0.1" not in request.url) as tile:
+        open_map(page, site)
+    assert tile.value.url.startswith("https://tile.openstreetmap.org/")
+    page.wait_for_selector(".map-tiles--dark", state="attached")  # no tiles here to make it visible
+    assert page.evaluate("getComputedStyle(document.querySelector('.map-tiles--dark')).filter").startswith("invert(1)")
+
+
 def test_routes_for_a_trip_changed_while_they_were_on_their_way_are_dropped(page, site):
     held = []
     page.route("**/route", lambda route: held.append(route))  # answered only after the trip changes

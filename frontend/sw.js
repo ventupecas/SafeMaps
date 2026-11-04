@@ -7,11 +7,11 @@
 // terms allow keeping what's been viewed, never downloading areas ahead. Google's
 // map isn't kept (its terms don't allow it), and neither is live traffic.
 
-const PAGE = "page-v4"; // a new name when the page's files change: the old copy is dropped
+const PAGE = "page-v5"; // a new name when the page's files change: the old copy is dropped
 const TILES = "tiles-v1";
 const MAX_TILES = 4000; // about 60 MB: the metro at the zooms people use, several times over
 const TILE_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000;
-const TILE_HOSTS = /(^|\.)(tile\.openstreetmap\.org|arcgisonline\.com|opentopomap\.org|cartocdn\.com|openrailwaymap\.org|tile-cyclosm\.openstreetmap\.fr)$/;
+const TILE_HOSTS = /(^|\.)(tile\.openstreetmap\.org|arcgisonline\.com|opentopomap\.org|openrailwaymap\.org|tile-cyclosm\.openstreetmap\.fr)$/;
 
 // Everything the page needs to open. A missing one (config.js, say) doesn't stop the rest.
 const PAGE_FILES = [

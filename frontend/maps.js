@@ -47,12 +47,8 @@ const OSM_BASE_MAPS = {
     maxNativeZoom: 18,
     attribution: "Imagery &copy; Esri, Maxar, Earthstar Geographics",
   },
-  dark: {
-    url: "https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png",
-    subdomains: "abcd",
-    maxNativeZoom: 19,
-    attribution: `${OSM_CREDIT} &copy; <a href="https://carto.com/attributions">CARTO</a>`,
-  },
+  // The roadmap's own tiles, darkened by the page (styles.css): no key, and the offline copy serves both.
+  dark: { url: OSM_TILES, maxNativeZoom: 19, className: "map-tiles--dark", attribution: OSM_CREDIT },
   terrain: {
     url: "https://{s}.tile.opentopomap.org/{z}/{x}/{y}.png",
     maxNativeZoom: 17,
