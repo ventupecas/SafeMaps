@@ -87,7 +87,7 @@ SAFETY_SCALE = 10.0
 # many times the fastest walk there: routes the search for the cheapest passes over, and now and then a safer one.
 DIRECT_WALK_GREED = 1.5
 ROUTES_SHOWN = 4  # the standard route and three designs
-BASE_COSTS_KEPT = 4  # segment costs kept per router, by traveler and dark: 10 MB each on Milwaukee's walking map
+BASE_COSTS_KEPT = 16  # segment costs kept per router, by traveler and dark: 10 MB each on Milwaukee's walking map
 MIN_CRASHES = 1.0  # fatal cyclist crashes (FARS) are rare: one near a junction counts
 
 
@@ -185,13 +185,13 @@ class BikeRouter(Router):
         found = self.routes(origin, destination, profile, count=count, events=events, sun=sun, direct_per_km=DIRECT_WALK_GREED * minutes_per_km)  # type: ignore[arg-type]
         return found[1:]
 
-    def _build_step_costs(self, costs: _Costs) -> np.ndarray:
+    def _step_costs(self, costs: _Costs) -> np.ndarray:
         steps = self._steps()
         trip: _BikeTrip = costs.extra
         minutes = trip.profile.crossing_minutes
         night = DARK_TURN_FACTOR if trip.dark else 1.0
         return (
-            super()._build_step_costs(costs)
+            super()._step_costs(costs)
             + steps.cross_3 * (minutes[0] * night)
             + steps.cross_4 * (minutes[1] * night)
             + steps.crash_spots * trip.profile.crash_minutes

@@ -61,7 +61,7 @@ ALTERNATIVE_PENALTY = 2.0
 MAX_OVERLAP = 0.5
 MAX_COST_RATIO = 2.0
 ALTERNATIVE_SEARCHES_PER_ROUTE = 3
-EDGE_COSTS_KEPT = 6  # segment and step costs kept per router, by profile: about 15 MB each on Milwaukee's car map
+EDGE_COSTS_KEPT = 12  # segment costs kept per router, by profile: about 3 MB each on Milwaukee's car map
 # How far past the trip's start the search back from the destination goes (see kernel.reverse_bound), as a
 # multiple of the road-only cost from there: farther, and more is settled than the forward search ever looks at.
 BOUND_REACH = 1.5
@@ -178,6 +178,13 @@ RIGHT_TURNS = ("TURN_RIGHT", "TURN_SLIGHT_RIGHT", "TURN_SHARP_RIGHT", "UTURN_RIG
 KNOWN_ROUTES_KEPT = 5000  # routes whose road lengths the graph remembers (graph.known_road_lengths)
 
 
+def _first_of_each(columns: list[np.ndarray], kind: np.ndarray, kinds: int) -> list[np.ndarray]:
+    """The columns with one row per kind of step, from any step of that kind."""
+    any_step = np.empty(kinds, dtype=np.int64)
+    any_step[kind] = np.arange(kind.size)
+    return [column[any_step] for column in columns]
+
+
 class Router:
     _with_crossings = False  # the bike and walking maps' steps also count crossings and crash spots (app.bike)
     _crash_spot_min = math.inf
@@ -195,7 +202,6 @@ class Router:
         self._cut_through = flags(CUT_THROUGH_CLASSES)
         self._connector = graph.column("length_m") < CONNECTOR_MAX_M
         self._kept_costs: Kept[np.ndarray] = Kept(EDGE_COSTS_KEPT)
-        self._kept_step_costs: Kept[np.ndarray] = Kept(EDGE_COSTS_KEPT)
         self._crashes: np.ndarray | None = None
         self._event_edges: dict[tuple[Any, ...], frozenset[int]] = {}
         self._bearings: np.ndarray | None = None
@@ -278,6 +284,7 @@ class Router:
                 table.ptr,
                 table.first,
                 table.second,
+                table.kind,
                 table.maneuver_first,
                 table.maneuver_second,
                 zones,
@@ -297,7 +304,7 @@ class Router:
                 break
             edges = path.tolist()
             maneuvers = [kernel.MANEUVERS[code] for code in codes.tolist()]
-            cost = float(kernel.path_cost(edges[0], taken, costs.edges, step_costs, table.first, table.second, zones))
+            cost = float(kernel.path_cost(edges[0], taken, costs.edges, step_costs, table.first, table.second, table.kind, zones))
             if found and cost > found[0].cost * MAX_COST_RATIO:
                 break
             first = not found
@@ -360,20 +367,24 @@ class Router:
         )
         self._moves_table = kernel.build_moves(roads, rules)
         crashes = self._node_crashes()
-        return kernel.Steps(
-            *kernel.build_steps(
-                *self._moves_table,
-                roads,
-                rules,
-                self._connector,
-                self._signal_node,
-                crashes >= self.context.min_hotspot_crashes,
-                self._cut_through,
-                self._crossing_columns(),
-                crashes >= self._crash_spot_min,
-                self._with_crossings,
-            )
+        ptr, first, second, *columns = kernel.build_steps(
+            *self._moves_table,
+            roads,
+            rules,
+            self._connector,
+            self._signal_node,
+            crashes >= self.context.min_hotspot_crashes,
+            self._cut_through,
+            self._crossing_columns(),
+            crashes >= self._crash_spot_min,
+            self._with_crossings,
         )
+        # Each step's kind: its columns packed into one number. Maneuvers take 4 bits, turns' rows 5, the rest 2 to 4.
+        packed = np.zeros(first.size, dtype=np.uint64)
+        for column, bits in zip(columns, kernel.STEP_COLUMN_BITS, strict=True):
+            packed = (packed << np.uint64(bits)) | column.astype(np.uint64)
+        kinds, kind = np.unique(packed, return_inverse=True)
+        return kernel.Steps(ptr, first, second, kind.astype(np.int32), *_first_of_each(columns, kind, kinds.size))
 
     def _crossing_columns(self) -> kernel.Crossings:
         g = self.graph
@@ -392,14 +403,7 @@ class Router:
         )
 
     def _step_costs(self, costs: _Costs) -> np.ndarray:
-        """What each step on the map costs for this trip's traveler, before the segments it enters: kept for the next trips."""
-        kept = self._kept_step_costs.get(costs.key)
-        if kept is None:
-            kept = self._build_step_costs(costs)
-            self._kept_step_costs.put(costs.key, kept)
-        return kept
-
-    def _build_step_costs(self, costs: _Costs) -> np.ndarray:
+        """What each kind of step costs for this trip's traveler, before the segments it enters."""
         steps = self._steps()
         profile = costs.profile
         table = np.zeros(kernel.TURN_TABLE_SIZE)
@@ -455,23 +459,24 @@ class Router:
     def _step(self, edge: int, s: int) -> Step:
         g, table = self.graph, self._steps()
         first, second = int(table.first[s]), int(table.second[s])
-        flags = table.flags[s]
-        maneuver = kernel.MANEUVERS[table.maneuver_first[s]]
+        kind = table.kind[s]
+        flags = table.flags[kind]
+        maneuver = kernel.MANEUVERS[table.maneuver_first[kind]]
         node = g.edge_to[edge]
-        turn_maneuver = kernel.MANEUVERS[table.turn_first[s] // 2]
+        turn_maneuver = kernel.MANEUVERS[table.turn_first[kind] // 2]
         turns = [(node, turn_maneuver, bool(flags & kernel.FIRST_CROSSES), bool(flags & kernel.FIRST_BUSY))]
         if second < 0:
             return Step((first,), (maneuver,), tuple(turns))
-        if table.turn_second[s] != kernel.NO_TURN:
+        if table.turn_second[kind] != kernel.NO_TURN:
             turns.append(
                 (
                     g.edge_to[first],
-                    kernel.MANEUVERS[table.turn_second[s] // 2],
+                    kernel.MANEUVERS[table.turn_second[kind] // 2],
                     bool(flags & kernel.SECOND_CROSSES),
                     bool(flags & kernel.SECOND_BUSY),
                 )
             )
-        return Step((first, second), (maneuver, kernel.MANEUVERS[table.maneuver_second[s]]), tuple(turns))
+        return Step((first, second), (maneuver, kernel.MANEUVERS[table.maneuver_second[kind]]), tuple(turns))
 
     @property
     def _uturn(self) -> str:

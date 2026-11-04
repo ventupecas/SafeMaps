@@ -4,7 +4,8 @@ Router (app.router) decides what a trip costs; this module finds the cheapest wa
 Nothing here knows about profiles or road events: it sees arrays of numbers. Three ideas:
 
 * Every way on from a segment is worked out once, into arrays (build_moves, build_steps), instead of
-  being judged again as the search reaches it. A profile's cost for each one is one number (Router._step_costs).
+  being judged again as the search reaches it. Millions of steps come in a few thousand kinds (the same turn, the
+  same crossings), so a step keeps only its kind, and a traveler's costs are one short table (Router._step_costs).
 * The search knows how far it still has to go. Before searching forward, reverse_bound searches back from
   the destination along the roads, ignoring turns. Turns and zones only add to a route, and an alternative's
   penalties only raise a road's cost, so what it finds never overstates what's left. That's what A* needs to
@@ -69,6 +70,9 @@ FIRST_CROSSES, FIRST_BUSY, SECOND_CROSSES, SECOND_BUSY = 1, 2, 4, 8
 # A junction's marks in the search back from the destination.
 _SEEN, _SETTLED, _TARGET = 1, 2, 4
 
+# The bits each of a step's columns takes, in build_steps' order, for packing them into one number: its kind.
+STEP_COLUMN_BITS = (4, 4, 5, 5, 4, 2, 2, 2, 2, 2, 2, 2)
+
 _HEAP_START = 4096
 
 
@@ -118,11 +122,12 @@ class Crossings(NamedTuple):
 
 
 class Steps(NamedTuple):
-    """Every way on from every segment. A segment's are step_ptr[edge] up to step_ptr[edge + 1]."""
+    """Every way on from every segment. A segment's are ptr[edge] up to ptr[edge + 1]."""
 
     ptr: np.ndarray
     first: np.ndarray  # the segment it enters
     second: np.ndarray  # then this one, through a short connector; or NO_SECOND, or ARRIVAL
+    kind: np.ndarray  # which kind of step it is: its row in the rest of these columns
     maneuver_first: np.ndarray  # how each is entered
     maneuver_second: np.ndarray
     turn_first: np.ndarray  # its turns' rows in a profile's table (see NO_TURN)
@@ -133,7 +138,7 @@ class Steps(NamedTuple):
     busy_signal: np.ndarray  # and with one
     hotspots: np.ndarray  # crossing turns at crash spots
     cut_through: np.ndarray  # turns onto a service road
-    # The bike and walking maps' (empty on the car map): crossings of stress 3 and 4 traffic, and crash spots passed.
+    # The bike and walking maps' (none on the car map): crossings of stress 3 and 4 traffic, and crash spots passed.
     cross_3: np.ndarray
     cross_4: np.ndarray
     crash_spots: np.ndarray
@@ -346,10 +351,9 @@ def build_steps(
     busy_signal = np.zeros(count, dtype=np.uint8)
     hotspots = np.zeros(count, dtype=np.uint8)
     cut = np.zeros(count, dtype=np.uint8)
-    sized = count if with_crossings else 0
-    cross_3 = np.zeros(sized, dtype=np.uint8)
-    cross_4 = np.zeros(sized, dtype=np.uint8)
-    crash_spots = np.zeros(sized, dtype=np.uint8)
+    cross_3 = np.zeros(count, dtype=np.uint8)
+    cross_4 = np.zeros(count, dtype=np.uint8)
+    crash_spots = np.zeros(count, dtype=np.uint8)
 
     s = 0
     for edge in range(edges):
@@ -560,6 +564,7 @@ def search(
     step_ptr,
     step_first,
     step_second,
+    step_kind,
     maneuver_first,
     maneuver_second,
     zones,
@@ -622,7 +627,7 @@ def search(
             first, second = step_first[s], step_second[s]
             if second == ARRIVAL and edge_to[first] != end:
                 continue
-            new = cost + step_costs[s] + edge_costs[first] + _zones_entered(edge, first, zones)
+            new = cost + step_costs[step_kind[s]] + edge_costs[first] + _zones_entered(edge, first, zones)
             last = first
             if second >= 0:
                 new += edge_costs[second] + _zones_entered(first, second, zones)
@@ -664,24 +669,25 @@ def search(
     for t in range(taken - 1, -1, -1):
         s = reached_by[edge] - 2
         steps[t] = s
+        kind = step_kind[s]
         if step_second[s] >= 0:
             at -= 1
-            path[at], maneuvers[at] = step_second[s], maneuver_second[s]
+            path[at], maneuvers[at] = step_second[s], maneuver_second[kind]
         at -= 1
-        path[at], maneuvers[at] = step_first[s], maneuver_first[s]
+        path[at], maneuvers[at] = step_first[s], maneuver_first[kind]
         edge = came_from[edge]
     path[0], maneuvers[0] = edge, _DEPART
     return path, maneuvers, steps, opened
 
 
 @njit(cache=True, nogil=True)
-def path_cost(departure, steps, edge_costs, step_costs, step_first, step_second, zones):
+def path_cost(departure, steps, edge_costs, step_costs, step_first, step_second, step_kind, zones):
     """What a route costs, by the steps it took: without the penalties it may have been searched with."""
     cost = edge_costs[departure]
     previous = departure
     for s in steps:
         first, second = step_first[s], step_second[s]
-        cost += step_costs[s] + edge_costs[first] + _zones_entered(previous, first, zones)
+        cost += step_costs[step_kind[s]] + edge_costs[first] + _zones_entered(previous, first, zones)
         previous = first
         if second >= 0:
             cost += edge_costs[second] + _zones_entered(first, second, zones)

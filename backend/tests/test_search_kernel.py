@@ -292,7 +292,7 @@ def test_every_step_costs_in_the_arrays_what_its_parts_add_up_to(seed):
                 if math.isinf(from_parts) or math.isinf(costs.edges[edge]):
                     continue  # a closed road: nothing to compare
                 taken = np.array([s], dtype=np.int32)
-                from_arrays = kernel.path_cost(edge, taken, costs.edges, step_costs, table.first, table.second, zones) - costs.edges[edge]
+                from_arrays = kernel.path_cost(edge, taken, costs.edges, step_costs, table.first, table.second, table.kind, zones) - costs.edges[edge]
                 assert from_arrays == pytest.approx(from_parts, rel=1e-9, abs=1e-9)
 
 
@@ -543,3 +543,15 @@ def test_direct_routes_are_real_routes(seed):
     for origin, destination in trips(graph, rng, 15):
         for path in router.direct_routes(origin, destination, profile):
             walk_path_and_check(router, path, costs)
+
+
+def test_steps_of_a_kind_are_the_same_in_every_way_a_traveler_could_cost():
+    graph = random_city(1, mode="walk")
+    router = bike.BikeRouter(graph, TurnContext(hotspots=CrashHotspots([(graph.point(3), 1)])))
+    table = router._steps()
+    columns = table[4:]
+    assert all(column.size == columns[0].size for column in columns) and columns[0].size == table.kind.max() + 1
+    assert columns[0].size < table.first.size  # fewer kinds than steps: the point of them
+    # Packing can't lose anything: every column's values fit the bits it's given.
+    for column, bits in zip(columns, kernel.STEP_COLUMN_BITS, strict=True):
+        assert int(column.max()) < 2**bits
