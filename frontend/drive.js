@@ -5,9 +5,10 @@ import { $, M_PER_DEG_LAT, M_PER_MI, NAV, element, state } from "./core.js";
 import { requestTrip, showStatus } from "./app.js";
 import { chosenStops, placePin, setPoint } from "./editing.js";
 import { selectRoute, showTrip } from "./results.js";
-import { stopDemo } from "./expo.js";
+import { restartIdleTimer, stopDemo } from "./expo.js";
 import { locale, translate } from "./i18n.js";
 import { isActiveMode, requestActiveTrip, showActiveTrip, startLabel } from "./bike.js";
+import { closeDriveView, driveViewFix, driveViewOn, openDriveView, pointAt } from "./drive3d.js";
 
 function locationProblem() {
   if (!window.isSecureContext) return "Location only works on a secure page: https, or this computer's own address.";
@@ -52,28 +53,74 @@ export async function startDriving() {
   const problem = locationProblem();
   if (problem) return setNavStatus(problem);
   if (!state.plan || !state.destination) return;
+  beginFollowing();
+  state.nav.watchId = navigator.geolocation.watchPosition(onFix, onFixError, {
+    enableHighAccuracy: true,
+    maximumAge: 2000,
+    timeout: 20000,
+  });
+  setNavStatus("Waiting for your location…");
+}
+
+// The planned route played back as if driven, for a computer at the booth that isn't going anywhere.
+// Each position goes where a GPS one would, so everything shows as it does on the road.
+export function startPreview() {
+  const path = state.paths[state.activeRouteId];
+  if (!path || !state.destination) return;
+  beginFollowing();
+  state.nav.preview = { path, along: 0, at: Date.now() };
+  $("drive").textContent = "Stop the preview";
+  $("drive-preview").hidden = false;
+  previewStep();
+  state.nav.previewTimer = setInterval(previewStep, NAV.previewTickMs);
+}
+
+function previewStep() {
+  const { preview } = state.nav;
+  const path = state.paths[state.activeRouteId];
+  if (!path) return;
+  if (path !== preview.path) {
+    // Another route picked: go on from the same place.
+    preview.along = state.nav.fix ? nearestOnPath(state.nav.fix, path).along : 0;
+    preview.path = path;
+  }
+  const now = Date.now();
+  const metersPerSecond = (path.lengthM / Math.max(0.1, path.minutes * 60)) * NAV.previewSpeedup;
+  preview.along += metersPerSecond * Math.min(2, (now - preview.at) / 1000);
+  preview.at = now;
+  if (preview.along >= path.lengthM) {
+    stopDriving("That's the end of the preview.");
+    speak("You have arrived.");
+    return;
+  }
+  const here = pointAt(path, preview.along);
+  const ahead = pointAt(path, preview.along + 10);
+  onFix({ coords: { latitude: here.lat, longitude: here.lng, accuracy: 5, heading: bearing(here, ahead), speed: metersPerSecond } });
+}
+
+function beginFollowing() {
   const nav = state.nav;
   Object.assign(nav, { active: true, following: true, fix: null, anchor: null, heading: null, offRoute: 0, lastRerouteAt: 0 });
   nav.stopsLeft = chosenStops();
   nav.spoken.clear();
   stopDemo();
-  nav.watchId = navigator.geolocation.watchPosition(onFix, onFixError, {
-    enableHighAccuracy: true,
-    maximumAge: 2000,
-    timeout: 20000,
-  });
   keepScreenOn();
   if (state.pins.origin) state.pins.origin.remove(); // the car marks the start while driving
   $("drive").textContent = startLabel(state.mode, true);
   document.body.classList.add("driving");
-  setNavStatus("Waiting for your location…");
+  if (state.mode === "car") openDriveView();
 }
 
 export function stopDriving(message = null) {
   const nav = state.nav;
   if (nav.watchId !== null) navigator.geolocation.clearWatch(nav.watchId);
   nav.watchId = null;
+  if (nav.preview && "speechSynthesis" in window) window.speechSynthesis.cancel();
+  clearInterval(nav.previewTimer);
+  nav.preview = null;
+  $("drive-preview").hidden = true;
   nav.active = false;
+  closeDriveView();
   if (nav.car) nav.car.remove();
   nav.car = null;
   if (state.origin) placePin("origin", state.origin);
@@ -83,6 +130,7 @@ export function stopDriving(message = null) {
   $("recenter").hidden = true;
   document.body.classList.remove("driving");
   setNavStatus(message);
+  restartIdleTimer(); // a preview left to finish hands the booth's screen back to demo mode
 }
 
 function onFix(position) {
@@ -99,11 +147,12 @@ function onFix(position) {
   nav.fix = here;
 
   moveCar(here, nav.heading);
-  if (nav.following) {
+  driveViewFix(here, nav.heading);
+  if (nav.following && !driveViewOn()) {
     state.view.panTo(here);
     if (first) state.view.setZoom(NAV.followZoom);
   }
-  if (distanceM(here, state.destination) <= NAV.arrivedM) {
+  if (!nav.preview && distanceM(here, state.destination) <= NAV.arrivedM) {
     speak("You have arrived.");
     return stopDriving("You've arrived.");
   }
@@ -195,7 +244,7 @@ function showProgress(path, along) {
 }
 
 // "500 feet" under a tenth of a mile, else "0.3 miles".
-function spokenDistance(meters) {
+export function spokenDistance(meters) {
   const miles = meters / M_PER_MI;
   if (miles < 0.1) return `${Math.max(50, Math.round((meters * 3.28084) / 50) * 50)} feet`;
   return `${miles.toFixed(1)} miles`;
@@ -204,6 +253,7 @@ function spokenDistance(meters) {
 // Read directions aloud, if the driver wants them and the browser can.
 function speak(text) {
   if (!$("voice").checked || !("speechSynthesis" in window)) return;
+  if (state.nav.preview) window.speechSynthesis.cancel(); // sped up, directions would pile up behind each other
   const utterance = new SpeechSynthesisUtterance(translate(text));
   utterance.lang = locale;
   window.speechSynthesis.speak(utterance);

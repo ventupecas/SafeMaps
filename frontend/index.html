@@ -136,6 +136,7 @@
             <button id="clear" class="button button--ghost" type="button">Clear</button>
           </div>
           <button id="drive" class="button button--drive" type="button" hidden>Start driving</button>
+          <button id="preview" class="button button--ghost" type="button" data-modes="car">Preview the drive</button>
           <label class="switch voice"><input type="checkbox" id="voice" checked /><span class="switch__track"></span>Spoken directions while driving</label>
 
           <details class="advanced">
@@ -229,6 +230,23 @@
             <li id="legend-buses" class="osm-only" hidden><span class="key key--buses"></span>Bus routes, each its own color</li>
           </ul>
         </details>
+        <div id="drive-view" class="drive-view" hidden>
+          <div id="drive-view-map" class="drive-view__map" role="img" aria-label="The road ahead, seen from behind the car"></div>
+          <svg class="drive-car" viewBox="0 0 120 84" aria-hidden="true">
+            <ellipse cx="60" cy="76" rx="56" ry="7" fill="#000" opacity="0.28" />
+            <path d="M24 34 34 10c1-3 4-5 7-5h38c3 0 6 2 7 5l10 24c8 2 14 8 14 16v16c0 4-3 7-7 7H17c-4 0-7-3-7-7V50c0-8 6-14 14-16Z" fill="#1a4f8b" />
+            <path d="M35 33 42 13c.5-1.5 1.5-2 3-2h30c1.5 0 2.5.5 3 2l7 20Z" fill="#bcd4e6" />
+            <rect x="15" y="44" width="23" height="9" rx="3" fill="#e5484d" />
+            <rect x="82" y="44" width="23" height="9" rx="3" fill="#e5484d" />
+            <rect x="46" y="58" width="28" height="9" rx="2" fill="#f4f6f8" />
+          </svg>
+          <div class="drive-hud">
+            <p id="drive-preview" class="drive-hud__preview" hidden>Preview at 3× speed</p>
+            <p id="drive-turn" class="drive-hud__turn" hidden><i></i><span id="drive-turn-distance"></span></p>
+            <p id="drive-ahead" class="drive-hud__ahead" hidden><i></i><strong id="drive-ahead-what"></strong> <span id="drive-ahead-distance"></span></p>
+            <p class="drive-hud__note">Not every stop sign is mapped. Watch the road.</p>
+          </div>
+        </div>
         <div id="setup" class="setup" hidden></div>
         <p id="osm-credit" class="credit" hidden></p>
       </section>

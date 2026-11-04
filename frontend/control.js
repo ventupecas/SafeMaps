@@ -52,6 +52,7 @@ async function show() {
     check(events.matched_ahead, "Closures matched to the map", events.matched_ahead ? "done" : "still matching (about a minute after a start)"),
     check(health.crash_data, "Crash data", health.crash_data ? `${number(health.hazards.crash_locations)} crash locations` : "none loaded (ROUTES_CRASH_DATA)"),
     check(health.hazards.rail_crossings > 0, "Railroad crossings and schools", `${number(health.hazards.rail_crossings)} crossings, ${number(health.hazards.schools)} schools`),
+    check(health.road_controls.signal > 0, "Stop signs and lights for the driving view", health.road_controls.signal > 0 ? `${number(health.road_controls.stop)} stop signs, ${number(health.road_controls.signal)} lights` : "none: python -m app.road_controls (EXPO.md)"),
     check(health.weather_alerts, "Weather alerts", health.weather_alerts ? "on" : "off (ROUTES_WEATHER_ALERTS)"),
     ...(health.bus_routes ? [check(health.bus_routes_ready, "Bus routes", health.bus_routes_ready ? "ready" : "not downloaded yet")] : []),
   );

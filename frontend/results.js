@@ -171,6 +171,7 @@ function followablePath(points, route, plan) {
     cumulative,
     lengthM: cumulative[cumulative.length - 1],
     minutes: route.features.duration_min,
+    encoded: route.encoded_polyline, // to ask for the stop signs and lights along it (drive3d.js)
     label: route.via ? `the route via ${route.via}` : routeKind(route, plan), // "Following ... instead"
   };
   // Where each turn-by-turn instruction falls along the route, to know which comes next.

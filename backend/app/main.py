@@ -16,6 +16,7 @@ try the API directly.
     POST /bike-route  bike routes for one trip, lowest stress first (app.bike; needs the bike map)
     POST /walk-route  walking routes for one trip, the same way (needs the walking map)
     GET  /bike-stress the bike map's traffic stress in a box, for the page's Bike stress layer
+    POST /road-controls  the stop signs and traffic lights along a car's route, for the driving view
     GET  /expo-stats  today's trips and answers, for the expo's stats screen (stats.html) and answers page (answers.html)
     POST /guess       a visitor's guess in the "Which route is safer?" game (game.html)
     GET  /expo-control, POST /expo-control   the expo's control page (control.html): pause demo mode, restart the stats
@@ -71,6 +72,7 @@ from app.hotspots import CrashHotspots
 from app.models import LatLng, RoutePlan, ScoringProfile
 from app.overpass import ATTRIBUTION
 from app.profiles import DEFAULT_PROFILE, PRESETS, get_profile
+from app.road_controls import RoadControls
 from app.road_events import (
     ApifyTraffic,
     EventReport,
@@ -255,6 +257,12 @@ class TransitTripRequest(BaseModel):
     leave_at: datetime | None = Field(None, description="Leave then (local time) instead: within the coming week.")
 
 
+class RouteLine(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    encoded_polyline: str = Field(min_length=1, max_length=500_000)
+
+
 class Guess(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -314,6 +322,7 @@ class Engine:
     guesses: FeedbackLog | None = None  # "Which route is safer?" guesses, right or wrong (no places)
     bike_graph: RoadGraph | None = None  # the bike map, when built (app.bike)
     walk_graph: RoadGraph | None = None  # the walking map, when built
+    road_controls: RoadControls | None = None  # stop signs and traffic lights, for the driving view
     walk_hotspots: CrashHotspots | None = None  # fatal crashes where a pedestrian died
     _walk_router: bike.BikeRouter | None = None
     bike_hotspots: CrashHotspots | None = None  # fatal crashes where a cyclist died
@@ -541,6 +550,9 @@ def create_app(settings: Settings | None = None, *, http: httpx.Client | None = 
             trips=TripLog(settings.cache_dir / "trips.jsonl"),
             control=ExpoControl(settings.cache_dir / "expo-control.json"),
             guesses=FeedbackLog(settings.cache_dir / "guesses.jsonl"),
+            road_controls=RoadControls.load(settings.road_controls_path)
+            if settings.road_controls_path and settings.road_controls_path.exists()
+            else None,
             bike_graph=RoadGraph.load(settings.bike_graph_path)
             if settings.bike_graph_path and settings.bike_graph_path.exists()
             else None,
@@ -609,6 +621,7 @@ def create_app(settings: Settings | None = None, *, http: httpx.Client | None = 
                 "schools": len(graph.school_points) if graph else 0,
                 "school_hours_now": make_turn_context(settings, None).school_hours,
             },
+            "road_controls": engine.road_controls.counts() if engine.road_controls else {"stop": 0, "signal": 0},
             "cache_mode": settings.cache_mode,
             "google_api_key_set": bool(settings.google_maps_api_key),
             "google_requests_today": engine.usage.used_today(),
@@ -1049,6 +1062,15 @@ def create_app(settings: Settings | None = None, *, http: httpx.Client | None = 
             if len(seen) >= BIKE_STRESS_MAX_SEGMENTS:
                 break
         return {"lines": lines, "complete": len(seen) < BIKE_STRESS_MAX_SEGMENTS}
+
+    @app.post("/road-controls")
+    def road_controls(
+        line: RouteLine, request: Request, x_access_code: str | None = Header(None, include_in_schema=False)
+    ) -> dict[str, Any]:
+        """The stop signs and traffic lights a car's route meets, in order, for the driving view. Only what's mapped."""
+        check_access(x_access_code)
+        controls = request.app.state.engine.road_controls
+        return {"controls": controls.along(decode_polyline(line.encoded_polyline)) if controls else []}
 
     @app.post("/guess", status_code=204)
     def guess(

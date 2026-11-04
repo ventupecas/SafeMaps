@@ -23,7 +23,7 @@ import { createMapView } from "./maps.js";
 import { $, MILWAUKEE, NARROW, PROFILE_LABELS, element, state } from "./core.js";
 import { addStop, addStopOnMap, changeOnMap, chosenStops, clearPoint, mapTouchAllowed, removeStop, setPoint, swapEnds, undoMapChange, unnamed } from "./editing.js";
 import { clearRoutes, drawClosures, drawTraffic, showTrip } from "./results.js";
-import { keepScreenOn, recenter, setNavStatus, startDriving, stopDriving, useMyLocation } from "./drive.js";
+import { keepScreenOn, recenter, setNavStatus, startDriving, startPreview, stopDriving, useMyLocation } from "./drive.js";
 import { applyBaseMap, drawBuses, isNight, rememberLayers, restoreLayers, savedLayers, showTransit } from "./layers.js";
 import { forgetRecentTrips, openTripFromLink, rememberTrip, showRecentTrips, tripLink } from "./trips.js";
 import { setUpDemo, showAbout, showPhoneLink } from "./expo.js";
@@ -143,6 +143,7 @@ function wireControls() {
   $("clear").addEventListener("click", clearAll);
   $("locate").addEventListener("click", useMyLocation);
   $("drive").addEventListener("click", () => (state.nav.active ? stopDriving() : startDriving()));
+  $("preview").addEventListener("click", startPreview);
   $("recenter").addEventListener("click", recenter);
   $("undo").addEventListener("click", undoMapChange);
   $("map").addEventListener("keydown", placeByKeyboard);

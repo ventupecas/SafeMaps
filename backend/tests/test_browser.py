@@ -326,6 +326,57 @@ def test_the_booths_pages_read_in_spanish(browser, site):
     context.close()
 
 
+def test_driving_a_car_shows_the_road_from_behind_with_what_comes_up(browser, site):
+    context = browser.new_context(
+        viewport={"width": 1000, "height": 700}, service_workers="block", permissions=["geolocation"],
+        geolocation={"latitude": FROM[0], "longitude": FROM[1]},
+    )
+    context.route("**/*", lambda route: route.continue_() if "127.0.0.1" in route.request.url else route.abort())
+    page = context.new_page()
+    errors = []
+    page.on("pageerror", lambda error: errors.append(error))
+    open_map(page, site + TRIP)
+    wait_for_routes(page)
+    page.click("#drive")
+    page.wait_for_selector("body.driving3d", timeout=20000)  # without the map style's server: OpenStreetMap's images
+    assert page.locator("#drive-view-map canvas").is_visible() and page.locator(".drive-car").is_visible()
+    page.wait_for_selector(".road-sign--turn", state="attached")
+    page.click("#drive")
+    page.wait_for_function("!document.body.classList.contains('driving3d')")
+    assert page.locator("#drive-view").is_hidden()
+    context.close()
+    assert not errors, errors
+
+
+def test_the_drive_can_be_previewed_without_a_location_and_ends_by_itself(page, site):
+    open_map(page, site + TRIP)
+    wait_for_routes(page)
+    assert page.locator("#preview").is_visible()
+    page.click("#preview")
+    page.wait_for_selector("body.driving3d", timeout=20000)
+    assert page.locator("#drive").text_content() == "Stop the preview" and page.locator("#drive-preview").is_visible()
+    assert page.locator("#preview").is_hidden()
+    page.wait_for_function("/ mi left/.test(document.getElementById('nav-banner').textContent)")
+    page.evaluate("import('./core.js').then(({ NAV }) => { NAV.previewSpeedup = 500; })")
+    page.wait_for_function("!document.body.classList.contains('driving')", timeout=20000)
+    assert page.locator("#nav-banner").text_content() == "That's the end of the preview."
+    assert page.locator("#drive").text_content() == "Start driving" and page.locator("#drive-view").is_hidden()
+    assert page.locator("#preview").is_visible()
+
+
+def test_a_preview_is_for_cars_and_can_be_stopped(page, site):
+    open_map(page, site + TRIP)
+    wait_for_routes(page)
+    page.click("#preview")
+    page.wait_for_selector("body.driving3d", timeout=20000)
+    page.click("#drive")
+    page.wait_for_function("!document.body.classList.contains('driving')")
+    assert page.locator("#drive-preview").is_hidden()
+    open_map(page, site + TRIP + "&mode=bike")
+    wait_for_routes(page)
+    assert page.locator("#preview").is_hidden()
+
+
 def test_bike_mode_plans_a_bike_route_colored_by_stress(page, site):
     asked = route_request_to(page, "/bike-route", lambda: open_map(page, site + TRIP + "&mode=bike"))
     assert asked["profile"] == "everyday"

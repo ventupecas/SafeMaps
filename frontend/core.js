@@ -20,6 +20,8 @@ export const NAV = {
   followZoom: 16,
   announceFarM: 400, // spoken directions: "In a quarter mile, ..." this far before a turn
   announceNearM: 60, // and the turn itself this close
+  previewSpeedup: 3, // "Preview the drive" plays the route this many times faster than it would be driven
+  previewTickMs: 400,
 };
 
 export const COLORS = {
@@ -140,6 +142,8 @@ export const state = {
     wakeLock: null,
     spoken: new Set(), // directions already announced, so each is said once (far and near)
     stopsLeft: [], // the trip's stops not reached yet, while driving
+    preview: null, // playing the route back instead of following GPS: { path, along, at }
+    previewTimer: null,
   },
 };
 

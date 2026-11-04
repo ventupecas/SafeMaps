@@ -226,6 +226,10 @@ Under each recommendation the page asks "Would you take this route?". See the co
 
 **http://127.0.0.1:3143/game.html** (also linked at the top of the planner): visitors see two real routes for a sample trip and guess which is safer, then see both scores. A good opener at the booth, and a second screen can run it. It costs no paid requests, and the stats screen shows how often visitors guess right.
 
+### The driving view
+
+Start driving a car trip and the map turns into a view from behind the car, with its turns and the stop signs and traffic lights ahead. It follows the device's GPS, so it only moves on a device that's moving. At the booth, use **Preview the drive** instead: it plays the planned route at 3× speed, needs no location, and hands the screen back to demo mode when it ends. The turns are spoken if **Spoken directions** is on. The signs come from a file of their own; a new computer needs `backend\data\graphs\milwaukee-metro-controls.json.gz` copied, or built with `python -m app.road_controls data\osm\pbf\milwaukee-metro.osm.pbf data\graphs\milwaukee-metro-controls.json.gz`. The control page shows how many it has. OpenStreetMap has about 3,300 of the metro's stop signs, far from all of them, and the view says so.
+
 ### The control page
 
 Open **Control** at the top of the planner (**http://127.0.0.1:3143/control.html**) on the expo computer: whether everything is ready (road map, closures matched, crash data, bus routes), how much of today's Google and TomTom allowances is used, and two switches: **Pause demo mode** (on every screen running it, within 30 seconds) and **Restart today's stats** (after a rehearsal: earlier trips stop counting, nothing is deleted). The switches only work from the expo computer itself; to use them from elsewhere (a phone, through the tunnel), set `ROUTES_ADMIN_CODE` in `backend\.env` and type it on the page. The link is on the planner for everyone, so set the code before visitors use the expo computer: without one, anyone at its keyboard could use the switches.
