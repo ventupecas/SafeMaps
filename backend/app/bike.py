@@ -31,6 +31,7 @@ import numpy as np
 import app.search_kernel as kernel
 from app.features import TurnContext, directions
 from app.geo import encode_polyline
+from app.kept import Kept
 from app.models import LatLng, ScoringProfile
 from app.road_events import RoadEvent
 from app.roadgraph import BIKE_SPEED_KMH, WALK_SPEED_KMH, RoadGraph
@@ -82,6 +83,10 @@ RISK_POINTS = {
     "closures": 30.0,
 }
 SAFETY_SCALE = 10.0
+# A walk's alternatives are also looked for heading straight for the destination, estimating what's left at this
+# many times the fastest walk there: routes the search for the cheapest passes over, and now and then a safer one.
+DIRECT_WALK_GREED = 1.5
+ROUTES_SHOWN = 4  # the standard route and three designs
 BASE_COSTS_KEPT = 4  # segment costs kept per router, by traveler and dark: 10 MB each on Milwaukee's walking map
 MIN_CRASHES = 1.0  # fatal cyclist crashes (FARS) are rare: one near a junction counts
 
@@ -103,7 +108,7 @@ class BikeRouter(Router):
             raise ValueError("BikeRouter needs the bike or walking map (python -m app.build_graph <area> --bike or --walk)")
         super().__init__(graph, context)
         self._cut_through = np.zeros_like(self._cut_through)  # quiet service roads and alleys are welcome on a bike
-        self._base_costs: dict[tuple[BikeProfile, bool], np.ndarray] = {}
+        self._base_costs: Kept[np.ndarray] = Kept(BASE_COSTS_KEPT)
         self._crossings: kernel.Crossings | None = None
 
     def bike_routes(
@@ -161,10 +166,24 @@ class BikeRouter(Router):
             base = g.column("time_s") / 60 * slower * weights + g.column("rail_crossings") * profile.rail_minutes
             if profile.avoid_steps and "steps" in g.classes:
                 base[g.column("road_class") == g.classes.index("steps")] = math.inf
-            if len(self._base_costs) >= BASE_COSTS_KEPT:
-                self._base_costs.pop(next(iter(self._base_costs)), None)
-            self._base_costs[key] = base
+            self._base_costs.put(key, base)
         return base
+
+    def direct_routes(
+        self,
+        origin: tuple[float, float],
+        destination: tuple[float, float],
+        profile: BikeProfile,
+        *,
+        count: int = 3,
+        events: Sequence[RoadEvent] = (),
+        sun: Sun | None = None,
+    ) -> list[RoutedPath]:
+        """Alternatives that head straight for the destination, for the traveler to compare with the cheapest ones."""
+        g = self.graph
+        minutes_per_km = MAP_SPEED_KMH[g.mode] / profile.speed_kmh * 60.0 / float(g.column("speed_kmh").max())
+        found = self.routes(origin, destination, profile, count=count, events=events, sun=sun, direct_per_km=DIRECT_WALK_GREED * minutes_per_km)  # type: ignore[arg-type]
+        return found[1:]
 
     def _build_step_costs(self, costs: _Costs) -> np.ndarray:
         steps = self._steps()
@@ -299,33 +318,45 @@ def plan(
         raise LookupError("No bike route was found between these points.")
 
     junctions = TurnContext(junctions=router.graph)
-    candidates = []
-    for route_id, path in paths:
+
+    def candidate(route_id: str, path: RoutedPath) -> dict:
         route = router.to_route_json(path)
         features = route_features(router, path, profile, events, after_dark)
         score, risks = safety(features)
         lengths = router.graph.known_road_lengths.get(route["polyline"]["encodedPolyline"], {})
-        candidates.append(
-            {
-                "id": route_id,
-                "source": "own" if route_id != "standard" else "baseline",
-                "is_standard": route_id == "standard",
-                "encoded_polyline": route["polyline"]["encodedPolyline"],
-                "road_lengths": lengths,
-                "features": features,
-                "safety_score": score,
-                "safety_risks": risks,
-                "maneuvers": [m.model_dump() for m in directions(route, junctions)],
-                "stress_segments": stress_segments(router, path),
-            }
-        )
+        return {
+            "id": route_id,
+            "source": "own" if route_id != "standard" else "baseline",
+            "is_standard": route_id == "standard",
+            "encoded_polyline": route["polyline"]["encodedPolyline"],
+            "road_lengths": lengths,
+            "features": features,
+            "safety_score": score,
+            "safety_risks": risks,
+            "maneuvers": [m.model_dump() for m in directions(route, junctions)],
+            "stress_segments": stress_segments(router, path),
+        }
 
+    def rank(c: dict) -> tuple:
+        return (not c["eligible"], -c["safety_score"], c["features"]["duration_min"])
+
+    candidates = [candidate(route_id, path) for route_id, path in paths]
     standard = candidates[0] if candidates[0]["is_standard"] else None
     shortest_min = standard["features"]["duration_min"] if standard else min(c["features"]["duration_min"] for c in candidates)
     limit_min = min(shortest_min * profile.max_detour_ratio, shortest_min + profile.max_extra_min)
-    for candidate in candidates:
-        candidate["eligible"] = candidate["is_standard"] or candidate["features"]["duration_min"] <= limit_min + 1e-9
-    candidates.sort(key=lambda c: (not c["eligible"], -c["safety_score"], c["features"]["duration_min"]))
+    for c in candidates:
+        c["eligible"] = c["is_standard"] or c["features"]["duration_min"] <= limit_min + 1e-9
+    candidates.sort(key=rank)
+    if router.graph.mode == "walk":
+        # One takes the lead only by beating the best so far, so the recommendation can only get better.
+        direct = (path for path in router.direct_routes(start, end, profile, count=3, events=events, sun=sun) if path.edges not in seen)
+        for number, path in enumerate(direct, start=1):
+            challenger = candidate(f"direct-{number}", path)
+            challenger["eligible"] = challenger["features"]["duration_min"] <= limit_min + 1e-9
+            if rank(challenger) < rank(candidates[0]):
+                if len(candidates) >= ROUTES_SHOWN:
+                    del candidates[max(i for i, c in enumerate(candidates) if not c["is_standard"])]
+                candidates.insert(0, challenger)
     winner = candidates[0]
     _name_and_explain(candidates, winner, standard, profile, "streets without sidewalks" if router.graph.mode == "walk" else "busy streets")
     return {"profile": profile.name, "winner": winner, "candidates": candidates}

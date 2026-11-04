@@ -67,6 +67,7 @@ from app.geo import (
     destination_point,
     haversine_m,
 )
+from app.kept import Kept
 from app.models import LatLng
 from app.overpass import BBox
 from app.usage import DailyUsage
@@ -196,8 +197,7 @@ def in_area(events: Sequence[RoadEvent], area: BBox) -> list[RoadEvent]:
     return [events[event] for event in np.unique(owner[inside]).tolist()]
 
 
-_POINTS_KEPT = 8
-_kept_points: dict[int, tuple[Sequence[RoadEvent], tuple[np.ndarray, np.ndarray, np.ndarray]]] = {}
+_kept_points: Kept[tuple[Sequence[RoadEvent], tuple[np.ndarray, np.ndarray, np.ndarray]]] = Kept(8)
 
 
 def _event_points(events: Sequence[RoadEvent]) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
@@ -208,9 +208,7 @@ def _event_points(events: Sequence[RoadEvent]) -> tuple[np.ndarray, np.ndarray, 
     lat, lng = columns([point for event in events for point in event.path])
     owner = np.repeat(np.arange(len(events)), [len(event.path) for event in events])
     if isinstance(events, tuple):
-        if len(_kept_points) >= _POINTS_KEPT:
-            _kept_points.pop(next(iter(_kept_points)), None)
-        _kept_points[id(events)] = (events, (lat, lng, owner))
+        _kept_points.put(id(events), (events, (lat, lng, owner)))
     return lat, lng, owner
 
 
@@ -1151,8 +1149,7 @@ class _EventTable:
         self.delayed = np.fromiter((event.delay_min > 0 and len(event.path) > 1 for event in events), dtype=np.bool_, count=count)
 
 
-_TABLES_KEPT = 16
-_event_tables: dict[int, tuple[tuple[RoadEvent, ...], _EventTable]] = {}
+_event_tables: Kept[tuple[tuple[RoadEvent, ...], _EventTable]] = Kept(16)
 
 
 def _event_table(events: Iterable[RoadEvent]) -> _EventTable:
@@ -1163,9 +1160,7 @@ def _event_table(events: Iterable[RoadEvent]) -> _EventTable:
     if kept is not None and kept[0] is events:
         return kept[1]
     table = _EventTable(events)
-    if len(_event_tables) >= _TABLES_KEPT:
-        _event_tables.pop(next(iter(_event_tables)), None)
-    _event_tables[id(events)] = (events, table)
+    _event_tables.put(id(events), (events, table))
     return table
 
 

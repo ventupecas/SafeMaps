@@ -41,6 +41,7 @@ from app.features import (
 )
 from app.fuel import SIGNAL_L, TURN_L, cruise_liters_each
 from app.geo import Point, encode_polyline, haversine_m, initial_bearings_deg
+from app.kept import Kept
 from app.models import SIGNALED_CROSSING_SHARE, ScoringProfile
 from app.road_events import MAX_SLOWDOWN, WORKERS_PRESENT_FACTOR, RoadEvent
 from app.roadgraph import DEFAULT_SPEED_FACTOR, RoadGraph
@@ -54,19 +55,13 @@ FREEWAY_CLASSES = frozenset({"motorway", "trunk"})
 # MAX_OVERLAP of its length with each earlier one, so it takes a different
 # corridor rather than a block-long detour, and its true cost is within
 # MAX_COST_RATIO of the best route's. Alternatives may be much slower: the
-# ranking says so, and the driver chooses.
+# ranking says so, and the driver chooses. Each search is exact: an alternative
+# found by cutting corners can be a less safe one.
 ALTERNATIVE_PENALTY = 2.0
 MAX_OVERLAP = 0.5
 MAX_COST_RATIO = 2.0
 ALTERNATIVE_SEARCHES_PER_ROUTE = 3
-# The longer the trip, the longer each search: fewer alternatives, so a long trip stays worth waiting for.
-# The first search, the best route, is always made. (Straight-line km, at most routes, at most searches.)
-SEARCH_BUDGETS = ((20.0, 2, 3), (8.0, 3, 5))
 EDGE_COSTS_KEPT = 6  # segment and step costs kept per router, by profile: about 15 MB each on Milwaukee's car map
-# Searches for alternatives inflate the A* estimate by this factor: much
-# faster on penalized costs, and an alternative needs to be good and
-# different, not provably the best. The first design's search stays exact.
-ALTERNATIVE_SEARCH_GREED = 1.5
 # How far past the trip's start the search back from the destination goes (see kernel.reverse_bound), as a
 # multiple of the road-only cost from there: farther, and more is settled than the forward search ever looks at.
 BOUND_REACH = 1.5
@@ -183,15 +178,6 @@ RIGHT_TURNS = ("TURN_RIGHT", "TURN_SLIGHT_RIGHT", "TURN_SHARP_RIGHT", "UTURN_RIG
 KNOWN_ROUTES_KEPT = 5000  # routes whose road lengths the graph remembers (graph.known_road_lengths)
 
 
-def _search_budget(km: float, count: int) -> tuple[int, int]:
-    """How many of the count routes asked for to look for on a trip this long, in how many searches."""
-    searches = count * ALTERNATIVE_SEARCHES_PER_ROUTE
-    for longer_than, most_routes, most_searches in SEARCH_BUDGETS:
-        if km >= longer_than:
-            return min(count, most_routes), min(searches, most_searches)
-    return count, searches
-
-
 class Router:
     _with_crossings = False  # the bike and walking maps' steps also count crossings and crash spots (app.bike)
     _crash_spot_min = math.inf
@@ -208,8 +194,8 @@ class Router:
         self._freeway = flags(FREEWAY_CLASSES)
         self._cut_through = flags(CUT_THROUGH_CLASSES)
         self._connector = graph.column("length_m") < CONNECTOR_MAX_M
-        self._kept_costs: dict[str, np.ndarray] = {}
-        self._kept_step_costs: dict[Any, np.ndarray] = {}
+        self._kept_costs: Kept[np.ndarray] = Kept(EDGE_COSTS_KEPT)
+        self._kept_step_costs: Kept[np.ndarray] = Kept(EDGE_COSTS_KEPT)
         self._crashes: np.ndarray | None = None
         self._event_edges: dict[tuple[Any, ...], frozenset[int]] = {}
         self._bearings: np.ndarray | None = None
@@ -232,6 +218,7 @@ class Router:
         events: Sequence[RoadEvent] = (),
         school_hours: bool = False,
         sun: Sun | None = None,
+        direct_per_km: float = 0.0,
     ) -> list[RoutedPath]:
         """Up to count distinct routes for this profile, best first.
 
@@ -245,6 +232,8 @@ class Router:
         under the car), and the rest cost more (see JAM_FACTOR and below).
         During school_hours, school zones cost more too (see SCHOOL_ZONE_KMH),
         and with sun (its azimuth and elevation) low, so do roads heading into it.
+        With direct_per_km, the alternatives are looked for heading straight for
+        the destination: see kernel.search's straight_per_km.
         """
         g = self.graph
         departures = self._departures(origin, heading)
@@ -256,7 +245,7 @@ class Router:
             return []
 
         costs = self._trip_costs(profile, events, keep=departures, school_hours=school_hours, sun=sun)
-        count, searches = _search_budget(haversine_m(origin, destination) / 1000, count)
+        goal_lat, goal_lng = g.point(end)
         on_offer = [edges for edges in (g.edges_along(points) for points in avoid) if edges]
         table = self._steps()
         step_costs = self._step_costs(costs)
@@ -279,7 +268,7 @@ class Router:
         )
         searched = costs.edges  # with the penalties, a copy, once there are any
         found: list[RoutedPath] = []
-        for _ in range(searches):
+        for _ in range(count * ALTERNATIVE_SEARCHES_PER_ROUTE):
             path, codes, taken, _opened = kernel.search(
                 starts,
                 end,
@@ -295,7 +284,11 @@ class Router:
                 left,
                 marks,
                 radius,
-                ALTERNATIVE_SEARCH_GREED if found else 1.0,
+                direct_per_km if found else 0.0,
+                goal_lat,
+                goal_lng,
+                g.column("lat"),
+                g.column("lng"),
                 np.zeros(g.edge_count),
                 np.zeros(g.edge_count, dtype=np.int32),
                 np.zeros(g.edge_count, dtype=np.int32),
@@ -403,9 +396,7 @@ class Router:
         kept = self._kept_step_costs.get(costs.key)
         if kept is None:
             kept = self._build_step_costs(costs)
-            if len(self._kept_step_costs) >= EDGE_COSTS_KEPT:
-                self._kept_step_costs.pop(next(iter(self._kept_step_costs)), None)
-            self._kept_step_costs[costs.key] = kept
+            self._kept_step_costs.put(costs.key, kept)
         return kept
 
     def _build_step_costs(self, costs: _Costs) -> np.ndarray:
@@ -700,9 +691,7 @@ class Router:
         kept = self._kept_costs.get(key)
         if kept is None:
             kept = self._edge_costs(profile)
-            if len(self._kept_costs) >= EDGE_COSTS_KEPT:
-                self._kept_costs.pop(next(iter(self._kept_costs)), None)
-            self._kept_costs[key] = kept
+            self._kept_costs.put(key, kept)
         return kept
 
     def _edge_costs(self, profile: ScoringProfile) -> np.ndarray:

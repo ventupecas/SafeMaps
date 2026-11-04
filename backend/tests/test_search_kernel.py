@@ -20,7 +20,7 @@ from app.features import HIGHWAY_SPEED_KMH, TurnContext, crosses_traffic
 from app.fuel import SIGNAL_L, cruise_liters
 from app.geo import angle_between_deg, initial_bearing_deg
 from app.hotspots import CrashHotspots
-from app.models import ScoringProfile
+from app.models import LatLng, ScoringProfile
 from app.road_events import RoadEvent
 from app.roadgraph import JUNCTION_KINDS, RoadGraph, build_graph, classify_junction
 from app.router import BOUND_REACH, CONNECTOR_MAX_M, MAX_COST_RATIO, MAX_OVERLAP, RAIL_CROSSING_S, Router, UTURN_MIN_DEG
@@ -503,3 +503,43 @@ def test_every_way_a_short_connector_is_used_has_a_plain_search_behind_it():
             expected = plain_search(router, departures, end, costs)
             if expected is not None:
                 assert found[0].cost == pytest.approx(expected, rel=1e-9, abs=1e-9)
+
+
+@pytest.mark.parametrize("seed", SEEDS[:6])
+def test_a_walks_direct_routes_only_ever_improve_the_recommendation(seed, monkeypatch):
+    rng = random.Random(7000 + seed)
+    graph = random_city(seed, mode="walk")
+    router = bike.BikeRouter(graph, TurnContext(hotspots=CrashHotspots([(graph.point(rng.randrange(graph.node_count)), 1) for _ in range(4)])))
+    direct_routes = router.direct_routes
+
+    def rank(plan):
+        winner = plan["winner"]
+        return (not winner["eligible"], -winner["safety_score"], winner["features"]["duration_min"])
+
+    for (a, b), profile in zip(trips(graph, rng, 15), [*bike.WALK_PROFILES.values()] * 5, strict=True):
+        origin, destination = LatLng(lat=a[0], lng=a[1]), LatLng(lat=b[0], lng=b[1])
+        sun = rng.choice((None, (0.0, -30.0)))
+        try:
+            monkeypatch.setattr(router, "direct_routes", lambda *args, **kwargs: [])
+            without = bike.plan(router, origin, destination, profile, sun=sun)
+        except LookupError:
+            continue
+        monkeypatch.setattr(router, "direct_routes", direct_routes)
+        with_direct = bike.plan(router, origin, destination, profile, sun=sun)
+        assert rank(with_direct) <= rank(without)
+        ids = [candidate["id"] for candidate in with_direct["candidates"]]
+        assert len(ids) == len(set(ids)) and len(ids) <= bike.ROUTES_SHOWN
+        assert with_direct["candidates"][0] is with_direct["winner"]
+        assert [c["id"] for c in with_direct["candidates"] if c["is_standard"]] == [c["id"] for c in without["candidates"] if c["is_standard"]]
+
+
+@pytest.mark.parametrize("seed", SEEDS[:4])
+def test_direct_routes_are_real_routes(seed):
+    rng = random.Random(8000 + seed)
+    graph = random_city(seed, mode="walk")
+    router = bike.BikeRouter(graph)
+    profile = bike.WALK_PROFILES["everyday"]
+    costs = router._trip_costs(profile, [], keep=[], school_hours=False, sun=None)
+    for origin, destination in trips(graph, rng, 15):
+        for path in router.direct_routes(origin, destination, profile):
+            walk_path_and_check(router, path, costs)

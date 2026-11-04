@@ -19,6 +19,8 @@ from typing import NamedTuple
 import numpy as np
 from numba import njit
 
+from app.geo_kernel import haversine
+
 # How a segment is entered. The codes index the tables Router builds from these names.
 MANEUVERS = (
     "STRAIGHT",
@@ -564,13 +566,20 @@ def search(
     distance,
     marks,
     radius,
-    greed,
+    straight_per_km,
+    goal_lat,
+    goal_lng,
+    node_lat,
+    node_lng,
     best,
     reached_by,
     came_from,
 ):
     """A* over segments: a state is "arrived at this junction along this segment", which is what makes turn costs
-    and turn restrictions possible. With greed 1 it finds the cheapest route; greed > 1 trades that for speed.
+    and turn restrictions possible. It finds the cheapest route.
+
+    With straight_per_km above 0, what's left is instead that much per km in a straight line to the goal. Set above
+    a true lower bound, it heads for the goal more directly than the cheapest route does: the way to find direct routes.
 
     best, reached_by and came_from are all zeros on the way in, so only what's touched costs memory. reached_by
     holds, per segment, the step reaching it plus 2 (1 for a departure, 0 for not reached). Returns the route: its
@@ -589,9 +598,11 @@ def search(
         left = distance[node] if marks[node] & _SETTLED else radius
         if left == np.inf:
             continue
+        if straight_per_km > 0.0:
+            left = straight_per_km * haversine(node_lat[node], node_lng[node], goal_lat, goal_lng) / 1000
         best[edge] = cost
         reached_by[edge] = 1
-        _push(priorities, costs, items, size, cost + greed * left, cost, edge)
+        _push(priorities, costs, items, size, cost + left, cost, edge)
         size += 1
 
     opened = 0
@@ -622,13 +633,15 @@ def search(
             left = distance[node] if marks[node] & _SETTLED else radius
             if left == np.inf:
                 continue
+            if straight_per_km > 0.0:
+                left = straight_per_km * haversine(node_lat[node], node_lng[node], goal_lat, goal_lng) / 1000
             best[last] = new
             reached_by[last] = s + 2
             came_from[last] = edge
             if size == capacity:
                 priorities, costs, items = _grown(priorities), _grown(costs), _grown(items)
                 capacity *= 2
-            _push(priorities, costs, items, size, new + greed * left, new, last)
+            _push(priorities, costs, items, size, new + left, new, last)
             size += 1
 
     if final < 0:
