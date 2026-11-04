@@ -135,9 +135,9 @@ Leave this window open all day: closing it stops the app.
 ```
 
 - **No `--reload`:** that option is for development. Without it, a stray file save can't restart the server mid-demo. It also keeps checking every file for changes, which uses a lot of the computer over a long day.
-- **Many visitors at once? Add `--workers 2` (or 3).** One server process plans about 8 trips a minute, one at a time: with 5 visitors at once, the last waits about 40 seconds; with 30, trips time out. Each extra worker plans trips alongside, but loads its own copy of the road map, about 1.2 GB of memory each, so only add workers the computer has memory for (Task Manager, Performance, Memory: "Available"). Measure with the load test below.
+- **Many visitors at once? Add `--workers 2` (or 3).** One server process plans about 8 trips a minute, one at a time: with 5 visitors at once, the last waits about 40 seconds; with 30, trips time out. Each extra worker plans trips alongside, but loads its own copy of the maps, about 2 GB of memory each at first and over 3 GB once it has planned many long trips, so only add workers the computer has memory for (Task Manager, Performance, Memory: "Available"). Measure with the load test below.
 - **Keep `--port 3143`:** the map key only works on that port.
-- **Wait for "Ready for trips":** the window prints `Started: ...` at once, then `Ready for trips: ... matched to the map in N s` about a minute later. Trips work before that, just slower.
+- **Wait for "Ready for trips":** the window prints `Started: ...` at once, then `Ready for trips: ... matched to the map in N s` about 3 minutes later. Trips work before that, just slower.
 - **Restarted within 10 minutes?** TomTom's last answer is reused, so a restart doesn't use another TomTom request.
 
 ### Check it's healthy
@@ -155,7 +155,7 @@ Look for:
 - `wi511_key_set: true` (once you have the 511 key)
 - `tomtom_key_set: true` (on the OpenStreetMap map)
 - `transit` showing `ready: true` (a minute or two after starting), for bus trips
-- `matched_ahead: true`: the closures and jams across the metro are matched to the road map, so trips don't wait for it. It takes about a minute after the server starts; check again if it's still `false`.
+- `matched_ahead: true`: the closures and jams across the metro are matched to the road map, so trips don't wait for it. It takes about 3 minutes after the server starts; check again if it's still `false`.
 - `google_requests_today` well under your daily limit, and `tomtom_requests_today` under 80
 
 ### Turn on demo mode on the booth screen

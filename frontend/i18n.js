@@ -405,6 +405,7 @@ const PHRASES = [
   ["No bike route was found between these points.", "No se encontró una ruta en bicicleta entre estos puntos."],
   ["No walking route was found between these points.", "No se encontró una ruta a pie entre estos puntos."],
   ["The server has no bike map.", "El servidor no tiene el mapa para bicicletas."],
+  ["This walk is over 5 miles. Try Transit or Bike for a trip this long.", "Esta caminata es de más de 8 km. Para un viaje tan largo, prueba Transporte público o Bicicleta."],
   ["The server has no walking map.", "El servidor no tiene el mapa para caminar."],
 
   // Transit mode

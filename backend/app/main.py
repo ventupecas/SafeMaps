@@ -36,6 +36,7 @@ from collections.abc import AsyncIterator, Sequence
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta
+from itertools import pairwise
 from threading import Lock, Thread
 from typing import Any, Literal
 
@@ -63,7 +64,7 @@ from app.engine import (
 )
 from app.features import TurnContext
 from app.feedback import FeedbackLog
-from app.geo import decode_polyline, encode_polyline
+from app.geo import decode_polyline, encode_polyline, haversine_m
 from app.hotspots import CrashHotspots
 from app.models import LatLng, RoutePlan, ScoringProfile
 from app.overpass import ATTRIBUTION
@@ -227,6 +228,7 @@ class ControlChange(BaseModel):
 
 
 BIKE_STRESS_MAX_SEGMENTS = 6000
+MAX_WALK_KM = 8.0  # about 5 miles in a straight line: past that, few walk it, and the search takes most of a minute
 
 
 class BikeTripRequest(BaseModel):
@@ -370,12 +372,14 @@ class Engine:
             router = self.router(make_turn_context(self.settings, self.hotspots, None, self.graph))
             for event in snapped:
                 router.event_edges(event)  # the router's own lookup, remembered too
+            self._practice_drive(router)
             # The bike and walking maps too, so their first trips don't wait a minute.
             for graph, routed in ((self.bike_graph, self.bike_router), (self.walk_graph, self.walk_router)):
                 if graph is not None:
                     active = routed()
                     for event in snapped:
                         active.event_edges(event)
+                    self._practice_trip(active, graph)
             logger.info(
                 "Ready for trips: %d closures, lane closures and jams from %s matched to the map in %.0f s",
                 len(report.events),
@@ -385,6 +389,31 @@ class Engine:
             self.warmed_up = True
         except Exception:  # a background nicety: trips still match what they need
             logger.exception("Matching road events ahead of trips failed")
+
+    def _practice_drive(self, router: Router) -> None:
+        """A short drive in the middle of the map, as _practice_trip: for the default profile and the
+        fastest, which is the standard route on the OpenStreetMap map."""
+        bbox = self.graph.bbox
+        lat, lng = (bbox.south + bbox.north) / 2, (bbox.west + bbox.east) / 2
+        for profile in (PRESETS[DEFAULT_PROFILE], PRESETS["fastest"]):
+            try:
+                router.routes((lat, lng), (lat + 0.01, lng + 0.01), profile, count=1)
+            except LookupError:
+                pass
+
+    @staticmethod
+    def _practice_trip(router: bike.BikeRouter, graph: RoadGraph) -> None:
+        """A short trip in the middle of the map, for what's built on first use (the everyday traveler's
+        segment costs by today's light, the map's indexes), so no visitor's first trip waits for it."""
+        if graph.bbox is None:
+            return
+        lat, lng = (graph.bbox.south + graph.bbox.north) / 2, (graph.bbox.west + graph.bbox.east) / 2
+        profile = (bike.PROFILES if graph.mode == "bike" else bike.WALK_PROFILES)[bike.DEFAULT_PROFILE]
+        sun = sun_position(datetime.now(), lat, lng)
+        try:
+            bike.plan(router, LatLng(lat=lat, lng=lng), LatLng(lat=lat + 0.01, lng=lng + 0.01), profile, sun=sun)
+        except (LookupError, ValueError):
+            pass  # no road right there: the trips still build what they need
 
     def routes_client(self) -> RoutesClient:
         # One client per request so its counters describe that request; the
@@ -579,7 +608,7 @@ def create_app(settings: Settings | None = None, *, http: httpx.Client | None = 
             "daily_limit": engine.usage.limit,
             "road_events": {
                 "order": list(settings.road_event_sources),
-                "matched_ahead": engine.warmed_up,  # false for a minute or so after startup
+                "matched_ahead": engine.warmed_up,  # false for about 3 minutes after startup
                 "wzdx": str(settings.wzdx_file.name) if settings.wzdx_file else settings.wzdx_url,
                 "wi511_key_set": engine.wi511 is not None,
                 "tomtom_key_set": engine.tomtom is not None,
@@ -964,6 +993,9 @@ def create_app(settings: Settings | None = None, *, http: httpx.Client | None = 
         profile = profiles.get(trip.profile)
         if profile is None:
             raise HTTPException(status_code=422, detail=f"Unknown {mode} profile {trip.profile!r}; choose from {', '.join(profiles)}.")
+        places = [trip.origin, *trip.stops, trip.destination]
+        if mode == "walk" and sum(haversine_m(a.as_tuple(), b.as_tuple()) for a, b in pairwise(places)) > MAX_WALK_KM * 1000:
+            raise HTTPException(status_code=422, detail="This walk is over 5 miles. Try Transit or Bike for a trip this long.")
         departure = datetime.now() + timedelta(minutes=trip.departure_offset_min)
         report = collect_road_events(
             sources_for_map(settings.road_event_sources, settings.map),
@@ -977,7 +1009,6 @@ def create_app(settings: Settings | None = None, *, http: httpx.Client | None = 
         events = without_repeats(engine.snap(report.events))
         sun = make_turn_context(settings, None, None, None, now=departure, where=trip.origin).sun
         try:
-            places = [trip.origin, *trip.stops, trip.destination]
             router = engine.bike_router() if mode == "bike" else engine.walk_router()
             result = bike.plan_with_stops(router, places, profile, events=events, sun=sun)
         except (LookupError, ValueError) as exc:

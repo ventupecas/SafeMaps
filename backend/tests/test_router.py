@@ -302,3 +302,12 @@ def test_our_routes_are_named_from_their_own_roads_without_looking_them_up(graph
     )  # fmt: skip
     named = name_routes(RoutePlan(profile=FASTEST, winner=scored, candidates=[scored]), graph)
     assert named.winner.via == short_road_name(max(lengths, key=lengths.get))
+
+
+def test_longer_trips_look_for_fewer_alternatives():
+    from app.router import _search_budget
+
+    assert _search_budget(5.0, 3) == (3, 9)  # a short trip: all of them
+    assert _search_budget(12.0, 3) == (3, 5)
+    assert _search_budget(40.0, 3) == (2, 3)  # still an alternative to compare
+    assert _search_budget(40.0, 1) == (1, 3)
