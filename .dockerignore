@@ -1,0 +1,7 @@
+# Only what the image needs, so keys (.env, frontend/config.js) and the maps can't end up in it.
+*
+!backend/app
+!backend/requirements.txt
+!frontend
+frontend/config.js
+**/__pycache__

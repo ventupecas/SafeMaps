@@ -83,6 +83,8 @@ From `backend/`:
 
 Then open **http://127.0.0.1:3143** for the map, or **http://127.0.0.1:3143/docs** to try the API by hand. Keep `--port 3143`: the browser key only works on the addresses it's restricted to.
 
+Or in Docker, from the repo's top folder: `docker compose up -d --build`. The image holds only the code; `backend/.env`, `backend/data` and `backend/.cache` stay on the computer. `EXPO.md` has the details.
+
 | Endpoint | What it does |
 |---|---|
 | `GET /health` | What's loaded (road graph, crash data, cache mode) and today's Google usage |

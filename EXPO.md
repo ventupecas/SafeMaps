@@ -140,6 +140,24 @@ Leave this window open all day: closing it stops the app.
 - **Wait for "Ready for trips":** the window prints `Started: ...` at once, then `Ready for trips: ... matched to the map in N s` about 3 minutes later. Trips work before that, just slower.
 - **Restarted within 10 minutes?** TomTom's last answer is reused, so a restart doesn't use another TomTom request.
 
+### Or start it in Docker
+
+Instead of the command above, with Docker Desktop running, from the repo's top folder (`cd ..`, not `backend`):
+
+```powershell
+docker compose up -d --build     # build and start it, at the same address
+docker compose logs -f app       # wait for "Ready for trips", then Ctrl+C (the server keeps running)
+docker compose down              # stop it
+```
+
+- **Only one at a time:** both want port 3143, so stop any server started the other way first.
+- **It comes back by itself:** after a crash or a restart of Docker, until you run `docker compose down`.
+- **What isn't in the image:** `backend\.env`, `backend\data` (the maps) and `backend\.cache` (saved answers, today's request counts, stats) stay on the computer, so a new computer needs them copied too. After changing `backend\.env`, run `docker compose up -d --force-recreate`.
+- **Control page:** its switches need `ROUTES_ADMIN_CODE` in `backend\.env`, because a server in a container can't tell this computer from a visitor. Without the code they refuse; the page still shows the checks.
+- **Google's map (`ROUTES_MAP=google`):** remove the `#` from the `config.js` line in `docker-compose.yml`, so the page gets the browser's map key.
+- **More workers:** add `WEB_CONCURRENCY=2` to `backend\.env`, and raise `mem_limit` in `docker-compose.yml` to about 3.5 GB per worker. Docker Desktop can only give out what it has (Settings, Resources).
+- **Phones:** set `ROUTES_ACCESS_CODE` in `backend\.env` first, since the link is public. `docker compose --profile phones up -d` starts the tunnel in a container of its own, and `docker compose logs tunnel` shows its `trycloudflare.com` address. Then follow "Let visitors use their phones" from adding the address to the key.
+
 ### Check it's healthy
 
 From a second PowerShell window:

@@ -1,0 +1,25 @@
+# docker compose up -d --build            the planner, at http://127.0.0.1:3143
+# docker compose --profile phones up -d   and a public https link for phones (EXPO.md)
+name: routes
+
+services:
+  app:
+    build: .
+    image: safe-route-planner
+    env_file: backend/.env # the keys and settings, read when the container starts
+    ports:
+      - "127.0.0.1:3143:3143" # this computer only; keep 3143, the map key only works on that port
+    volumes:
+      - ./backend/data:/srv/routes/backend/data # the maps and crash data
+      - ./backend/.cache:/srv/routes/backend/.cache # saved answers, today's request counts, stats
+      # Google's map only (ROUTES_MAP=google): the browser's map key, kept out of the image.
+      # - ./frontend/config.js:/srv/routes/frontend/config.js:ro
+    mem_limit: 5g # planning many long trips reaches about 3.3 GB
+    restart: unless-stopped
+
+  tunnel:
+    profiles: [phones]
+    image: cloudflare/cloudflared:2026.9.3
+    command: tunnel --no-autoupdate --url http://app:3143
+    depends_on: [app]
+    restart: unless-stopped
