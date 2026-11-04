@@ -14,7 +14,7 @@ Either pool can then be ranked under any number of profiles.
 from __future__ import annotations
 
 from collections import defaultdict
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime, time
 from typing import Any
@@ -40,7 +40,7 @@ from app.pricing import design_match, price_route
 from app.fuel import CONGESTION_L_PER_HOUR
 from app.road_events import RoadEvent, delay_on_route, jams_on_routes
 from app.roadgraph import RoadGraph
-from app.router import OutsideGraphError, RoutedPath, Router
+from app.router import OutsideGraphError, RoutedPath, Router, soon
 from app.routes_client import RoutesApiError
 from app.scoring import rank_candidates, safety_risks, safety_score
 from app.sun import Sun, sun_position
@@ -179,9 +179,16 @@ def build_router_candidates(
     pool = CandidatePool([])
     if baseline is None:
         _add_google_suggestions(pool, fetcher, context, origin, destination, price, heading, traffic_on_polyline and price)
+        baseline_found = None
     else:
-        _add_baseline(pool, router, context, origin, destination, baseline, heading)
-    on_offer = [decode_polyline(candidate.encoded_polyline) for candidate in pool.candidates]
+        # On another core, while the search for the best design starts. The alternatives wait for it.
+        baseline_found = soon(lambda: _add_baseline(pool, router, context, origin, destination, baseline, heading))
+
+    def on_offer() -> list[list[Point]]:
+        if baseline_found is not None:
+            baseline_found.result()
+        return [decode_polyline(candidate.encoded_polyline) for candidate in pool.candidates]
+
     per_profile = alternatives if len(profiles) == 1 else 1
     try:
         paths = _unique_paths(
@@ -199,6 +206,8 @@ def build_router_candidates(
     except OutsideGraphError as exc:
         pool.notes.append(f"Own router skipped: {exc}.")
         paths = []
+    if baseline_found is not None:
+        baseline_found.result()
     _add_own_routes(pool, fetcher, router, context, origin, destination, paths, price, heading)
 
     if not pool.candidates:
@@ -480,7 +489,7 @@ def _unique_paths(
     profiles: Sequence[ScoringProfile],
     per_profile: int,
     *,
-    avoid: Sequence[Sequence[Point]],
+    avoid: Callable[[], Sequence[Sequence[Point]]],
     heading: int | None,
     events: Sequence[RoadEvent],
     school_hours: bool,

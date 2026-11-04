@@ -2,6 +2,8 @@
 *
 !backend/app
 !backend/requirements.txt
+!backend/rust_kernel
+backend/rust_kernel/target*
 !frontend
 frontend/config.js
 **/__pycache__

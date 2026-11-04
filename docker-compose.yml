@@ -14,7 +14,7 @@ services:
       - ./backend/.cache:/srv/routes/backend/.cache # saved answers, today's request counts, stats
       # Google's map only (ROUTES_MAP=google): the browser's map key, kept out of the image.
       # - ./frontend/config.js:/srv/routes/frontend/config.js:ro
-    mem_limit: 5g # planning many long trips reaches about 3.3 GB
+    mem_limit: 3g # about 1 GB when ready, 1.3 GB after a hundred trips
     restart: unless-stopped
 
   tunnel:

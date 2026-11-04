@@ -13,17 +13,16 @@ stretch it skipped gets a pin and Google is asked once more.
 
 from __future__ import annotations
 
-import math
-from collections import defaultdict
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from functools import partial
 from typing import Any
 
+import app.geo_kernel as kernel
 from app.cache import CacheMiss
 from app.candidates import RouteFetcher
 from app.features import HIGHWAY_SPEED_KMH
-from app.geo import Point, decode_polyline, densify, haversine_m, point_along
+from app.geo import Point, columns, decode_polyline, point_along
 from app.models import LatLng
 from app.roadgraph import RoadGraph
 from app.router import RoutedPath, Router
@@ -101,9 +100,9 @@ def design_match(designed: Sequence[Point], actual: Sequence[Point], tolerance_m
     """Share of the actual route lying within tolerance_m of the designed one."""
     if len(designed) < 2 or len(actual) < 2:
         return 0.0
-    index = _NearIndex(densify(designed, tolerance_m / 2), tolerance_m)
-    samples = densify(actual, 25.0)
-    return sum(1 for point in samples if index.near(point)) / len(samples)
+    index = _NearIndex(designed, tolerance_m)
+    lat, lng = kernel.densified(*columns(actual), 25.0)
+    return int(kernel.share_near(index.grid, lat, lng, tolerance_m, index.reach_lng)) / lat.size
 
 
 def _ask_google(
@@ -167,7 +166,7 @@ def _skipped_stretches(graph: RoadGraph, path: RoutedPath, actual: Sequence[Poin
     """One path index in the middle of each stretch of the design that the actual route doesn't follow."""
     if len(actual) < 2:
         return []
-    near = _NearIndex(densify(actual, MATCH_TOLERANCE_M / 2), MATCH_TOLERANCE_M)
+    near = _NearIndex(actual, MATCH_TOLERANCE_M)
     runs: list[list[int]] = []
     previous_off = False
     for index, edge in enumerate(path.edges):
@@ -207,24 +206,13 @@ def _midpoint(graph: RoadGraph, edge: int) -> ViaPoint:
 class _NearIndex:
     """Answers "is any indexed point within tolerance_m of this one?" with a grid lookup."""
 
-    def __init__(self, points: Sequence[Point], tolerance_m: float) -> None:
+    def __init__(self, path: Sequence[Point], tolerance_m: float) -> None:
+        """The path's points, close enough together that nothing beside it falls between them."""
         self.tolerance_m = tolerance_m
-        self.cell_deg = tolerance_m / _M_PER_DEG_LAT
-        self.cells: dict[tuple[int, int], list[Point]] = defaultdict(list)
-        for point in points:
-            self.cells[self._cell(point)].append(point)
+        lat, lng = kernel.densified(*columns(path), tolerance_m / 2)
+        self.grid = kernel.make_grid(lat, lng, tolerance_m / _M_PER_DEG_LAT)
         # Longitude cells are narrower than tolerance_m away from the equator.
-        latitude = points[0][0] if points else 0.0
-        self.reach_lng = math.ceil(1 / max(math.cos(math.radians(latitude)), 0.01))
+        self.reach_lng = kernel.reach_lng_at(float(lat[0]) if lat.size else 0.0)
 
     def near(self, point: Point) -> bool:
-        ci, cj = self._cell(point)
-        return any(
-            haversine_m(point, other) <= self.tolerance_m
-            for i in range(ci - 1, ci + 2)
-            for j in range(cj - self.reach_lng, cj + self.reach_lng + 1)
-            for other in self.cells.get((i, j), ())
-        )
-
-    def _cell(self, point: Point) -> tuple[int, int]:
-        return math.floor(point[0] / self.cell_deg), math.floor(point[1] / self.cell_deg)
+        return bool(kernel.any_within(self.grid, point[0], point[1], self.tolerance_m, self.reach_lng))

@@ -23,16 +23,20 @@ streets, long detours accepted), confident (busier streets are fine) or e-bike (
 from __future__ import annotations
 
 import math
-from array import array
 from collections.abc import Sequence
 from dataclasses import dataclass, replace
+from functools import partial
 
+import numpy as np
+
+import app.search_kernel as kernel
 from app.features import TurnContext, directions
 from app.geo import encode_polyline
+from app.kept import Kept
 from app.models import LatLng, ScoringProfile
 from app.road_events import RoadEvent
 from app.roadgraph import BIKE_SPEED_KMH, WALK_SPEED_KMH, RoadGraph
-from app.router import RoutedPath, Router, _Costs
+from app.router import RoutedPath, Router, _Costs, side_by_side
 from app.sun import DARK_TURN_FACTOR, Sun, dark
 
 
@@ -80,9 +84,11 @@ RISK_POINTS = {
     "closures": 30.0,
 }
 SAFETY_SCALE = 10.0
-LEFT_TURNS = ("TURN_LEFT", "TURN_SLIGHT_LEFT", "TURN_SHARP_LEFT", "UTURN_LEFT")
-RIGHT_TURNS = ("TURN_RIGHT", "TURN_SLIGHT_RIGHT", "TURN_SHARP_RIGHT", "UTURN_RIGHT")
-BASE_COSTS_KEPT = 4  # segment costs kept per router, by traveler and dark: 10 MB each on Milwaukee's walking map
+# A walk's alternatives are also looked for heading straight for the destination, estimating what's left at this
+# many times the fastest walk there: routes the search for the cheapest passes over, and now and then a safer one.
+DIRECT_WALK_GREED = 1.5
+ROUTES_SHOWN = 4  # the standard route and three designs
+BASE_COSTS_KEPT = 16  # segment costs kept per router, by traveler and dark: 10 MB each on Milwaukee's walking map
 MIN_CRASHES = 1.0  # fatal cyclist crashes (FARS) are rare: one near a junction counts
 
 
@@ -95,12 +101,16 @@ class _BikeTrip:
 class BikeRouter(Router):
     """The car router's search, costed for a rider (see the module docstring)."""
 
+    _with_crossings = True
+    _crash_spot_min = MIN_CRASHES
+
     def __init__(self, graph: RoadGraph, context: TurnContext = TurnContext()) -> None:
         if graph.mode not in MAP_SPEED_KMH:
             raise ValueError("BikeRouter needs the bike or walking map (python -m app.build_graph <area> --bike or --walk)")
         super().__init__(graph, context)
-        self._crossings: dict[tuple[int, int, str], int] = {}
-        self._base_costs: dict[tuple[BikeProfile, bool], array] = {}
+        self._cut_through = np.zeros_like(self._cut_through)  # quiet service roads and alleys are welcome on a bike
+        self._base_costs: Kept[np.ndarray] = Kept(BASE_COSTS_KEPT)
+        self._crossings: kernel.Crossings | None = None
 
     def bike_routes(
         self,
@@ -118,26 +128,31 @@ class BikeRouter(Router):
     def _trip_costs(self, profile, events, *, keep, school_hours=False, sun=None) -> _Costs:  # type: ignore[override]
         g = self.graph
         slower = MAP_SPEED_KMH[g.mode] / profile.speed_kmh  # the map's times are at its own speed
-        weights = profile.stress_weights
-        edges = array("d", self._base(profile, dark(sun)))  # a copy: this trip's closures change it
-        keep = set(keep)
+        weights = np.array(profile.stress_weights)
+        edges = self._base(profile, dark(sun)).copy()  # a copy: this trip's closures change it
+        keep = np.fromiter(keep, dtype=np.int64)
         for event in events:
-            for edge in self.event_edges(event):
-                if event.kind == "closed" and edge not in keep:
-                    edges[edge] = math.inf
-                elif event.kind == "lanes":
-                    # A lane closure squeezes the rider into traffic: one stress level worse.
-                    level = max(1, g.stress[edge])
-                    edges[edge] *= weights[min(4, level + 1) - 1] / weights[level - 1]
-                elif event.kind == "hazard":
-                    edges[edge] *= 2.0  # fog, ice, flooding: slower and riskier on a bike
-        # The search's lower bound: no segment costs less than its time at the map's fastest speed.
+            on_it = self._event_array(event)
+            if event.kind == "closed":
+                edges[on_it[~np.isin(on_it, keep)]] = math.inf
+            elif event.kind == "lanes":
+                # A lane closure squeezes the rider into traffic: one stress level worse.
+                level = np.maximum(1, g.column("stress")[on_it])
+                edges[on_it] *= weights[np.minimum(4, level + 1) - 1] / weights[level - 1]
+            elif event.kind == "hazard":
+                edges[on_it] *= 2.0  # fog, ice, flooding: slower and riskier on a bike
+        # What a turn takes and how it feels to a rider, whatever else is on the road.
         search = ScoringProfile(time_weight=slower, fuel_weight=0.0, maneuver_weight=0.3, busy_crossing_weight=0.0, hotspot_crossing_weight=0.0)
         return _Costs(
-            profile=search, edges=edges, table=self._turn_table(search), zones={}, zone_costs={}, extra=_BikeTrip(profile, dark(sun))
+            profile=search,
+            edges=edges,
+            table=self._turn_table(search),
+            zone_costs={},
+            key=(profile, dark(sun)),
+            extra=_BikeTrip(profile, dark(sun)),
         )
 
-    def _base(self, profile: BikeProfile, night: bool) -> array:
+    def _base(self, profile: BikeProfile, night: bool) -> np.ndarray:
         """Each segment's cost for this traveler, before road events: built once (a pass over every
         segment of the map) and kept for the next trips."""
         key = (profile, night)
@@ -145,27 +160,42 @@ class BikeRouter(Router):
         if base is None:
             g = self.graph
             slower = MAP_SPEED_KMH[g.mode] / profile.speed_kmh
-            weights = profile.stress_weights
-            base = array(
-                "d",
-                (
-                    g.time_s[edge] / 60 * slower * (weights[max(1, g.stress[edge]) - 1] + (profile.unlit_weight if night and not g.lit[edge] else 0.0))
-                    + g.rail_crossings[edge] * profile.rail_minutes
-                    for edge in range(g.edge_count)
-                ),
-            )
+            weights = np.array(profile.stress_weights)[np.maximum(1, g.column("stress")) - 1]
+            if night:
+                weights = weights + profile.unlit_weight * (g.column("lit") == 0)
+            base = g.column("time_s") / 60 * slower * weights + g.column("rail_crossings") * profile.rail_minutes
             if profile.avoid_steps and "steps" in g.classes:
-                steps = g.classes.index("steps")
-                for edge in range(g.edge_count):
-                    if g.road_class[edge] == steps:
-                        base[edge] = math.inf
-            if len(self._base_costs) >= BASE_COSTS_KEPT:
-                self._base_costs.pop(next(iter(self._base_costs)), None)
-            self._base_costs[key] = base
+                base[g.column("road_class") == g.classes.index("steps")] = math.inf
+            self._base_costs.put(key, base)
         return base
 
-    def _cut_through_cost(self, edge: int, nxt: int) -> float:
-        return 0.0  # quiet service roads and alleys are welcome on a bike
+    def direct_routes(
+        self,
+        origin: tuple[float, float],
+        destination: tuple[float, float],
+        profile: BikeProfile,
+        *,
+        count: int = 3,
+        events: Sequence[RoadEvent] = (),
+        sun: Sun | None = None,
+    ) -> list[RoutedPath]:
+        """Alternatives that head straight for the destination, for the traveler to compare with the cheapest ones."""
+        g = self.graph
+        minutes_per_km = MAP_SPEED_KMH[g.mode] / profile.speed_kmh * 60.0 / float(g.column("speed_kmh").max())
+        found = self.routes(origin, destination, profile, count=count, events=events, sun=sun, direct_per_km=DIRECT_WALK_GREED * minutes_per_km)  # type: ignore[arg-type]
+        return found[1:]
+
+    def _step_costs(self, costs: _Costs) -> np.ndarray:
+        steps = self._steps()
+        trip: _BikeTrip = costs.extra
+        minutes = trip.profile.crossing_minutes
+        night = DARK_TURN_FACTOR if trip.dark else 1.0
+        return (
+            super()._step_costs(costs)
+            + steps.cross_3 * (minutes[0] * night)
+            + steps.cross_4 * (minutes[1] * night)
+            + steps.crash_spots * trip.profile.crash_minutes
+        )
 
     def _step_cost(self, edge: int, step, costs: _Costs, penalties: dict[int, float]) -> float:
         cost = super()._step_cost(edge, step, costs, penalties)
@@ -185,25 +215,9 @@ class BikeRouter(Router):
         that the rider isn't riding along (going straight across or turning left across it), and the road
         being left when turning left across its own oncoming lanes. 0 where a signal controls the junction,
         or for a right turn, which crosses no traffic."""
-        key = (edge, nxt, maneuver)
-        known = self._crossings.get(key)
-        if known is not None:
-            return known
-        g = self.graph
-        node = g.edge_to[edge]
-        stress = 0
-        if node not in self._signal_nodes and not maneuver.startswith(RIGHT_TURNS):
-            riding = {g.way_id[edge], g.way_id[nxt]}
-            names = {g.name[edge], g.name[nxt]} - {0}
-            for other in (*g.out_edges[node], *g.in_edges[node]):
-                if g.way_id[other] not in riding and not (g.name[other] and g.name[other] in names):
-                    stress = max(stress, g.cross[other])
-            if maneuver.startswith(LEFT_TURNS):
-                stress = max(stress, g.cross[edge])
-        if len(self._crossings) > 200_000:
-            self._crossings.clear()
-        self._crossings[key] = stress
-        return stress
+        if self._crossings is None:
+            self._crossings = self._crossing_columns()
+        return int(kernel.crossing_stress(edge, nxt, kernel.MANEUVER_CODES[maneuver], self._crossings))
 
 
 # ---- A route's features, its safety score, and the plan
@@ -290,9 +304,14 @@ def plan(
 ) -> dict:
     """Bike routes for one trip, best first: {"winner", "candidates"}, each candidate a dict the page draws."""
     start, end = origin.as_tuple(), destination.as_tuple()
-    # The shortest at the traveler's own speed, so turns weigh against minutes as they do for them.
-    shortest = router.bike_routes(start, end, replace(SHORTEST, speed_kmh=profile.speed_kmh), count=1, events=events, sun=sun)
-    designs = router.bike_routes(start, end, profile, count=3, events=events, sun=sun)
+    searches = [
+        # The shortest at the traveler's own speed, so turns weigh against minutes as they do for them.
+        partial(router.bike_routes, start, end, replace(SHORTEST, speed_kmh=profile.speed_kmh), count=1, events=events, sun=sun),
+        partial(router.bike_routes, start, end, profile, count=3, events=events, sun=sun),
+    ]
+    if router.graph.mode == "walk":
+        searches.append(partial(router.direct_routes, start, end, profile, count=3, events=events, sun=sun))
+    shortest, designs, *also = side_by_side(searches)
     after_dark = dark(sun)
     paths: list[tuple[str, RoutedPath]] = []
     seen: set[tuple[int, ...]] = set()
@@ -304,33 +323,45 @@ def plan(
         raise LookupError("No bike route was found between these points.")
 
     junctions = TurnContext(junctions=router.graph)
-    candidates = []
-    for route_id, path in paths:
+
+    def candidate(route_id: str, path: RoutedPath) -> dict:
         route = router.to_route_json(path)
         features = route_features(router, path, profile, events, after_dark)
         score, risks = safety(features)
         lengths = router.graph.known_road_lengths.get(route["polyline"]["encodedPolyline"], {})
-        candidates.append(
-            {
-                "id": route_id,
-                "source": "own" if route_id != "standard" else "baseline",
-                "is_standard": route_id == "standard",
-                "encoded_polyline": route["polyline"]["encodedPolyline"],
-                "road_lengths": lengths,
-                "features": features,
-                "safety_score": score,
-                "safety_risks": risks,
-                "maneuvers": [m.model_dump() for m in directions(route, junctions)],
-                "stress_segments": stress_segments(router, path),
-            }
-        )
+        return {
+            "id": route_id,
+            "source": "own" if route_id != "standard" else "baseline",
+            "is_standard": route_id == "standard",
+            "encoded_polyline": route["polyline"]["encodedPolyline"],
+            "road_lengths": lengths,
+            "features": features,
+            "safety_score": score,
+            "safety_risks": risks,
+            "maneuvers": [m.model_dump() for m in directions(route, junctions)],
+            "stress_segments": stress_segments(router, path),
+        }
 
+    def rank(c: dict) -> tuple:
+        return (not c["eligible"], -c["safety_score"], c["features"]["duration_min"])
+
+    candidates = [candidate(route_id, path) for route_id, path in paths]
     standard = candidates[0] if candidates[0]["is_standard"] else None
     shortest_min = standard["features"]["duration_min"] if standard else min(c["features"]["duration_min"] for c in candidates)
     limit_min = min(shortest_min * profile.max_detour_ratio, shortest_min + profile.max_extra_min)
-    for candidate in candidates:
-        candidate["eligible"] = candidate["is_standard"] or candidate["features"]["duration_min"] <= limit_min + 1e-9
-    candidates.sort(key=lambda c: (not c["eligible"], -c["safety_score"], c["features"]["duration_min"]))
+    for c in candidates:
+        c["eligible"] = c["is_standard"] or c["features"]["duration_min"] <= limit_min + 1e-9
+    candidates.sort(key=rank)
+    if router.graph.mode == "walk":
+        # One takes the lead only by beating the best so far, so the recommendation can only get better.
+        direct = (path for path in also[0] if path.edges not in seen)
+        for number, path in enumerate(direct, start=1):
+            challenger = candidate(f"direct-{number}", path)
+            challenger["eligible"] = challenger["features"]["duration_min"] <= limit_min + 1e-9
+            if rank(challenger) < rank(candidates[0]):
+                if len(candidates) >= ROUTES_SHOWN:
+                    del candidates[max(i for i, c in enumerate(candidates) if not c["is_standard"])]
+                candidates.insert(0, challenger)
     winner = candidates[0]
     _name_and_explain(candidates, winner, standard, profile, "streets without sidewalks" if router.graph.mode == "walk" else "busy streets")
     return {"profile": profile.name, "winner": winner, "candidates": candidates}

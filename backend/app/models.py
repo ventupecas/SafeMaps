@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field, computed_field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, FiniteFloat, computed_field, model_validator
 
 
 class LatLng(BaseModel):
@@ -48,7 +48,7 @@ class ScoringProfile(BaseModel):
     max_detour_ratio stops that from turning into a long detour.
     """
 
-    model_config = ConfigDict(frozen=True, extra="forbid")
+    model_config = ConfigDict(frozen=True, extra="forbid", allow_inf_nan=False)
 
     name: str = "custom"
     time_weight: float = Field(1.0, ge=0, description="Perceived minutes per minute of trip time.")

@@ -42,9 +42,11 @@ from typing import Any, Literal
 
 import httpx
 from fastapi import FastAPI, Header, HTTPException, Request, Response
+from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, FiniteFloat
 
 from app.cache import CacheMiss
 from app.candidates import CandidateOptions
@@ -126,7 +128,7 @@ class TripRequest(BaseModel):
         description="Leave this many minutes from now. School zones and sun glare are judged at that time; "
         "traffic and closures are today's as they are now.",
     )
-    weights: dict[str, float] = Field(
+    weights: dict[str, FiniteFloat] = Field(
         default_factory=dict, description='Overrides for the preset\'s weights, e.g. {"busy_crossing_weight": 4}.'
     )
     country_code: str | None = Field(
@@ -228,7 +230,7 @@ class ControlChange(BaseModel):
 
 
 BIKE_STRESS_MAX_SEGMENTS = 6000
-MAX_WALK_KM = 8.0  # about 5 miles in a straight line: past that, few walk it, and the search takes most of a minute
+MAX_WALK_KM = 8.0  # about 5 miles in a straight line: past that, few walk it
 
 
 class BikeTripRequest(BaseModel):
@@ -349,16 +351,23 @@ class Engine:
         return snapped
 
     def warm_up(self) -> None:
-        """Fetch the road events across the whole road map and match them to it, so trips don't wait for it.
+        """Get everything ready ahead of the first trip: each map's turns, and the road events.
 
-        Matching takes a search per event, about 30 s for the metro's work zones
-        and TomTom's closures, so the server does it once at startup, in the
-        background. The paid sources (apify) and Google's are left out.
+        The turns come first, as they're quick, so a trip made while the rest
+        gets ready is quick too. Then the road events across the
+        whole road map are fetched and matched to it, once, in the background, so
+        trips don't wait for it. The paid sources (apify) and Google's are left out.
         """
         if self.graph is None or self.graph.bbox is None:
             return
         started = time.perf_counter()
         try:
+            driving = self.router(make_turn_context(self.settings, self.hotspots, None, self.graph))
+            self._practice_drive(driving)
+            # The bike and walking maps too, so their first trips don't wait.
+            maps = [(graph, routed()) for graph, routed in ((self.bike_graph, self.bike_router), (self.walk_graph, self.walk_router)) if graph is not None]
+            for graph, active in maps:
+                self._practice_trip(active, graph)
             report = collect_road_events(
                 sources_for_map(self.settings.road_event_sources, self.settings.map),
                 self.graph.bbox,
@@ -369,17 +378,9 @@ class Engine:
                 google_ready=False,
             )
             snapped = self.snap(report.events)
-            router = self.router(make_turn_context(self.settings, self.hotspots, None, self.graph))
-            for event in snapped:
-                router.event_edges(event)  # the router's own lookup, remembered too
-            self._practice_drive(router)
-            # The bike and walking maps too, so their first trips don't wait a minute.
-            for graph, routed in ((self.bike_graph, self.bike_router), (self.walk_graph, self.walk_router)):
-                if graph is not None:
-                    active = routed()
-                    for event in snapped:
-                        active.event_edges(event)
-                    self._practice_trip(active, graph)
+            for active in (driving, *(active for _, active in maps)):
+                for event in snapped:
+                    active.event_edges(event)  # the router's own lookup, remembered too
             logger.info(
                 "Ready for trips: %d closures, lane closures and jams from %s matched to the map in %.0f s",
                 len(report.events),
@@ -580,6 +581,12 @@ def create_app(settings: Settings | None = None, *, http: httpx.Client | None = 
         description="Ranks Google's routes and our own router's designs for a driver profile.",
         lifespan=lifespan,
     )
+    @app.exception_handler(RequestValidationError)
+    def bad_request(_request: Request, exc: RequestValidationError) -> JSONResponse:
+        """What's wrong with a request, without what it said: 1e999 reads as infinity, which JSON can't say back."""
+        wrong = [{key: value for key, value in error.items() if key in ("type", "loc", "msg")} for error in exc.errors()]
+        return JSONResponse(status_code=422, content={"detail": wrong})
+
     app.add_middleware(
         CORSMiddleware,
         allow_origins=list(settings.cors_origins),
@@ -608,7 +615,7 @@ def create_app(settings: Settings | None = None, *, http: httpx.Client | None = 
             "daily_limit": engine.usage.limit,
             "road_events": {
                 "order": list(settings.road_event_sources),
-                "matched_ahead": engine.warmed_up,  # false for about 3 minutes after startup
+                "matched_ahead": engine.warmed_up,  # false for under a minute after startup
                 "wzdx": str(settings.wzdx_file.name) if settings.wzdx_file else settings.wzdx_url,
                 "wi511_key_set": engine.wi511 is not None,
                 "tomtom_key_set": engine.tomtom is not None,

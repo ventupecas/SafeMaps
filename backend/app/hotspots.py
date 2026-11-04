@@ -80,6 +80,11 @@ class CrashHotspots:
             logger.info("Skipped %d rows without usable coordinates in %s", skipped, path.name)
         return hotspots
 
+    def spots(self) -> Iterator[tuple[Point, float]]:
+        """Every place with crashes, and how many."""
+        for spots in self._cells.values():
+            yield from spots
+
     def crashes_near(self, point: Point, radius_m: float) -> float:
         """Total crashes recorded within radius_m of point."""
         cell_lat, cell_lng = _cell(point)

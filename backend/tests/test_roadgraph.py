@@ -330,7 +330,7 @@ def test_a_map_built_before_hazards_still_loads(tmp_path):
     with gzip.open(tmp_path / "old.json.gz", "wt", encoding="utf-8") as handle:
         json.dump(data, handle)
     graph = RoadGraph.load(tmp_path / "old.json.gz")
-    assert graph.rail_crossings == [0] * graph.edge_count and not any(graph.school_zone)
+    assert list(graph.rail_crossings) == [0] * graph.edge_count and not any(graph.school_zone)
 
 
 def test_a_traffic_segment_is_matched_waypoint_by_waypoint():
@@ -348,3 +348,12 @@ def test_a_short_line_drawn_with_many_points_is_matched_from_its_ends():
     east = initial_bearing_deg(point(1, 1), point(1, 2))
     line = tuple(destination_point(midpoint(point(1, 1), point(1, 2)), east, 6 * k) for k in range(9))
     assert graph.event_edges(RoadEvent("tomtom", "closed", line, along=True)) == {edge_between(graph, (1, 1), (1, 2))}
+
+
+def test_at_a_junction_the_road_named_is_the_one_running_the_way_the_traveler_heads():
+    graph = build_graph(grid_city().osm.elements)
+    at_junction = point(1, 2)  # where Main St, running east, meets 2 Ave, running north: both as near
+    assert graph.road_name_at(at_junction, 40.0) == "2 Ave"  # closer to north
+    assert graph.road_name_at(at_junction, 50.0) == "Main St"  # closer to east
+    assert graph.road_name_at(at_junction, 220.0) == "2 Ave"  # closer to south
+    assert graph.road_name_at(at_junction, 230.0) == "Main St"  # closer to west
