@@ -1,0 +1,19 @@
+[package]
+name = "route_kernel"
+version = "1.0.0"
+edition = "2021"
+description = "The route search and the geometry a plan repeats, as native code. Python calls it through ctypes."
+
+[lib]
+crate-type = ["cdylib"]
+
+[features]
+# Check every array access, and stop with a message on a bad one: for running the tests, not for trips.
+checked = []
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+debug = false

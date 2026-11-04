@@ -430,8 +430,8 @@ def test_the_estimate_never_overstates_what_is_left(seed):
         departures = router._departures(origin, None)
         end = graph.nearest_node(destination, 1000)
         costs = router._trip_costs(profile, events, keep=departures, school_hours=False, sun=None)
-        left, marks = np.zeros(graph.node_count), np.zeros(graph.node_count, dtype=np.uint8)
-        radius = kernel.reverse_bound(
+        workspace = kernel.Workspace(graph.node_count, graph.edge_count)
+        radius = workspace.reverse_bound(
             end,
             graph.column("edge_to")[np.array(departures, dtype=np.int32)],
             BOUND_REACH,
@@ -439,8 +439,6 @@ def test_the_estimate_never_overstates_what_is_left(seed):
             graph.in_edges.column_ptr(),
             graph.in_edges.column_edges(),
             graph.column("edge_from"),
-            left,
-            marks,
         )
         truth = {end: 0.0}
         heap = [(0.0, end)]
@@ -455,8 +453,9 @@ def test_the_estimate_never_overstates_what_is_left(seed):
                     heapq.heappush(heap, (new, graph.edge_from[edge]))
         for node in range(graph.node_count):
             true_left = truth.get(node, math.inf)
-            if marks[node] & 2:  # settled
-                assert left[node] == pytest.approx(true_left, rel=1e-9, abs=1e-9)
+            left = workspace.left(node)
+            if left >= 0:  # settled
+                assert left == pytest.approx(true_left, rel=1e-9, abs=1e-9)
             else:
                 assert radius <= true_left + 1e-9
 
@@ -552,6 +551,5 @@ def test_steps_of_a_kind_are_the_same_in_every_way_a_traveler_could_cost():
     columns = table[4:]
     assert all(column.size == columns[0].size for column in columns) and columns[0].size == table.kind.max() + 1
     assert columns[0].size < table.first.size  # fewer kinds than steps: the point of them
-    # Packing can't lose anything: every column's values fit the bits it's given.
-    for column, bits in zip(columns, kernel.STEP_COLUMN_BITS, strict=True):
-        assert int(column.max()) < 2**bits
+    # No two kinds are the same: a kind that lost something in the packing would have merged with another.
+    assert len({tuple(column[k] for column in columns) for k in range(columns[0].size)}) == columns[0].size

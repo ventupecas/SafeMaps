@@ -251,6 +251,7 @@ class RoadGraph:
     _signal_grid: geo_kernel.Grid | None = field(init=False, default=None, repr=False)
     _edge_cells: tuple[np.ndarray, np.ndarray] | None = field(init=False, default=None, repr=False)
     _link_column: np.ndarray | None = field(init=False, default=None, repr=False)
+    _columns_c: geo_kernel.MapColumns | None = field(init=False, default=None, repr=False)
     _point_grids: dict[str, geo_kernel.Grid] = field(init=False, default_factory=dict, repr=False)
     # Meters on each named road of the routes our router built, by their encoded polyline: naming a
     # route (engine.name_routes) reads them here instead of looking its road up every 100 m.
@@ -291,6 +292,25 @@ class RoadGraph:
 
     def point(self, node: int) -> Point:
         return (self.lat[node], self.lng[node])
+
+    def _map_columns(self) -> geo_kernel.MapColumns:
+        if self._columns_c is None:
+            self._columns_c = geo_kernel.MapColumns(
+                self.column("edge_from"),
+                self.column("edge_to"),
+                self.column("lat"),
+                self.column("lng"),
+                self.column("length_m"),
+                self._links(),
+                self.in_edges.column_ptr(),
+                self.in_edges.column_edges(),
+                self.geometry.ptr,
+                self.geometry.blob,
+                factor=_POLYLINE_FACTOR,
+                m_per_deg_lookup=_M_PER_DEG_LAT,
+                m_per_deg_geo=_M_PER_DEG_GEO,
+            )
+        return self._columns_c
 
     def edge_points(self, edge: int) -> list[Point]:
         lat, lng = geo_kernel.decoded(self.geometry.blob, self.geometry.ptr[edge], self.geometry.ptr[edge + 1], _POLYLINE_FACTOR)
@@ -457,7 +477,6 @@ class RoadGraph:
             heading,
             road == "any",
             road in RAMP_KINDS,
-            self._links(),
             _VEHICLE_SEARCH_ARRAY,
             VEHICLE_MATCH_M,
             VEHICLE_MATCH_DEG,
@@ -466,17 +485,7 @@ class RoadGraph:
             self._node_grid(False, _FINE_CELL_DEG),
             self._node_grid(False, _SNAP_CELL_DEG),
             _FINE_LOOKUP_M,
-            self.in_edges.column_ptr(),
-            self.in_edges.column_edges(),
-            self.column("lat"),
-            self.column("lng"),
-            self.geometry.ptr,
-            self.geometry.blob,
-            _POLYLINE_FACTOR,
-            _M_PER_DEG_LAT,
-            _M_PER_DEG_GEO,
-            np.zeros(self.node_count, dtype=np.bool_),
-            np.zeros(self.edge_count),
+            self._map_columns(),
         ).tolist()
 
     def _is_road(self, edge: int, road: str) -> bool:
@@ -753,18 +762,8 @@ class RoadGraph:
                 keys,
                 edges,
                 _EDGE_CELL_DEG,
-                self._links(),
-                self.column("edge_from"),
-                self.column("edge_to"),
-                self.column("lat"),
-                self.column("lng"),
-                self.column("length_m"),
-                self.geometry.ptr,
-                self.geometry.blob,
-                _POLYLINE_FACTOR,
+                self._map_columns(),
                 MATCHING,
-                _M_PER_DEG_GEO,
-                _M_PER_DEG_LAT,
                 _EDGE_SAMPLE_M,
                 SAME_ROAD_M,
             ).tolist()

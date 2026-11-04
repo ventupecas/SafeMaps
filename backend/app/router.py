@@ -22,7 +22,8 @@ from __future__ import annotations
 
 import math
 from collections import Counter
-from collections.abc import Iterable, Sequence
+from collections.abc import Iterable, Iterator, Sequence
+from contextlib import contextmanager
 from dataclasses import dataclass
 from threading import Lock
 from typing import Any
@@ -65,6 +66,7 @@ EDGE_COSTS_KEPT = 12  # segment costs kept per router, by profile: about 3 MB ea
 # How far past the trip's start the search back from the destination goes (see kernel.reverse_bound), as a
 # multiple of the road-only cost from there: farther, and more is settled than the forward search ever looks at.
 BOUND_REACH = 1.5
+WORKSPACES_KEPT = 16  # scratch kept for the next trips, at most: more than this at once make their own
 MAX_SNAP_M = 1_000.0
 # A moving car whose road can't be matched starts from the nearest junction,
 # but not back the way it came.
@@ -178,13 +180,6 @@ RIGHT_TURNS = ("TURN_RIGHT", "TURN_SLIGHT_RIGHT", "TURN_SHARP_RIGHT", "UTURN_RIG
 KNOWN_ROUTES_KEPT = 5000  # routes whose road lengths the graph remembers (graph.known_road_lengths)
 
 
-def _first_of_each(columns: list[np.ndarray], kind: np.ndarray, kinds: int) -> list[np.ndarray]:
-    """The columns with one row per kind of step, from any step of that kind."""
-    any_step = np.empty(kinds, dtype=np.int64)
-    any_step[kind] = np.arange(kind.size)
-    return [column[any_step] for column in columns]
-
-
 class Router:
     _with_crossings = False  # the bike and walking maps' steps also count crossings and crash spots (app.bike)
     _crash_spot_min = math.inf
@@ -211,6 +206,8 @@ class Router:
         self._build_lock = Lock()
         self._moves_table: tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray] | None = None
         self._steps_table: kernel.Steps | None = None
+        self._step_table_c: kernel.StepTable | None = None
+        self._workspaces: list[kernel.Workspace] = []
 
     def routes(
         self,
@@ -251,76 +248,68 @@ class Router:
             return []
 
         costs = self._trip_costs(profile, events, keep=departures, school_hours=school_hours, sun=sun)
-        goal_lat, goal_lng = g.point(end)
         on_offer = [edges for edges in (g.edges_along(points) for points in avoid) if edges]
         table = self._steps()
         step_costs = self._step_costs(costs)
         zones = self._zone_table(costs)
         starts = np.array(departures, dtype=np.int32)
-        edge_to = g.column("edge_to")
-        # Only once: penalties only raise costs, so it stays a true lower bound for the alternatives.
-        left = np.zeros(g.node_count)
-        marks = np.zeros(g.node_count, dtype=np.uint8)
-        radius = kernel.reverse_bound(
-            end,
-            edge_to[starts],
-            BOUND_REACH,
-            costs.edges,
-            g.in_edges.column_ptr(),
-            g.in_edges.column_edges(),
-            g.column("edge_from"),
-            left,
-            marks,
-        )
-        searched = costs.edges  # with the penalties, a copy, once there are any
-        found: list[RoutedPath] = []
-        for _ in range(count * ALTERNATIVE_SEARCHES_PER_ROUTE):
-            path, codes, taken, _opened = kernel.search(
-                starts,
+        node_lat, node_lng = g.column("lat"), g.column("lng")
+        with self._scratch() as workspace:
+            # Only once: penalties only raise costs, so it stays a true lower bound for the alternatives.
+            radius = workspace.reverse_bound(
                 end,
-                searched,
-                step_costs,
-                edge_to,
-                table.ptr,
-                table.first,
-                table.second,
-                table.kind,
-                table.maneuver_first,
-                table.maneuver_second,
-                zones,
-                left,
-                marks,
-                radius,
-                direct_per_km if found else 0.0,
-                goal_lat,
-                goal_lng,
-                g.column("lat"),
-                g.column("lng"),
-                np.zeros(g.edge_count),
-                np.zeros(g.edge_count, dtype=np.int32),
-                np.zeros(g.edge_count, dtype=np.int32),
+                g.column("edge_to")[starts],
+                BOUND_REACH,
+                costs.edges,
+                g.in_edges.column_ptr(),
+                g.in_edges.column_edges(),
+                g.column("edge_from"),
             )
-            if path.size == 0:
-                break
-            edges = path.tolist()
-            maneuvers = [kernel.MANEUVERS[code] for code in codes.tolist()]
-            cost = float(kernel.path_cost(edges[0], taken, costs.edges, step_costs, table.first, table.second, table.kind, zones))
-            if found and cost > found[0].cost * MAX_COST_RATIO:
-                break
-            first = not found
-            if first or (
-                all(self._shared(edges, path.edges) <= MAX_OVERLAP for path in found)
-                and all(self._overlap(edges, offered) <= MAX_OVERLAP for offered in on_offer)
-            ):
-                found.append(RoutedPath(tuple(edges), tuple(maneuvers), cost))
-                if len(found) == count:
+            searched = costs.edges  # with the penalties, a copy, once there are any
+            found: list[RoutedPath] = []
+            for _ in range(count * ALTERNATIVE_SEARCHES_PER_ROUTE):
+                path, codes, taken, _opened = workspace.search(
+                    starts, end, searched, step_costs, self._step_table(), zones, radius, direct_per_km if found else 0.0, node_lat, node_lng
+                )
+                if path.size == 0:
                     break
-            # Push the next search off this route, and after the best design, off the routes on offer.
-            if first:
-                searched = costs.edges.copy()
-            for used in [edges, *on_offer] if first else [edges]:
-                np.multiply.at(searched, np.fromiter(used, dtype=np.int64), ALTERNATIVE_PENALTY)
+                edges = path.tolist()
+                maneuvers = [kernel.MANEUVERS[code] for code in codes.tolist()]
+                cost = kernel.path_cost(edges[0], taken, costs.edges, step_costs, table.first, table.second, table.kind, zones)
+                if found and cost > found[0].cost * MAX_COST_RATIO:
+                    break
+                first = not found
+                if first or (
+                    all(self._shared(edges, path.edges) <= MAX_OVERLAP for path in found)
+                    and all(self._overlap(edges, offered) <= MAX_OVERLAP for offered in on_offer)
+                ):
+                    found.append(RoutedPath(tuple(edges), tuple(maneuvers), cost))
+                    if len(found) == count:
+                        break
+                # Push the next search off this route, and after the best design, off the routes on offer.
+                if first:
+                    searched = costs.edges.copy()
+                for used in [edges, *on_offer] if first else [edges]:
+                    np.multiply.at(searched, np.fromiter(used, dtype=np.int64), ALTERNATIVE_PENALTY)
         return found
+
+    @contextmanager
+    def _scratch(self) -> Iterator[kernel.Workspace]:
+        """Scratch for one trip, used again by the next. There's one for each trip planned at once."""
+        try:
+            workspace = self._workspaces.pop()
+        except IndexError:
+            workspace = kernel.Workspace(self.graph.node_count, self.graph.edge_count)
+        try:
+            yield workspace
+        finally:
+            if len(self._workspaces) < WORKSPACES_KEPT:
+                self._workspaces.append(workspace)
+
+    def _step_table(self) -> kernel.StepTable:
+        if self._step_table_c is None:
+            self._step_table_c = kernel.StepTable(self._steps(), self.graph.column("edge_to"))
+        return self._step_table_c
 
     def _moves(self) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
         self._steps()
@@ -367,7 +356,7 @@ class Router:
         )
         self._moves_table = kernel.build_moves(roads, rules)
         crashes = self._node_crashes()
-        ptr, first, second, *columns = kernel.build_steps(
+        return kernel.build_steps(
             *self._moves_table,
             roads,
             rules,
@@ -379,12 +368,6 @@ class Router:
             crashes >= self._crash_spot_min,
             self._with_crossings,
         )
-        # Each step's kind: its columns packed into one number. Maneuvers take 4 bits, turns' rows 5, the rest 2 to 4.
-        packed = np.zeros(first.size, dtype=np.uint64)
-        for column, bits in zip(columns, kernel.STEP_COLUMN_BITS, strict=True):
-            packed = (packed << np.uint64(bits)) | column.astype(np.uint64)
-        kinds, kind = np.unique(packed, return_inverse=True)
-        return kernel.Steps(ptr, first, second, kind.astype(np.int32), *_first_of_each(columns, kind, kinds.size))
 
     def _crossing_columns(self) -> kernel.Crossings:
         g = self.graph

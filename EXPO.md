@@ -18,6 +18,14 @@ python -m venv .venv
 Copy-Item .env.example .env
 ```
 
+Build the route search, which is in Rust. It needs Rust installed once, from https://rustup.rs (on Windows without Visual Studio, install with `rustup-init --default-host x86_64-pc-windows-gnu`):
+
+```powershell
+cargo build --release --manifest-path rust_kernel/Cargo.toml
+```
+
+Run that again after any change under `rust_kernel`. Docker builds it by itself.
+
 Then put the keys in place:
 
 - **Server key** (Routes API): `GOOGLE_MAPS_API_KEY=` in `backend\.env`.
@@ -145,7 +153,7 @@ Leave this window open all day: closing it stops the app.
 Instead of the command above, with Docker Desktop running, from the repo's top folder (`cd ..`, not `backend`):
 
 ```powershell
-docker compose up -d --build     # build (about 2 minutes, compiling the search) and start it, at the same address
+docker compose up -d --build     # build and start it, at the same address
 docker compose logs -f app       # wait for "Ready for trips", then Ctrl+C (the server keeps running)
 docker compose down              # stop it
 ```

@@ -1,11 +1,16 @@
 # The Safe Route Planner: the server, which also serves the page.
 # The maps, saved answers and keys stay outside the image: see docker-compose.yml.
+FROM rust:1-slim AS kernel
+WORKDIR /kernel
+COPY backend/rust_kernel .
+RUN cargo build --release
+
 FROM python:3.14-slim
 
 # School zones, the sun and departure times all go by the clock here, and they're Milwaukee's.
 ENV TZ=America/Chicago
-# Where the compiled search is kept: it's made while the image is built (see below), so a container starts ready.
-ENV NUMBA_CACHE_DIR=/srv/routes/compiled
+# The route search and geometry, built above: the image needs no toolchain.
+ENV ROUTES_KERNEL_LIBRARY=/srv/routes/libroute_kernel.so
 
 WORKDIR /srv/routes/backend
 
@@ -14,10 +19,10 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY backend/app app
 COPY frontend ../frontend
+COPY --from=kernel /kernel/target/release/libroute_kernel.so ../libroute_kernel.so
 
-RUN useradd --create-home --uid 1000 routes && mkdir data .cache ../compiled && chown routes:routes data .cache ../compiled
+RUN useradd --create-home --uid 1000 routes && mkdir data .cache && chown routes:routes data .cache
 USER routes
-RUN python -m app.compile_kernels
 
 EXPOSE 3143
 # The maps load before the server answers: seconds, more on a busy computer.

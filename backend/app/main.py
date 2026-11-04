@@ -48,7 +48,6 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from app.cache import CacheMiss
 from app.candidates import CandidateOptions
-from app.compile_kernels import compile_kernels
 from app.config import BACKEND_DIR, Settings
 from app.driving_side import DrivingSide
 from app.engine import (
@@ -350,10 +349,10 @@ class Engine:
         return snapped
 
     def warm_up(self) -> None:
-        """Get everything ready ahead of the first trip: the compiled code, each map's turns, and the road events.
+        """Get everything ready ahead of the first trip: each map's turns, and the road events.
 
-        Compiled code and the turns come first, as they're quick, so a trip made
-        while the rest gets ready is quick too. Then the road events across the
+        The turns come first, as they're quick, so a trip made while the rest
+        gets ready is quick too. Then the road events across the
         whole road map are fetched and matched to it, once, in the background, so
         trips don't wait for it. The paid sources (apify) and Google's are left out.
         """
@@ -361,7 +360,6 @@ class Engine:
             return
         started = time.perf_counter()
         try:
-            compile_kernels()
             driving = self.router(make_turn_context(self.settings, self.hotspots, None, self.graph))
             self._practice_drive(driving)
             # The bike and walking maps too, so their first trips don't wait.

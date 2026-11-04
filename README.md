@@ -24,9 +24,9 @@ backend/
     roadgraph.py      Turns OSM data into a drivable road graph with turn restrictions
     build_graph.py    Command that downloads and builds the graph
     router.py         Our own router: personalized A* search with turn costs, plus alternatives
-    search_kernel.py  That search, compiled (Numba): the map's turns as flat arrays, and A* over them
-    geo_kernel.py     The geometry a plan repeats, compiled: what a route passes, and what's near it
-    compile_kernels.py  Compiles both ahead of any trip, at startup and while the Docker image is built
+    search_kernel.py  That search, called in the native library: the map's turns as flat arrays, and A* over them
+    geo_kernel.py     The geometry a plan repeats, called there too: what a route passes, and what's near it
+    native.py         Finds and loads the native library (rust_kernel, in Rust)
     road_events.py    Closures, lane closures and jams: WZDx work zones, Wisconsin 511, TomTom, Google traffic speeds, Apify (opt-in)
     traffic_tiles.py  TomTom's traffic map for the OpenStreetMap page, fetched by the server so its key stays private
     pricing.py        Sends our routes to Google for live-traffic times; measures how closely Google followed
@@ -55,6 +55,7 @@ cd backend
 python -m venv .venv
 .\.venv\Scripts\Activate.ps1
 pip install -r requirements-dev.txt
+cargo build --release --manifest-path rust_kernel/Cargo.toml   # the route search, in Rust: see rustup.rs for cargo
 Copy-Item .env.example .env   # then set GOOGLE_MAPS_API_KEY
 pytest
 ```
@@ -423,7 +424,7 @@ curl.exe -o data\osm\pbf\milwaukee-metro.osm.pbf https://slice.openstreetmap.us/
 2. Our router designs up to 3 routes for the profile. With `--all-profiles` it designs each profile's best route, skipping duplicates. The router works like this:
    - It snaps each end of the trip to the nearest junction a car can start from (not a freeway or a ramp). When rerouting a moving car (the API's `heading`), the trip instead starts on the road segment the car is driving along, freeways included.
    - The first route is the best design. Each alternative must share at most half its length with every earlier route (either way round) and with Google's suggestions, so it takes a different corridor rather than a block-long detour. Roads already used cost twice as much in the next search, and alternatives may cost up to twice the best design. Every search is exact. A walk also tries direct routes, which head straight for the destination and take the lead only by ranking higher.
-   - Before searching forward it searches back from the destination along the roads, turns ignored (`kernel.reverse_bound`). Turns, zones and an alternative's penalties only add to a route, so that never overstates what's left, which is what A* needs to find the cheapest route, and it's far closer to the truth than a straight line at freeway speed. The search and the geometry run compiled, on flat arrays (`app/search_kernel.py`, `app/geo_kernel.py`), and let go of Python's lock, so trips plan side by side on the computer's cores. `tests/test_search_kernel.py` holds them to a plain Python search on random cities.
+   - Before searching forward it searches back from the destination along the roads, turns ignored (`kernel.reverse_bound`). Turns, zones and an alternative's penalties only add to a route, so that never overstates what's left, which is what A* needs to find the cheapest route, and it's far closer to the truth than a straight line at freeway speed. The search and the geometry are in Rust (`backend/rust_kernel`), on flat arrays, called through ctypes, which lets go of Python's lock, so trips plan side by side on the computer's cores. `tests/test_search_kernel.py` holds them to a plain Python search on random cities. To check every array access, build with `cargo build --release --features checked --target-dir target-checked` and run the tests with `ROUTES_KERNEL_LIBRARY` set to it.
    - It searches road segments rather than junctions, so every turn has a cost. The cost of each segment and turn uses the same perceived-minutes weights as the scorer. Turns across oncoming traffic at busy or crash-prone junctions cost extra. At a junction where every road is one-way, no turn counts as crossing, because there's no oncoming traffic; the scorer applies the same rule.
    - It obeys turn restrictions, and only allows U-turns at dead ends, or through a median opening on a divided road, as a costed U-turn.
    - It doesn't cut through service roads (alleys, parking-lot connectors) to save a turn. Turning onto one mid-trip costs 10 perceived minutes. A trip that starts or ends on one isn't affected, and pass-through points are never placed on them.
