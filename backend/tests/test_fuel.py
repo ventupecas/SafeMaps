@@ -1,7 +1,8 @@
+import numpy as np
 import pytest
 
 from app.features import extract_features
-from app.fuel import CONGESTION_L_PER_HOUR, MIN_L_PER_KM, TURN_L, cruise_l_per_100km, cruise_liters
+from app.fuel import CONGESTION_L_PER_HOUR, TURN_L, cruise_l_per_100km, cruise_liters, cruise_liters_each
 from app.models import CandidateRoute, CrossingTurn, RouteFeatures
 from app.profiles import PRESETS
 from app.scoring import rank_candidates
@@ -17,8 +18,9 @@ def test_rough_mpg_ballpark():
     assert 5.9 < cruise_l_per_100km(90) < 7.8
 
 
-def test_min_per_km_is_a_true_lower_bound():
-    assert all(MIN_L_PER_KM <= cruise_l_per_100km(v) / 100 + 1e-12 for v in range(1, 200))
+def test_a_whole_column_of_fuel_matches_one_at_a_time():
+    speeds = np.array([5.0, 30.0, 60.0, 110.0, 1.0])
+    assert list(cruise_liters_each(1500.0 * np.ones(5), speeds)) == [cruise_liters(1500.0, v) for v in speeds.tolist()]
 
 
 def test_route_fuel_counts_cruising_turns_and_traffic():

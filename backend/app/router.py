@@ -14,30 +14,33 @@ segment and per turn instead of per whole route:
 The search runs over segments rather than junctions (a state is "arrived at
 junction v along segment e"), which is what makes turn costs and turn
 restrictions possible. Live traffic isn't in the graph; the pricing step asks
-Google for it.
+Google for it. The search itself is compiled (app.search_kernel): this module
+turns a trip into the arrays it searches, and what it finds back into a route.
 """
 
 from __future__ import annotations
 
-import heapq
 import math
-from array import array
 from collections import Counter
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
+from threading import Lock
 from typing import Any
 
+import numpy as np
+
+import app.search_kernel as kernel
 from app.driving_side import DrivingSide
 from app.features import (
+    CROSSING_MANEUVERS,
+    CROSSING_RAMPS,
     DECISION_MANEUVERS,
     HIGHWAY_SPEED_KMH,
     HOTSPOT_RADIUS_M,
-    NO_ONCOMING_KINDS,
     TurnContext,
-    crosses_traffic,
 )
-from app.fuel import MIN_L_PER_KM, SIGNAL_L, TURN_L, cruise_liters
-from app.geo import Point, angle_between_deg, encode_polyline, haversine_m, initial_bearing_deg
+from app.fuel import SIGNAL_L, TURN_L, cruise_liters_each
+from app.geo import Point, encode_polyline, haversine_m, initial_bearings_deg
 from app.models import SIGNALED_CROSSING_SHARE, ScoringProfile
 from app.road_events import MAX_SLOWDOWN, WORKERS_PRESENT_FACTOR, RoadEvent
 from app.roadgraph import DEFAULT_SPEED_FACTOR, RoadGraph
@@ -59,11 +62,14 @@ ALTERNATIVE_SEARCHES_PER_ROUTE = 3
 # The longer the trip, the longer each search: fewer alternatives, so a long trip stays worth waiting for.
 # The first search, the best route, is always made. (Straight-line km, at most routes, at most searches.)
 SEARCH_BUDGETS = ((20.0, 2, 3), (8.0, 3, 5))
-EDGE_COSTS_KEPT = 6  # segment costs kept per router, by profile: about 3 MB each on Milwaukee's car map
+EDGE_COSTS_KEPT = 6  # segment and step costs kept per router, by profile: about 15 MB each on Milwaukee's car map
 # Searches for alternatives inflate the A* estimate by this factor: much
 # faster on penalized costs, and an alternative needs to be good and
 # different, not provably the best. The first design's search stays exact.
 ALTERNATIVE_SEARCH_GREED = 1.5
+# How far past the trip's start the search back from the destination goes (see kernel.reverse_bound), as a
+# multiple of the road-only cost from there: farther, and more is settled than the forward search ever looks at.
+BOUND_REACH = 1.5
 MAX_SNAP_M = 1_000.0
 # A moving car whose road can't be matched starts from the nearest junction,
 # but not back the way it came.
@@ -98,9 +104,10 @@ WEATHER_FACTOR = 1.3  # a stretch with fog, ice or flooding reported is driven t
 # school_zone_weight once.
 RAIL_CROSSING_S = 20.0
 SCHOOL_ZONE_KMH = 32.0
-SCHOOL_ZONE = -1  # the zone number all school zones share (lane closures use their event numbers)
 
 _ALL_MANEUVERS = DECISION_MANEUVERS | {"STRAIGHT"}
+_EMPTY_INT32 = np.empty(0, dtype=np.int32)
+_EMPTY_INT64 = np.empty(0, dtype=np.int64)
 
 Move = tuple[int, str, bool, bool]  # next segment, maneuver, crosses traffic, busy junction
 Turn = tuple[int, str, bool, bool]  # junction, maneuver, crosses traffic, busy junction
@@ -120,10 +127,12 @@ class _Costs:
     """One trip's costs: per segment (with its road events), per turn, and which lane closures each segment is in."""
 
     profile: ScoringProfile
-    edges: list[float]
+    edges: np.ndarray
     table: dict[tuple[str, bool], float]
-    zones: dict[int, frozenset[int]]  # segment -> the zones it's in: lane closures (by event number), school zones
+    zones: dict[int, frozenset[int]]  # segment -> the lane closures and hazards it's in, by event number
     zone_costs: dict[int, float]  # zone -> what driving into it costs
+    school_cost: float = 0.0  # what driving into a school zone costs: 0 outside school hours
+    key: Any = None  # what the step costs depend on: trips with the same key share them
     extra: Any = None  # the bike router's own (app.bike): the rider's profile, and whether it's dark
 
 
@@ -169,6 +178,8 @@ def turn_time_s(maneuver: str, crossing: bool) -> float:
     return 5.0
 
 
+LEFT_TURNS = ("TURN_LEFT", "TURN_SLIGHT_LEFT", "TURN_SHARP_LEFT", "UTURN_LEFT")
+RIGHT_TURNS = ("TURN_RIGHT", "TURN_SLIGHT_RIGHT", "TURN_SHARP_RIGHT", "UTURN_RIGHT")
 KNOWN_ROUTES_KEPT = 5000  # routes whose road lengths the graph remembers (graph.known_road_lengths)
 
 
@@ -182,26 +193,32 @@ def _search_budget(km: float, count: int) -> tuple[int, int]:
 
 
 class Router:
+    _with_crossings = False  # the bike and walking maps' steps also count crossings and crash spots (app.bike)
+    _crash_spot_min = math.inf
+
     def __init__(self, graph: RoadGraph, context: TurnContext = TurnContext()) -> None:
         self.graph = graph
         self.context = context
 
-        def flags(names: frozenset[str]) -> list[bool]:
-            by_class = [name in names for name in graph.classes]
-            return [by_class[c] for c in graph.road_class]
+        def flags(names: frozenset[str]) -> np.ndarray:
+            by_class = np.array([name in names for name in graph.classes], dtype=np.bool_)
+            return by_class[graph.column("road_class")]
 
         self._link = flags(LINK_CLASSES)
         self._freeway = flags(FREEWAY_CLASSES)
         self._cut_through = flags(CUT_THROUGH_CLASSES)
-        self._connector = [length < CONNECTOR_MAX_M for length in graph.length_m]
-        self._kept_costs: dict[str, array] = {}
-        self._moves: dict[int, list[Move]] = {}
-        self._steps: dict[int, list[Step]] = {}
-        self._crashes: dict[int, float] = {}
+        self._connector = graph.column("length_m") < CONNECTOR_MAX_M
+        self._kept_costs: dict[str, np.ndarray] = {}
+        self._kept_step_costs: dict[Any, np.ndarray] = {}
+        self._crashes: np.ndarray | None = None
         self._event_edges: dict[tuple[Any, ...], frozenset[int]] = {}
-        self._bearings: list[float] | None = None
+        self._bearings: np.ndarray | None = None
         # Junctions with a traffic signal: a busy crossing turn there costs SIGNALED_CROSSING_SHARE of one.
-        self._signal_nodes = {graph.edge_to[edge] for edge in range(graph.edge_count) if graph.signals[edge]}
+        self._signal_node = np.zeros(graph.node_count, dtype=np.bool_)
+        self._signal_node[graph.column("edge_to")[graph.column("signals") > 0]] = True
+        self._build_lock = Lock()
+        self._moves_table: tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray] | None = None
+        self._steps_table: kernel.Steps | None = None
 
     def routes(
         self,
@@ -241,15 +258,53 @@ class Router:
         costs = self._trip_costs(profile, events, keep=departures, school_hours=school_hours, sun=sun)
         count, searches = _search_budget(haversine_m(origin, destination) / 1000, count)
         on_offer = [edges for edges in (g.edges_along(points) for points in avoid) if edges]
-        penalties: dict[int, float] = {}
+        table = self._steps()
+        step_costs = self._step_costs(costs)
+        zones = self._zone_table(costs)
+        starts = np.array(departures, dtype=np.int32)
+        edge_to = g.column("edge_to")
+        # Only once: penalties only raise costs, so it stays a true lower bound for the alternatives.
+        left = np.zeros(g.node_count)
+        marks = np.zeros(g.node_count, dtype=np.uint8)
+        radius = kernel.reverse_bound(
+            end,
+            edge_to[starts],
+            BOUND_REACH,
+            costs.edges,
+            g.in_edges.column_ptr(),
+            g.in_edges.column_edges(),
+            g.column("edge_from"),
+            left,
+            marks,
+        )
+        searched = costs.edges  # with the penalties, a copy, once there are any
         found: list[RoutedPath] = []
         for _ in range(searches):
-            greed = ALTERNATIVE_SEARCH_GREED if found else 1.0
-            result = self._search(departures, end, costs, penalties, greed=greed)
-            if result is None:
+            path, codes, taken, _opened = kernel.search(
+                starts,
+                end,
+                searched,
+                step_costs,
+                edge_to,
+                table.ptr,
+                table.first,
+                table.second,
+                table.maneuver_first,
+                table.maneuver_second,
+                zones,
+                left,
+                marks,
+                radius,
+                ALTERNATIVE_SEARCH_GREED if found else 1.0,
+                np.zeros(g.edge_count),
+                np.zeros(g.edge_count, dtype=np.int32),
+                np.zeros(g.edge_count, dtype=np.int32),
+            )
+            if path.size == 0:
                 break
-            edges, maneuvers = result
-            cost = self._path_cost(edges, costs)
+            edges = path.tolist()
+            maneuvers = [kernel.MANEUVERS[code] for code in codes.tolist()]
+            cost = float(kernel.path_cost(edges[0], taken, costs.edges, step_costs, table.first, table.second, zones))
             if found and cost > found[0].cost * MAX_COST_RATIO:
                 break
             first = not found
@@ -261,34 +316,141 @@ class Router:
                 if len(found) == count:
                     break
             # Push the next search off this route, and after the best design, off the routes on offer.
+            if first:
+                searched = costs.edges.copy()
             for used in [edges, *on_offer] if first else [edges]:
-                for edge in used:
-                    penalties[edge] = penalties.get(edge, 1.0) * ALTERNATIVE_PENALTY
+                np.multiply.at(searched, np.fromiter(used, dtype=np.int64), ALTERNATIVE_PENALTY)
         return found
+
+    def _moves(self) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+        self._steps()
+        return self._moves_table
+
+    def _steps(self) -> kernel.Steps:
+        """Every legal turn on the map, classified and costed as far as a profile doesn't matter: made once."""
+        if self._steps_table is None:
+            with self._build_lock:
+                if self._steps_table is None:
+                    self._steps_table = self._build_steps()
+        return self._steps_table
+
+    def _build_steps(self) -> kernel.Steps:
+        g = self.graph
+        side = self.context.driving_side
+        banned_ptr = np.zeros(g.edge_count + 1, dtype=np.int64)
+        banned: list[int] = []
+        for edge, others in sorted(g.banned.items()):
+            banned_ptr[edge + 1] = len(others)
+            banned.extend(sorted(others))
+        roads = kernel.Roads(
+            g.column("edge_from"),
+            g.column("edge_to"),
+            g.out_edges.column_ptr(),
+            g.out_edges.column_edges(),
+            np.cumsum(banned_ptr),
+            np.array(banned, dtype=np.int32),
+            g.column("bearing_start"),
+            g.column("bearing_end"),
+            self._link,
+            self._freeway,
+            g.column("way_id"),
+            g.column("name"),
+            g.column("speed_kmh"),
+            g.node_kinds(),  # the same junction judgement the scorer uses
+        )
+        rules = kernel.TurnRules(
+            np.array([name in CROSSING_MANEUVERS[side] for name in kernel.MANEUVERS], dtype=np.bool_),
+            np.array([name == CROSSING_RAMPS[side] for name in kernel.MANEUVERS], dtype=np.bool_),
+            HIGHWAY_SPEED_KMH,
+            kernel.MANEUVER_CODES[self._uturn],
+            UTURN_MIN_DEG,
+        )
+        self._moves_table = kernel.build_moves(roads, rules)
+        crashes = self._node_crashes()
+        return kernel.Steps(
+            *kernel.build_steps(
+                *self._moves_table,
+                roads,
+                rules,
+                self._connector,
+                self._signal_node,
+                crashes >= self.context.min_hotspot_crashes,
+                self._cut_through,
+                self._crossing_columns(),
+                crashes >= self._crash_spot_min,
+                self._with_crossings,
+            )
+        )
+
+    def _crossing_columns(self) -> kernel.Crossings:
+        g = self.graph
+        return kernel.Crossings(
+            g.column("edge_to"),
+            g.out_edges.column_ptr(),
+            g.out_edges.column_edges(),
+            g.in_edges.column_ptr(),
+            g.in_edges.column_edges(),
+            g.column("way_id"),
+            g.column("name"),
+            g.column("cross"),
+            self._signal_node,
+            np.array([name.startswith(LEFT_TURNS) for name in kernel.MANEUVERS], dtype=np.bool_),
+            np.array([name.startswith(RIGHT_TURNS) for name in kernel.MANEUVERS], dtype=np.bool_),
+        )
+
+    def _step_costs(self, costs: _Costs) -> np.ndarray:
+        """What each step on the map costs for this trip's traveler, before the segments it enters: kept for the next trips."""
+        kept = self._kept_step_costs.get(costs.key)
+        if kept is None:
+            kept = self._build_step_costs(costs)
+            if len(self._kept_step_costs) >= EDGE_COSTS_KEPT:
+                self._kept_step_costs.pop(next(iter(self._kept_step_costs)), None)
+            self._kept_step_costs[costs.key] = kept
+        return kept
+
+    def _build_step_costs(self, costs: _Costs) -> np.ndarray:
+        steps = self._steps()
+        profile = costs.profile
+        table = np.zeros(kernel.TURN_TABLE_SIZE)
+        for (maneuver, crossing), cost in costs.table.items():
+            code = kernel.MANEUVER_CODES.get(maneuver)
+            if code is not None:  # the router makes no roundabouts: nothing's filed under them
+                table[code * 2 + crossing] = cost
+        return (
+            table[steps.turn_first]
+            + table[steps.turn_second]
+            + steps.busy_plain * profile.busy_crossing_weight
+            + steps.busy_signal * (profile.busy_crossing_weight * SIGNALED_CROSSING_SHARE)
+            + steps.hotspots * profile.hotspot_crossing_weight
+            + steps.cut_through * CUT_THROUGH_PENALTY
+        )
+
+    def _zone_table(self, costs: _Costs) -> kernel.Zones:
+        """The trip's zones, for the search. Few segments are in a lane closure or a hazard, and a trip without any has none."""
+        g = self.graph
+        index, ptr, ids = _EMPTY_INT32, _EMPTY_INT64, _EMPTY_INT32
+        if costs.zones:
+            index = np.zeros(g.edge_count, dtype=np.int32)
+            ends = [0]
+            numbers: list[int] = []
+            for row, (edge, zones) in enumerate(costs.zones.items(), 1):
+                index[edge] = row
+                numbers.extend(zones)
+                ends.append(len(numbers))
+            ptr = np.array(ends, dtype=np.int64)
+            ids = np.array(numbers, dtype=np.int32)
+        cost = np.zeros(max(costs.zone_costs, default=-1) + 1)
+        for zone, value in costs.zone_costs.items():
+            cost[zone] = value
+        return kernel.Zones(index, ptr, ids, cost, g.column("school_zone"), float(costs.school_cost))
 
     def moves(self, edge: int) -> list[Move]:
         """Legal next segments from the end of edge, with how each turn is classified."""
-        moves = self._moves.get(edge)
-        if moves is None:
-            g = self.graph
-            node = g.edge_to[edge]
-            kind = g.node_kind(node)  # the same junction judgement the scorer uses
-            outs = g.out_edges[node]
-            banned = g.banned.get(edge, frozenset())
-            moves = []
-            for nxt in outs:
-                if nxt in banned:
-                    continue
-                if g.edge_to[nxt] == g.edge_from[edge] and len(outs) > 1:
-                    continue  # U-turns only at dead ends
-                maneuver = self.maneuver(edge, nxt)
-                # Interchanges and all-one-way junctions have no oncoming stream to cross.
-                crossing = kind not in NO_ONCOMING_KINDS and crosses_traffic(
-                    maneuver, g.speed_kmh[edge], self.context.driving_side
-                )
-                moves.append((nxt, maneuver, crossing, kind == "busy"))
-            self._moves[edge] = moves
-        return moves
+        ptr, following, codes, flags = self._moves()
+        return [
+            (int(following[i]), kernel.MANEUVERS[codes[i]], bool(flags[i] & 1), bool(flags[i] & 2))
+            for i in range(ptr[edge], ptr[edge + 1])
+        ]
 
     def steps(self, edge: int) -> list[Step]:
         """Ways on from the end of edge, each costed as one decision.
@@ -296,72 +458,49 @@ class Router:
         Usually one segment. Through a short connector it's two, judged
         together (see CONNECTOR_MAX_M).
         """
-        steps = self._steps.get(edge)
-        if steps is None:
-            g = self.graph
-            steps = []
-            for nxt, maneuver, crossing, busy in self.moves(edge):
-                turn = (g.edge_to[edge], maneuver, crossing, busy)
-                if not self._connector[nxt]:
-                    steps.append(Step((nxt,), (maneuver,), (turn,)))
-                    continue
-                for after, maneuver_after, crossing_after, busy_after in self.moves(nxt):
-                    if angle_between_deg(g.bearing_end[edge], g.bearing_start[after]) >= UTURN_MIN_DEG:
-                        steps.append(Step((nxt, after), (self._uturn, "STRAIGHT"), (self._uturn_at(edge),)))
-                    else:
-                        turn_after = (g.edge_to[nxt], maneuver_after, crossing_after, busy_after)
-                        steps.append(Step((nxt, after), (maneuver, maneuver_after), (turn, turn_after)))
-            self._steps[edge] = steps
-        return steps
+        table = self._steps()
+        return [self._step(edge, s) for s in range(table.ptr[edge], table.ptr[edge + 1]) if table.second[s] != kernel.ARRIVAL]
+
+    def _step(self, edge: int, s: int) -> Step:
+        g, table = self.graph, self._steps()
+        first, second = int(table.first[s]), int(table.second[s])
+        flags = table.flags[s]
+        maneuver = kernel.MANEUVERS[table.maneuver_first[s]]
+        node = g.edge_to[edge]
+        turn_maneuver = kernel.MANEUVERS[table.turn_first[s] // 2]
+        turns = [(node, turn_maneuver, bool(flags & kernel.FIRST_CROSSES), bool(flags & kernel.FIRST_BUSY))]
+        if second < 0:
+            return Step((first,), (maneuver,), tuple(turns))
+        if table.turn_second[s] != kernel.NO_TURN:
+            turns.append(
+                (
+                    g.edge_to[first],
+                    kernel.MANEUVERS[table.turn_second[s] // 2],
+                    bool(flags & kernel.SECOND_CROSSES),
+                    bool(flags & kernel.SECOND_BUSY),
+                )
+            )
+        return Step((first, second), (maneuver, kernel.MANEUVERS[table.maneuver_second[s]]), tuple(turns))
 
     @property
     def _uturn(self) -> str:
         return "UTURN_LEFT" if self.context.driving_side is DrivingSide.RIGHT else "UTURN_RIGHT"
 
-    def _uturn_at(self, edge: int) -> Turn:
-        """A U-turn through a connector at the end of edge, judged like any turn at that junction."""
-        g = self.graph
-        node = g.edge_to[edge]
-        kind = g.node_kind(node)
-        crossing = kind not in NO_ONCOMING_KINDS and crosses_traffic(
-            self._uturn, g.speed_kmh[edge], self.context.driving_side
-        )
-        return (node, self._uturn, crossing, kind == "busy")
-
-    def maneuver(self, edge: int, nxt: int) -> str:
-        """Classify the move from edge onto nxt using the Routes API's maneuver names."""
-        g = self.graph
-        uturn = self._uturn
-        if g.edge_to[nxt] == g.edge_from[edge]:
-            return uturn
-        angle = (g.bearing_start[nxt] - g.bearing_end[edge] + 540.0) % 360.0 - 180.0  # positive turns right
-        side = "RIGHT" if angle > 0 else "LEFT"
-        turn = abs(angle)
-
-        if self._link[nxt] and not self._link[edge]:
-            return f"RAMP_{side}" if turn > 10 else "STRAIGHT"
-        if self._link[edge] and self._freeway[nxt]:
-            return "MERGE"
-        if (self._link[edge] or self._freeway[edge]) and (self._link[nxt] or self._freeway[nxt]):
-            return f"FORK_{side}" if turn > 10 else "STRAIGHT"
-
-        same_road = g.way_id[edge] == g.way_id[nxt] or (g.name[edge] != 0 and g.name[edge] == g.name[nxt])
-        if turn <= 30 or (same_road and turn < 60):
-            return "STRAIGHT"
-        if turn >= 165:
-            return uturn
-        if turn < 60:
-            return f"TURN_SLIGHT_{side}"
-        return f"TURN_SHARP_{side}" if turn > 120 else f"TURN_{side}"
+    def _node_crashes(self) -> np.ndarray:
+        """Recorded crashes within HOTSPOT_RADIUS_M of each junction, from the crashes' side: there are far fewer of them."""
+        if self._crashes is None:
+            g = self.graph
+            crashes = np.zeros(g.node_count)
+            if self.context.hotspots is not None:
+                for spot, count in self.context.hotspots.spots():
+                    for node in g._nodes_near(spot, HOTSPOT_RADIUS_M, snappable_only=False):
+                        if haversine_m(g.point(node), spot) <= HOTSPOT_RADIUS_M:
+                            crashes[node] += count
+            self._crashes = crashes
+        return self._crashes
 
     def crashes_at(self, node: int) -> float:
-        hotspots = self.context.hotspots
-        if hotspots is None:
-            return 0.0
-        crashes = self._crashes.get(node)
-        if crashes is None:
-            crashes = self._crashes[node] = hotspots.crashes_near(self.graph.point(node), HOTSPOT_RADIUS_M)
-        return crashes
+        return float(self._node_crashes()[node])
 
     def path_points(self, path: RoutedPath) -> list[Point]:
         return self._points(path.edges)
@@ -459,21 +598,17 @@ class Router:
         With the sun low, segments heading toward it cost sun_glare_weight per minute more.
         """
         g = self.graph
-        edge_costs = array("d", self._kept_edge_costs(profile))  # a copy: this trip's zones and events change it
+        edge_costs = self._kept_edge_costs(profile).copy()  # a copy: this trip's zones and events change it
         zones: dict[int, set[int]] = {}
         zone_costs: dict[int, float] = {}
         if school_hours:
-            zone_costs[SCHOOL_ZONE] = profile.school_zone_weight
-            for edge in range(g.edge_count):
-                if g.school_zone[edge]:
-                    edge_costs[edge] *= max(1.0, g.speed_kmh[edge] / SCHOOL_ZONE_KMH)
-                    zones[edge] = {SCHOOL_ZONE}
+            in_zone = g.column("school_zone") != 0
+            edge_costs[in_zone] *= np.maximum(1.0, g.column("speed_kmh")[in_zone] / SCHOOL_ZONE_KMH)
         if low_sun(sun) and profile.sun_glare_weight:
-            # app.sun.glare, inlined: it runs for every segment of the map.
+            # app.sun.glare, for every segment of the map at once.
             azimuth, per_s = sun[0], profile.sun_glare_weight / 60
-            for edge, bearing in enumerate(self._edge_bearings()):
-                if abs((bearing - azimuth + 180) % 360 - 180) <= GLARE_ANGLE_DEG:
-                    edge_costs[edge] += per_s * g.time_s[edge]
+            into_sun = np.abs((self._edge_bearings() - azimuth + 180) % 360 - 180) <= GLARE_ANGLE_DEG
+            edge_costs[into_sun] += per_s * g.column("time_s")[into_sun]
         keep = set(keep)
         for number, event in enumerate(events):
             edges = self.event_edges(event)
@@ -506,15 +641,16 @@ class Router:
             table=self._turn_table(profile),
             zones={edge: frozenset(numbers) for edge, numbers in zones.items()},
             zone_costs=zone_costs,
+            school_cost=profile.school_zone_weight if school_hours else 0.0,
+            key=profile.model_dump_json(),
         )
 
-    def _edge_bearings(self) -> list[float]:
+    def _edge_bearings(self) -> np.ndarray:
         """Each segment's compass direction, end to end, worked out once."""
         if self._bearings is None:
             g = self.graph
-            self._bearings = [
-                initial_bearing_deg(g.point(g.edge_from[edge]), g.point(g.edge_to[edge])) for edge in range(g.edge_count)
-            ]
+            lat, lng, start, end = g.column("lat"), g.column("lng"), g.column("edge_from"), g.column("edge_to")
+            self._bearings = initial_bearings_deg(lat[start], lng[start], lat[end], lng[end])
         return self._bearings
 
     def _slowdown(self, event: RoadEvent, edges: Iterable[int]) -> float:
@@ -531,66 +667,23 @@ class Router:
             return min(1 + event.delay_min * 60 / usual_s, MAX_SLOWDOWN)
         return JAM_FACTOR if event.kind == "jam" else SLOW_FACTOR
 
-    def _search(
-        self,
-        departures: list[int],
-        end: int,
-        costs: _Costs,
-        penalties: dict[int, float],
-        *,
-        greed: float = 1.0,
-    ) -> tuple[list[int], list[str]] | None:
-        """A* over segments. With greed 1 the heuristic is admissible: no route can cost less per km than per_km.
-
-        greed > 1 trades optimality for speed (weighted A*): the route found
-        costs at most greed times the best.
-        """
-        g = self.graph
-        goal = g.point(end)
-        profile = costs.profile
-        per_km = greed * (
-            profile.distance_weight
-            + profile.fuel_weight * MIN_L_PER_KM
-            + (profile.time_weight - profile.scenic_weight) * 60.0 / g.max_speed_kmh
-        )
-
-        best: dict[int, float] = {}
-        parent: dict[int, tuple[int, Step | None]] = {}
-        heap: list[tuple[float, float, int]] = []
-        for edge in departures:
-            cost = costs.edges[edge] * penalties.get(edge, 1.0)
-            best[edge] = cost
-            parent[edge] = (-1, None)
-            heapq.heappush(heap, (cost + per_km * haversine_m(g.point(g.edge_to[edge]), goal) / 1000, cost, edge))
-
-        while heap:
-            _, cost, edge = heapq.heappop(heap)
-            if cost > best[edge]:
-                continue  # stale heap entry
-            if g.edge_to[edge] == end:
-                return self._unwind(edge, parent)
-            for step in [*self.steps(edge), *self._arrivals(edge, end)]:
-                new = cost + self._step_cost(edge, step, costs, penalties)
-                last = step.edges[-1]
-                if new < best.get(last, math.inf):
-                    best[last] = new
-                    parent[last] = (edge, step)
-                    heapq.heappush(heap, (new + per_km * haversine_m(g.point(g.edge_to[last]), goal) / 1000, new, last))
-        return None
-
     def _arrivals(self, edge: int, end: int) -> list[Step]:
         """A short connector that ends at the destination: a way to arrive, not part of a turn."""
-        g = self.graph
+        g, table = self.graph, self._steps()
         return [
-            Step((nxt,), (maneuver,), ((g.edge_to[edge], maneuver, crossing, busy),))
-            for nxt, maneuver, crossing, busy in self.moves(edge)
-            if self._connector[nxt] and g.edge_to[nxt] == end
+            self._step(edge, s)
+            for s in range(table.ptr[edge], table.ptr[edge + 1])
+            if table.second[s] == kernel.ARRIVAL and g.edge_to[table.first[s]] == end
         ]
 
     def _step_cost(self, edge: int, step: Step, costs: _Costs, penalties: dict[int, float]) -> float:
+        """A step's cost worked out from its parts: the arrays the search reads are checked against this."""
         cost, previous = 0.0, edge
+        school = self.graph.school_zone
         for nxt in step.edges:
             cost += costs.edges[nxt] * penalties.get(nxt, 1.0) + self._cut_through_cost(previous, nxt)
+            if costs.school_cost and school[nxt] and not school[previous]:
+                cost += costs.school_cost
             entered = costs.zones.get(nxt)
             if entered:
                 # Driving into a lane closure (a forced merge) or a school zone costs once per zone, like a risky turn.
@@ -601,36 +694,29 @@ class Router:
             cost += self._turn_cost(costs.table, costs.profile, node, maneuver, crossing, busy)
         return cost
 
-    def _kept_edge_costs(self, profile: ScoringProfile) -> array:
+    def _kept_edge_costs(self, profile: ScoringProfile) -> np.ndarray:
         """_edge_costs, a pass over every segment of the map, made once per profile."""
         key = profile.model_dump_json()
         kept = self._kept_costs.get(key)
         if kept is None:
-            kept = array("d", self._edge_costs(profile))
+            kept = self._edge_costs(profile)
             if len(self._kept_costs) >= EDGE_COSTS_KEPT:
                 self._kept_costs.pop(next(iter(self._kept_costs)), None)
             self._kept_costs[key] = kept
         return kept
 
-    def _edge_costs(self, profile: ScoringProfile) -> list[float]:
+    def _edge_costs(self, profile: ScoringProfile) -> np.ndarray:
         g = self.graph
-        costs = []
-        for edge in range(g.edge_count):
-            minutes = g.time_s[edge] / 60
-            fuel = cruise_liters(g.length_m[edge], g.speed_kmh[edge]) + g.signals[edge] * SIGNAL_L
-            cost = (
-                profile.time_weight * minutes
-                + profile.distance_weight * g.length_m[edge] / 1000
-                + profile.fuel_weight * fuel
-            )
-            if g.speed_kmh[edge] >= HIGHWAY_SPEED_KMH:
-                cost += profile.highway_weight * minutes
-            elif g.winding[edge]:
-                cost -= profile.scenic_weight * minutes  # never negative: scenic_weight <= time_weight
-            if g.rail_crossings[edge]:
-                per_crossing = profile.time_weight * RAIL_CROSSING_S / 60 + profile.rail_crossing_weight
-                cost += g.rail_crossings[edge] * per_crossing
-            costs.append(cost)
+        length, speed = g.column("length_m"), g.column("speed_kmh")
+        minutes = g.column("time_s") / 60
+        fuel = cruise_liters_each(length, speed) + g.column("signals") * SIGNAL_L
+        costs = profile.time_weight * minutes + profile.distance_weight * length / 1000 + profile.fuel_weight * fuel
+        highway = speed >= HIGHWAY_SPEED_KMH
+        costs[highway] += profile.highway_weight * minutes[highway]
+        winding = ~highway & (g.column("winding") != 0)
+        costs[winding] -= profile.scenic_weight * minutes[winding]  # never negative: scenic_weight <= time_weight
+        rails = g.column("rail_crossings")
+        costs += rails * (profile.time_weight * RAIL_CROSSING_S / 60 + profile.rail_crossing_weight)
         return costs
 
     @staticmethod
@@ -654,7 +740,7 @@ class Router:
         cost = table[maneuver, crossing]
         if crossing:
             if busy:
-                cost += profile.busy_crossing_weight * (SIGNALED_CROSSING_SHARE if node in self._signal_nodes else 1.0)
+                cost += profile.busy_crossing_weight * (SIGNALED_CROSSING_SHARE if self._signal_node[node] else 1.0)
             if self.crashes_at(node) >= self.context.min_hotspot_crashes:
                 cost += profile.hotspot_crossing_weight
         return cost
@@ -698,16 +784,3 @@ class Router:
             points.extend(segment if not points else segment[1:])
         return points
 
-    @staticmethod
-    def _unwind(edge: int, parent: dict[int, tuple[int, Step | None]]) -> tuple[list[int], list[str]]:
-        edges: list[int] = []
-        maneuvers: list[str] = []
-        while True:
-            previous, step = parent[edge]
-            if step is None:  # a departure
-                edges.append(edge)
-                maneuvers.append("DEPART")
-                return edges[::-1], maneuvers[::-1]
-            edges.extend(reversed(step.edges))
-            maneuvers.extend(reversed(step.maneuvers))
-            edge = previous

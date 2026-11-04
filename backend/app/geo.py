@@ -10,6 +10,8 @@ import math
 from collections.abc import Iterable, Sequence
 from itertools import pairwise
 
+import numpy as np
+
 EARTH_RADIUS_M = 6_371_008.8
 
 Point = tuple[float, float]  # (lat, lng) in degrees
@@ -77,6 +79,14 @@ def initial_bearing_deg(a: Point, b: Point) -> float:
     x = math.sin(dlng) * math.cos(lat2)
     y = math.cos(lat1) * math.sin(lat2) - math.sin(lat1) * math.cos(lat2) * math.cos(dlng)
     return (math.degrees(math.atan2(x, y)) + 360) % 360
+
+
+def initial_bearings_deg(lat1: np.ndarray, lng1: np.ndarray, lat2: np.ndarray, lng2: np.ndarray) -> np.ndarray:
+    """initial_bearing_deg for whole columns of points at once."""
+    lat1, lat2, dlng = np.radians(lat1), np.radians(lat2), np.radians(lng2) - np.radians(lng1)
+    x = np.sin(dlng) * np.cos(lat2)
+    y = np.cos(lat1) * np.sin(lat2) - np.sin(lat1) * np.cos(lat2) * np.cos(dlng)
+    return (np.degrees(np.arctan2(x, y)) + 360) % 360
 
 
 def angle_between_deg(a: float, b: float) -> float:

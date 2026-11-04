@@ -330,7 +330,7 @@ def test_a_map_built_before_hazards_still_loads(tmp_path):
     with gzip.open(tmp_path / "old.json.gz", "wt", encoding="utf-8") as handle:
         json.dump(data, handle)
     graph = RoadGraph.load(tmp_path / "old.json.gz")
-    assert graph.rail_crossings == [0] * graph.edge_count and not any(graph.school_zone)
+    assert list(graph.rail_crossings) == [0] * graph.edge_count and not any(graph.school_zone)
 
 
 def test_a_traffic_segment_is_matched_waypoint_by_waypoint():

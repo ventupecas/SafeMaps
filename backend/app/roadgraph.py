@@ -19,12 +19,16 @@ import math
 import os
 import re
 import tempfile
+from array import array
 from collections import Counter, defaultdict
 from collections.abc import Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
+import numpy as np
+
+import app.search_kernel as kernel
 from app.features import is_winding
 from app.geo import (
     Point,
@@ -127,6 +131,57 @@ _SNAP_CELL_DEG = 0.005
 _M_PER_DEG_LAT = 111_320.0
 
 
+# The kinds a junction can be, in the order RoadGraph.node_kinds numbers them (app.search_kernel's KIND_ names).
+JUNCTION_KINDS = ("quiet", "busy", "interchange", "one-way")
+# How each per-segment and per-junction column is stored.
+_COLUMN_TYPES = {
+    "lat": "d",
+    "lng": "d",
+    "edge_from": "i",
+    "edge_to": "i",
+    "length_m": "d",
+    "speed_kmh": "d",
+    "signals": "i",
+    "road_class": "i",
+    "name": "i",
+    "way_id": "q",
+    "oneway": "b",
+    "winding": "b",
+    "bearing_start": "d",
+    "bearing_end": "d",
+    "rail_crossings": "i",
+    "school_zone": "b",
+    "stress": "b",
+    "lit": "b",
+    "cross": "b",
+}
+
+
+class Adjacency:
+    """The segments at each junction, in order: reads like a list of lists, stored as two flat arrays."""
+
+    __slots__ = ("_ptr", "_edges")
+
+    def __init__(self, junctions: np.ndarray, count: int) -> None:
+        self._edges = array("i", np.argsort(junctions, kind="stable").astype(np.int32).tobytes())
+        self._ptr = array("q", np.concatenate(([0], np.cumsum(np.bincount(junctions, minlength=count)))).astype(np.int64).tobytes())
+
+    def __getitem__(self, node: int) -> list[int]:
+        return self._edges[self._ptr[node] : self._ptr[node + 1]].tolist()
+
+    def __len__(self) -> int:
+        return len(self._ptr) - 1
+
+    def __iter__(self) -> Iterator[list[int]]:
+        return (self[node] for node in range(len(self)))
+
+    def column_ptr(self) -> np.ndarray:
+        return np.frombuffer(self._ptr, dtype=np.int64)
+
+    def column_edges(self) -> np.ndarray:
+        return np.frombuffer(self._edges, dtype=np.int32) if len(self._edges) else np.empty(0, dtype=np.int32)
+
+
 @dataclass
 class RoadGraph:
     area: str
@@ -164,14 +219,13 @@ class RoadGraph:
     # the same as stress; on the walking map, a street with a sidewalk is easy to walk along but not to cross.
     cross: list[int] = field(default_factory=list)
 
-    time_s: list[float] = field(init=False, repr=False)
-    out_edges: list[list[int]] = field(init=False, repr=False)
-    in_edges: list[list[int]] = field(init=False, repr=False)
-    max_speed_kmh: float = field(init=False)
+    time_s: array = field(init=False, repr=False)
+    out_edges: Adjacency = field(init=False, repr=False)
+    in_edges: Adjacency = field(init=False, repr=False)
     _cell_indexes: dict[tuple[bool, float], dict[tuple[int, int], list[int]]] = field(
         init=False, default_factory=dict, repr=False
     )
-    _node_kinds: dict[int, str] = field(init=False, default_factory=dict, repr=False)
+    _kinds: np.ndarray | None = field(init=False, default=None, repr=False)
     _signal_cells: dict[tuple[int, int], list[int]] | None = field(init=False, default=None, repr=False)
     _edge_cells: dict[tuple[int, int], list[int]] | None = field(init=False, default=None, repr=False)
     _point_cells: dict[str, dict[tuple[int, int], list[Point]]] = field(init=False, default_factory=dict, repr=False)
@@ -185,16 +239,23 @@ class RoadGraph:
         self.stress = self.stress or [0] * len(self.edge_from)
         self.lit = self.lit or [True] * len(self.edge_from)
         self.cross = self.cross or list(self.stress)
-        self.time_s = [
-            length / (speed / 3.6) + SIGNAL_DELAY_S * signals
-            for length, speed, signals in zip(self.length_m, self.speed_kmh, self.signals, strict=True)
-        ]
-        self.out_edges = [[] for _ in self.lat]
-        self.in_edges = [[] for _ in self.lat]
-        for edge, (start, end) in enumerate(zip(self.edge_from, self.edge_to, strict=True)):
-            self.out_edges[start].append(edge)
-            self.in_edges[end].append(edge)
-        self.max_speed_kmh = max(self.speed_kmh, default=100.0)
+        # The columns, compactly: a list of a million floats takes four times the memory.
+        for name, code in _COLUMN_TYPES.items():
+            setattr(self, name, array(code, getattr(self, name)))
+        self.time_s = array(
+            "d",
+            (
+                length / (speed / 3.6) + SIGNAL_DELAY_S * signals
+                for length, speed, signals in zip(self.length_m, self.speed_kmh, self.signals, strict=True)
+            ),
+        )
+        self.out_edges = Adjacency(self.column("edge_from"), self.node_count)
+        self.in_edges = Adjacency(self.column("edge_to"), self.node_count)
+
+    def column(self, name: str) -> np.ndarray:
+        """A column as a numpy array, without copying it."""
+        values = getattr(self, name)
+        return np.frombuffer(values, dtype=values.typecode) if len(values) else np.empty(0, dtype=values.typecode)
 
     @property
     def node_count(self) -> int:
@@ -219,19 +280,34 @@ class RoadGraph:
 
     def node_kind(self, node: int) -> str:
         """What meets at node: 'interchange' or 'one-way' (no oncoming traffic to cross), else 'busy' or 'quiet'."""
-        kind = self._node_kinds.get(node)
-        if kind is None:
-            edges = self.out_edges[node] + self.in_edges[node]
-            kind = classify_junction(self.class_name(edge) for edge in edges)
-            if (
-                kind != "interchange"
-                and edges
-                and all(self.oneway[edge] for edge in edges)
-                and not self._on_divided_road(node)
-            ):
-                kind = "one-way"  # e.g. two one-way streets crossing downtown
-            self._node_kinds[node] = kind
-        return kind
+        return JUNCTION_KINDS[self.node_kinds()[node]]
+
+    def node_kinds(self) -> np.ndarray:
+        """Each junction's kind, as its place in JUNCTION_KINDS: judged once, for the whole map."""
+        if self._kinds is None:
+            masks, all_oneway = kernel.class_masks(
+                self.out_edges.column_ptr(),
+                self.out_edges.column_edges(),
+                self.in_edges.column_ptr(),
+                self.in_edges.column_edges(),
+                self.column("road_class"),
+                self.column("oneway"),
+            )
+            # Few mixes of road classes meet anywhere, so each is judged by name once.
+            mixes, which = np.unique(masks, return_inverse=True)
+            kinds = np.array(
+                [
+                    JUNCTION_KINDS.index(classify_junction(name for bit, name in enumerate(self.classes) if int(mix) >> bit & 1))
+                    for mix in mixes
+                ],
+                dtype=np.uint8,
+            )[which]
+            one_way = np.flatnonzero(all_oneway & (masks != 0) & (kinds != JUNCTION_KINDS.index("interchange")))
+            for node in one_way.tolist():
+                if not self._on_divided_road(node):
+                    kinds[node] = JUNCTION_KINDS.index("one-way")  # e.g. two one-way streets crossing downtown
+            self._kinds = kinds
+        return self._kinds
 
     def _on_divided_road(self, node: int) -> bool:
         """True when a road through node is one carriageway of a divided road: its name runs the other way close by."""
@@ -731,23 +807,23 @@ class RoadGraph:
             "stats": self.stats,
             "nodes": {"lat": [round(x, 7) for x in self.lat], "lng": [round(x, 7) for x in self.lng]},
             "edges": {
-                "from": self.edge_from,
-                "to": self.edge_to,
+                "from": self.edge_from.tolist(),
+                "to": self.edge_to.tolist(),
                 "length_m": [round(x, 1) for x in self.length_m],
                 "speed_kmh": [round(x, 1) for x in self.speed_kmh],
-                "signals": self.signals,
-                "class": self.road_class,
-                "name": self.name,
-                "way": self.way_id,
+                "signals": self.signals.tolist(),
+                "class": self.road_class.tolist(),
+                "name": self.name.tolist(),
+                "way": self.way_id.tolist(),
                 "oneway": [int(x) for x in self.oneway],
                 "winding": [int(x) for x in self.winding],
                 "bearing_start": [round(x, 1) for x in self.bearing_start],
                 "bearing_end": [round(x, 1) for x in self.bearing_end],
                 "geometry": self.geometry,
-                "rail_crossings": self.rail_crossings,
+                "rail_crossings": self.rail_crossings.tolist(),
                 "school": [int(x) for x in self.school_zone],
-                **({"stress": self.stress, "lit": [int(x) for x in self.lit]} if self.mode != "car" else {}),
-                **({"cross": self.cross} if self.mode == "walk" else {}),
+                **({"stress": self.stress.tolist(), "lit": [int(x) for x in self.lit]} if self.mode != "car" else {}),
+                **({"cross": self.cross.tolist()} if self.mode == "walk" else {}),
             },
             "banned": [[edge, other] for edge, others in sorted(self.banned.items()) for other in sorted(others)],
             "rail_crossing_points": [[round(lat, 7), round(lng, 7)] for lat, lng in self.rail_crossing_points],
