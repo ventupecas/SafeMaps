@@ -135,9 +135,9 @@ Leave this window open all day: closing it stops the app.
 ```
 
 - **No `--reload`:** that option is for development. Without it, a stray file save can't restart the server mid-demo. It also keeps checking every file for changes, which uses a lot of the computer over a long day.
-- **Many visitors at once? Add `--workers 2` (or 3).** One server process plans about 8 trips a minute, one at a time: with 5 visitors at once, the last waits about 40 seconds; with 30, trips time out. Each extra worker plans trips alongside, but loads its own copy of the maps, about 2 GB of memory each at first and over 3 GB once it has planned many long trips, so only add workers the computer has memory for (Task Manager, Performance, Memory: "Available"). Measure with the load test below.
+- **Many visitors at once? Add `--workers 2` (or 3).** One server process plans about 200 trips a minute, its searches side by side on the computer's cores: in a load test on the expo laptop, 5 visitors at once waited about a second a trip, and 30 about 8 seconds. Each extra worker plans trips alongside, but loads its own copy of the maps, about 1.2 GB of memory at first and 1.7 GB after a hundred trips, so only add workers the computer has memory for (Task Manager, Performance, Memory: "Available"). Measure with the load test below.
 - **Keep `--port 3143`:** the map key only works on that port.
-- **Wait for "Ready for trips":** the window prints `Started: ...` at once, then `Ready for trips: ... matched to the map in N s` about 3 minutes later. Trips work before that, just slower.
+- **Wait for "Ready for trips":** the window prints `Started: ...` at once, then `Ready for trips: ... matched to the map in N s` about a minute later. Trips work before that, just slower.
 - **Restarted within 10 minutes?** TomTom's last answer is reused, so a restart doesn't use another TomTom request.
 
 ### Or start it in Docker
@@ -145,7 +145,7 @@ Leave this window open all day: closing it stops the app.
 Instead of the command above, with Docker Desktop running, from the repo's top folder (`cd ..`, not `backend`):
 
 ```powershell
-docker compose up -d --build     # build and start it, at the same address
+docker compose up -d --build     # build (about 2 minutes, compiling the search) and start it, at the same address
 docker compose logs -f app       # wait for "Ready for trips", then Ctrl+C (the server keeps running)
 docker compose down              # stop it
 ```
@@ -155,7 +155,7 @@ docker compose down              # stop it
 - **What isn't in the image:** `backend\.env`, `backend\data` (the maps) and `backend\.cache` (saved answers, today's request counts, stats) stay on the computer, so a new computer needs them copied too. After changing `backend\.env`, run `docker compose up -d --force-recreate`.
 - **Control page:** its switches need `ROUTES_ADMIN_CODE` in `backend\.env`, because a server in a container can't tell this computer from a visitor. Without the code they refuse; the page still shows the checks.
 - **Google's map (`ROUTES_MAP=google`):** remove the `#` from the `config.js` line in `docker-compose.yml`, so the page gets the browser's map key.
-- **More workers:** add `WEB_CONCURRENCY=2` to `backend\.env`, and raise `mem_limit` in `docker-compose.yml` to about 3.5 GB per worker. Docker Desktop can only give out what it has (Settings, Resources).
+- **More workers:** add `WEB_CONCURRENCY=2` to `backend\.env`, and raise `mem_limit` in `docker-compose.yml` to about 2 GB per worker. Docker Desktop can only give out what it has (Settings, Resources).
 - **Phones:** set `ROUTES_ACCESS_CODE` in `backend\.env` first, since the link is public. `docker compose --profile phones up -d` starts the tunnel in a container of its own, and `docker compose logs tunnel` shows its `trycloudflare.com` address. Then follow "Let visitors use their phones" from adding the address to the key.
 
 ### Check it's healthy
@@ -173,7 +173,7 @@ Look for:
 - `wi511_key_set: true` (once you have the 511 key)
 - `tomtom_key_set: true` (on the OpenStreetMap map)
 - `transit` showing `ready: true` (a minute or two after starting), for bus trips
-- `matched_ahead: true`: the closures and jams across the metro are matched to the road map, so trips don't wait for it. It takes about 3 minutes after the server starts; check again if it's still `false`.
+- `matched_ahead: true`: the closures and jams across the metro are matched to the road map, so trips don't wait for it. It takes about a minute after the server starts; check again if it's still `false`.
 - `google_requests_today` well under your daily limit, and `tomtom_requests_today` under 80
 
 ### Turn on demo mode on the booth screen

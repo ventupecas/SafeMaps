@@ -609,7 +609,7 @@ def create_app(settings: Settings | None = None, *, http: httpx.Client | None = 
             "daily_limit": engine.usage.limit,
             "road_events": {
                 "order": list(settings.road_event_sources),
-                "matched_ahead": engine.warmed_up,  # false for about 3 minutes after startup
+                "matched_ahead": engine.warmed_up,  # false for about a minute after startup
                 "wzdx": str(settings.wzdx_file.name) if settings.wzdx_file else settings.wzdx_url,
                 "wi511_key_set": engine.wi511 is not None,
                 "tomtom_key_set": engine.tomtom is not None,
