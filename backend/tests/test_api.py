@@ -590,15 +590,17 @@ def test_without_the_schedule_no_bus_trips(tmp_path, google):
         assert client.post("/transit-route", json={"origin": ORIGIN, "destination": DESTINATION}).status_code == 503
 
 
-def test_a_walk_over_five_miles_suggests_another_mode(tmp_path, google):
+def test_a_walk_over_ten_miles_suggests_another_mode(tmp_path, google):
     walk_map = tmp_path / "grid-walk.json.gz"
     build_graph(grid_city().osm.elements, area="grid", mode="walk").save(walk_map)
     app = create_app(make_settings(tmp_path, map="osm", walk_graph_path=walk_map), http=httpx.Client(transport=httpx.MockTransport(google)))
-    far = {"lat": ORIGIN["lat"] + 0.1, "lng": ORIGIN["lng"]}  # about 7 miles north
-    halfway = {"lat": ORIGIN["lat"] + 0.05, "lng": ORIGIN["lng"]}
+    far = {"lat": ORIGIN["lat"] + 0.1462, "lng": ORIGIN["lng"]}  # about 10.1 miles north
+    within = {"lat": ORIGIN["lat"] + 0.1433, "lng": ORIGIN["lng"]}  # about 9.9 miles north: past the test city's streets
+    halfway = {"lat": ORIGIN["lat"] + 0.08, "lng": ORIGIN["lng"]}
     with TestClient(app) as client:
         too_far = client.post("/walk-route", json={"origin": ORIGIN, "destination": far})
-        assert too_far.status_code == 422 and "over 5 miles" in too_far.json()["detail"]
+        assert too_far.status_code == 422 and "over 10 miles" in too_far.json()["detail"]
+        assert client.post("/walk-route", json={"origin": ORIGIN, "destination": within}).status_code == 404
         # There and back past a stop counts all the way.
         with_a_stop = client.post("/walk-route", json={"origin": ORIGIN, "stops": [halfway], "destination": ORIGIN})
         assert with_a_stop.status_code == 422

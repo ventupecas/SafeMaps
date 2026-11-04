@@ -220,7 +220,7 @@ Without internet, place search, addresses for clicked spots, live traffic and ne
 
 ### Visitors' answers
 
-Under each recommendation the page asks "Would you take this route?". See the count at any time at **http://127.0.0.1:3143/feedback-summary**: yes and no, and how much safer and longer the routes were for each. No places are kept.
+Under each recommendation the page asks "Would you take this route?". See the count at any time with **Visitors' answers** at the top of the planner (**http://127.0.0.1:3143/answers.html**): yes and no, today and over all days, and how much safer and longer the routes were for each. It updates every 20 seconds. No places are kept.
 
 ### The "Which route is safer?" game
 
@@ -228,11 +228,11 @@ Under each recommendation the page asks "Would you take this route?". See the co
 
 ### The control page
 
-Open **http://127.0.0.1:3143/control.html** on the expo computer: whether everything is ready (road map, closures matched, crash data, bus routes), how much of today's Google and TomTom allowances is used, and two switches: **Pause demo mode** (on every screen running it, within 30 seconds) and **Restart today's stats** (after a rehearsal: earlier trips stop counting, nothing is deleted). The switches only work from the expo computer itself; to use them from elsewhere (a phone, through the tunnel), set `ROUTES_ADMIN_CODE` in `backend\.env` and type it on the page.
+Open **Control** at the top of the planner (**http://127.0.0.1:3143/control.html**) on the expo computer: whether everything is ready (road map, closures matched, crash data, bus routes), how much of today's Google and TomTom allowances is used, and two switches: **Pause demo mode** (on every screen running it, within 30 seconds) and **Restart today's stats** (after a rehearsal: earlier trips stop counting, nothing is deleted). The switches only work from the expo computer itself; to use them from elsewhere (a phone, through the tunnel), set `ROUTES_ADMIN_CODE` in `backend\.env` and type it on the page. The link is on the planner for everyone, so set the code before visitors use the expo computer: without one, anyone at its keyboard could use the switches.
 
 ### The stats screen
 
-Open **http://127.0.0.1:3143/stats.html** on a second screen: today's trips, how many got a safer route than the standard one, the risky turns, railroad crossings, school zones and closed roads they avoided, and the share who'd take the safer route. It updates every 20 seconds. Opened from the tunnel's https link, it also shows a QR code for phones. Sample trips (demo mode) and automatic re-plans aren't counted, and no places are kept (`backend/.cache/routes/trips.jsonl`).
+Open **Stats** at the top of the planner, or **http://127.0.0.1:3143/stats.html** on a second screen: today's trips, how many got a safer route than the standard one, the risky turns, railroad crossings, school zones and closed roads they avoided, and the share who'd take the safer route. It updates every 20 seconds. Opened from the tunnel's https link, it also shows a QR code for phones. Sample trips (demo mode) and automatic re-plans aren't counted, and no places are kept (`backend/.cache/routes/trips.jsonl`).
 
 ### Watch usage
 

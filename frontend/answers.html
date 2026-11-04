@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Visitors' Answers</title>
+    <meta name="theme-color" content="#0b7a53" />
+    <link rel="icon" href="icons/icon.svg" type="image/svg+xml" />
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body class="stats-page">
+    <main class="board">
+      <header class="board__header">
+        <div class="brand">
+          <img class="brand__mark" src="icons/icon.svg" alt="" />
+          <div>
+            <h1>Visitors' answers</h1>
+            <p class="tagline">Would you take this route?</p>
+          </div>
+        </div>
+        <div class="board__side">
+          <a class="chip chip--back" href="./">Back to the planner</a>
+          <p class="board__updated" id="answers-updated" aria-live="polite"></p>
+        </div>
+      </header>
+
+      <div class="answers">
+        <section class="answers__day" aria-labelledby="today-title">
+          <h2 id="today-title">Today</h2>
+          <div id="answers-today" class="answers__numbers"></div>
+        </section>
+        <section class="answers__day" aria-labelledby="ever-title">
+          <h2 id="ever-title">All days</h2>
+          <div id="answers-ever" class="answers__numbers"></div>
+        </section>
+      </div>
+
+      <p class="answers__note">Averages are against the standard route. No places are kept.</p>
+    </main>
+    <script src="answers.js" type="module"></script>
+  </body>
+</html>

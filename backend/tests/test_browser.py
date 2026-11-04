@@ -286,6 +286,46 @@ def test_the_safer_route_game_asks_for_free_uncounted_routes_and_shows_two(page,
         assert page.locator("#game-tally").text_content() == "You: 1 of 1 right" or "0 of 1" in page.locator("#game-tally").text_content()
 
 
+def test_the_main_screen_opens_the_booths_pages_and_each_leads_back(page, site):
+    open_map(page, site)
+    for chip, ready in (
+        ("game", "#game-trip"),
+        ("answers", "#answers-today .tile"),
+        ("stats", "#stat-trips"),
+        ("control", "#ready li"),
+    ):
+        page.click(f".chip--{chip}")
+        page.wait_for_selector(ready)
+        page.click(".chip--back")
+        page.wait_for_selector("#origin-search input")
+
+
+def test_the_answers_page_shows_what_visitors_said(page, site):
+    answer = {"safety_gain": 10, "profile": "safe-economy"}
+    for choice, extra_min in (("yes", 2), ("yes", 4), ("no", -1.5)):
+        assert httpx.post(site + "feedback", json={**answer, "choice": choice, "extra_min": extra_min}).status_code == 204
+    page.goto(site + "answers.html")
+    today = page.locator("#answers-today")
+    today.locator(".answers__table").wait_for()
+    assert today.locator(".tile strong").text_content() == "67%" and today.locator(".tile__detail").text_content() == "2 yes · 1 no"
+    assert today.locator("tbody tr").nth(0).locator("td").all_text_contents() == ["2", "+10", "+3"]
+    assert today.locator("tbody tr").nth(1).locator("td").all_text_contents() == ["1", "+10", "-1.5"]
+    assert page.locator("#answers-ever .tile__detail").text_content() == "2 yes · 1 no"
+
+
+def test_the_booths_pages_read_in_spanish(browser, site):
+    context = browser.new_context(locale="es-US", service_workers="block")
+    context.route("**/*", lambda route: route.continue_() if "127.0.0.1" in route.request.url else route.abort())
+    page = context.new_page()
+    open_map(page, site)
+    assert page.locator(".chip--answers").text_content() == "Respuestas de los visitantes" and page.locator(".chip--stats").text_content() == "Estadísticas"
+    page.click(".chip--answers")
+    page.wait_for_selector("#answers-today .tile")
+    assert page.locator("h1").text_content() == "Respuestas de los visitantes" and page.locator("#answers-ever .tile span").nth(0).text_content() == "dijeron que tomarían la ruta recomendada"
+    assert page.locator(".chip--back").text_content() == "Volver al planificador"
+    context.close()
+
+
 def test_bike_mode_plans_a_bike_route_colored_by_stress(page, site):
     asked = route_request_to(page, "/bike-route", lambda: open_map(page, site + TRIP + "&mode=bike"))
     assert asked["profile"] == "everyday"

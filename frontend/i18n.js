@@ -49,6 +49,9 @@ const PHRASES = [
   ["Open on your phone", "Abrir en tu celular"],
   ["Trip planner", "Planificador de viaje"],
   ["About this app", "Acerca de esta app"],
+  ["Visitors' answers", "Respuestas de los visitantes"],
+  ["Stats", "Estadísticas"],
+  ["Back to the planner", "Volver al planificador"],
   ["Trip", "Viaje"],
   ["Start", "Punto de partida"],
   ["Destination", "Destino"],
@@ -405,7 +408,7 @@ const PHRASES = [
   ["No bike route was found between these points.", "No se encontró una ruta en bicicleta entre estos puntos."],
   ["No walking route was found between these points.", "No se encontró una ruta a pie entre estos puntos."],
   ["The server has no bike map.", "El servidor no tiene el mapa para bicicletas."],
-  ["This walk is over 5 miles. Try Transit or Bike for a trip this long.", "Esta caminata es de más de 8 km. Para un viaje tan largo, prueba Transporte público o Bicicleta."],
+  ["This walk is over 10 miles. Try Transit or Bike for a trip this long.", "Esta caminata es de más de 16 km. Para un viaje tan largo, prueba Transporte público o Bicicleta."],
   ["The server has no walking map.", "El servidor no tiene el mapa para caminar."],
 
   // Transit mode
@@ -462,6 +465,18 @@ const PHRASES = [
     "Planifica un viaje en la pantalla de al lado o en tu celular. Cada ruta evita los riesgos que puede.",
   ],
   ["QR code to open the planner on a phone", "Código QR para abrir el planificador en un celular"],
+
+  // Visitors' answers
+  ["Visitors' Answers", "Respuestas de los visitantes"],
+  ["Today", "Hoy"],
+  ["All days", "Todos los días"],
+  ["said they'd take the recommended route", "dijeron que tomarían la ruta recomendada"],
+  ["No answers yet", "Aún no hay respuestas"],
+  ["Answer", "Respuesta"],
+  ["Visitors", "Visitantes"],
+  ["Average safety points gained", "Promedio de puntos de seguridad ganados"],
+  ["Average extra minutes", "Promedio de minutos adicionales"],
+  ["Averages are against the standard route. No places are kept.", "Los promedios se comparan con la ruta estándar. No se guarda ningún lugar."],
 ];
 
 // ---- Phrases with numbers, times and names in them
@@ -669,6 +684,7 @@ const PATTERNS = [
   [/^got a safer route than the standard one \((.+)\)$/, "obtuvieron una ruta más segura que la estándar ($1)"],
   [/^(.+) yes · (.+) no$/, "$1 sí · $2 no"],
   [/^Updated (.+)$/, "Actualizado $1"],
+  [/^Today since (.+)$/, "Hoy desde $1"],
   // Bike mode
   [/^(Low stress: anyone|Some traffic: most adults|Busy: confident riders|Very busy: few riders)( · |: )(\d+) min$/, (_, name, joint, n) => `${translate(name)}${joint}${n} min`],
   [/^(Sidewalk or path|Quiet street without a sidewalk|Busy street with no sidewalk mapped|Busy street without a sidewalk)( · |: )(\d+) min$/, (_, name, joint, n) => `${translate(name)}${joint}${n} min`],

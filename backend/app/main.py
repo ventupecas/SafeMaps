@@ -16,7 +16,7 @@ try the API directly.
     POST /bike-route  bike routes for one trip, lowest stress first (app.bike; needs the bike map)
     POST /walk-route  walking routes for one trip, the same way (needs the walking map)
     GET  /bike-stress the bike map's traffic stress in a box, for the page's Bike stress layer
-    GET  /expo-stats  today's trips and answers, for the expo's stats screen (stats.html)
+    GET  /expo-stats  today's trips and answers, for the expo's stats screen (stats.html) and answers page (answers.html)
     POST /guess       a visitor's guess in the "Which route is safer?" game (game.html)
     GET  /expo-control, POST /expo-control   the expo's control page (control.html): pause demo mode, restart the stats
     GET  /            the web map (frontend/), when that folder exists
@@ -230,7 +230,7 @@ class ControlChange(BaseModel):
 
 
 BIKE_STRESS_MAX_SEGMENTS = 6000
-MAX_WALK_KM = 8.0  # about 5 miles in a straight line: past that, few walk it
+MAX_WALK_KM = 16.1  # 10 miles in a straight line: past that, few walk it
 
 
 class BikeTripRequest(BaseModel):
@@ -1002,7 +1002,7 @@ def create_app(settings: Settings | None = None, *, http: httpx.Client | None = 
             raise HTTPException(status_code=422, detail=f"Unknown {mode} profile {trip.profile!r}; choose from {', '.join(profiles)}.")
         places = [trip.origin, *trip.stops, trip.destination]
         if mode == "walk" and sum(haversine_m(a.as_tuple(), b.as_tuple()) for a, b in pairwise(places)) > MAX_WALK_KM * 1000:
-            raise HTTPException(status_code=422, detail="This walk is over 5 miles. Try Transit or Bike for a trip this long.")
+            raise HTTPException(status_code=422, detail="This walk is over 10 miles. Try Transit or Bike for a trip this long.")
         departure = datetime.now() + timedelta(minutes=trip.departure_offset_min)
         report = collect_road_events(
             sources_for_map(settings.road_event_sources, settings.map),

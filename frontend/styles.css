@@ -39,6 +39,8 @@
   --icon-plus: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2.6' stroke-linecap='round'%3E%3Cpath d='M12 5v14M5 12h14'/%3E%3C/svg%3E");
   --icon-clock: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2.2' stroke-linecap='round'%3E%3Ccircle cx='12' cy='12' r='9.5'/%3E%3Cpath d='M12 7v5l3 2'/%3E%3C/svg%3E");
   --icon-thumb: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2.1' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M7 10v11H3V10zM7 10l4-7c1.7 0 2.8 1.4 2.4 3L12.8 10H19a2 2 0 0 1 2 2.3l-1.2 7A2 2 0 0 1 17.8 21H7'/%3E%3C/svg%3E");
+  --icon-bars: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2.8' stroke-linecap='round'%3E%3Cpath d='M5 20v-7M12 20V4M19 20V9'/%3E%3C/svg%3E");
+  --icon-sliders: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2.2' stroke-linecap='round'%3E%3Cpath d='M3 7h10M19 7h2M3 17h2M11 17h10'/%3E%3Ccircle cx='16' cy='7' r='3'/%3E%3Ccircle cx='8' cy='17' r='3'/%3E%3C/svg%3E");
   --chevron: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%235b6573' stroke-width='2.2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E");
 
   /* The page has no dark theme; this keeps the place search boxes light too. */
@@ -168,6 +170,18 @@ body {
 
 .chip--game {
   --icon: var(--icon-shield);
+}
+
+.chip--answers {
+  --icon: var(--icon-thumb);
+}
+
+.chip--stats {
+  --icon: var(--icon-bars);
+}
+
+.chip--control {
+  --icon: var(--icon-sliders);
 }
 
 .chip--back {
@@ -1944,6 +1958,17 @@ body:not(.map-osm) .osm-only {
   font-size: 0.9rem;
 }
 
+.board__side {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 8px;
+}
+
+.board__side .chip--back::before {
+  transform: scaleX(-1);
+}
+
 .board__tiles {
   display: grid;
   grid-template-columns: repeat(4, 1fr);
@@ -2018,6 +2043,72 @@ body:not(.map-osm) .osm-only {
   .board__header {
     flex-wrap: wrap;
   }
+
+  .board__side {
+    align-items: flex-start;
+  }
+}
+
+/* ---- Visitors' answers (answers.html), on the stats screen's board */
+
+.answers {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 28px;
+  align-items: start;
+}
+
+@media (max-width: 900px) {
+  .answers {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+.answers__day h2 {
+  margin: 0 0 12px;
+  font-size: 1.3rem;
+}
+
+.answers__numbers {
+  display: grid;
+  gap: 14px;
+}
+
+.answers__table {
+  width: 100%;
+  border-collapse: separate;
+  border-spacing: 0;
+  border-radius: var(--radius);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  font-variant-numeric: tabular-nums;
+}
+
+.answers__table th,
+.answers__table td {
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--border);
+  text-align: right;
+}
+
+.answers__table thead th {
+  color: var(--muted);
+  font-size: 0.85rem;
+  font-weight: 600;
+  vertical-align: bottom;
+}
+
+.answers__table th:first-child {
+  text-align: left;
+}
+
+.answers__table tbody tr:last-child > * {
+  border-bottom: none;
+}
+
+.answers__note {
+  margin: 0;
+  color: var(--muted);
 }
 
 /* ---- Modes (bike.js, transit.js): controls for some modes only (data-modes), the switch, stress bars */
