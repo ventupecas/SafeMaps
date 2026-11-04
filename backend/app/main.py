@@ -48,6 +48,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from app.cache import CacheMiss
 from app.candidates import CandidateOptions
+from app.compile_kernels import compile_kernels
 from app.config import BACKEND_DIR, Settings
 from app.driving_side import DrivingSide
 from app.engine import (
@@ -349,16 +350,24 @@ class Engine:
         return snapped
 
     def warm_up(self) -> None:
-        """Fetch the road events across the whole road map and match them to it, so trips don't wait for it.
+        """Get everything ready ahead of the first trip: the compiled code, each map's turns, and the road events.
 
-        Matching takes a search per event, about 30 s for the metro's work zones
-        and TomTom's closures, so the server does it once at startup, in the
-        background. The paid sources (apify) and Google's are left out.
+        Compiled code and the turns come first, as they're quick, so a trip made
+        while the rest gets ready is quick too. Then the road events across the
+        whole road map are fetched and matched to it, once, in the background, so
+        trips don't wait for it. The paid sources (apify) and Google's are left out.
         """
         if self.graph is None or self.graph.bbox is None:
             return
         started = time.perf_counter()
         try:
+            compile_kernels()
+            driving = self.router(make_turn_context(self.settings, self.hotspots, None, self.graph))
+            self._practice_drive(driving)
+            # The bike and walking maps too, so their first trips don't wait.
+            maps = [(graph, routed()) for graph, routed in ((self.bike_graph, self.bike_router), (self.walk_graph, self.walk_router)) if graph is not None]
+            for graph, active in maps:
+                self._practice_trip(active, graph)
             report = collect_road_events(
                 sources_for_map(self.settings.road_event_sources, self.settings.map),
                 self.graph.bbox,
@@ -369,17 +378,9 @@ class Engine:
                 google_ready=False,
             )
             snapped = self.snap(report.events)
-            router = self.router(make_turn_context(self.settings, self.hotspots, None, self.graph))
-            for event in snapped:
-                router.event_edges(event)  # the router's own lookup, remembered too
-            self._practice_drive(router)
-            # The bike and walking maps too, so their first trips don't wait a minute.
-            for graph, routed in ((self.bike_graph, self.bike_router), (self.walk_graph, self.walk_router)):
-                if graph is not None:
-                    active = routed()
-                    for event in snapped:
-                        active.event_edges(event)
-                    self._practice_trip(active, graph)
+            for active in (driving, *(active for _, active in maps)):
+                for event in snapped:
+                    active.event_edges(event)  # the router's own lookup, remembered too
             logger.info(
                 "Ready for trips: %d closures, lane closures and jams from %s matched to the map in %.0f s",
                 len(report.events),

@@ -189,8 +189,29 @@ def trip_area(*points: LatLng, margin_m: float = TRIP_MARGIN_M) -> BBox:
     )
 
 
-def in_area(events: Iterable[RoadEvent], area: BBox) -> list[RoadEvent]:
-    return [event for event in events if any(area.contains(lat, lng) for lat, lng in event.path)]
+def in_area(events: Sequence[RoadEvent], area: BBox) -> list[RoadEvent]:
+    """The events with a point in the area. A source's events are a tuple until its next refresh: flattened once."""
+    lat, lng, owner = _event_points(events)
+    inside = (lat >= area.south) & (lat <= area.north) & (lng >= area.west) & (lng <= area.east)
+    return [events[event] for event in np.unique(owner[inside]).tolist()]
+
+
+_POINTS_KEPT = 8
+_kept_points: dict[int, tuple[Sequence[RoadEvent], tuple[np.ndarray, np.ndarray, np.ndarray]]] = {}
+
+
+def _event_points(events: Sequence[RoadEvent]) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Every point of the events, and which event each belongs to."""
+    kept = _kept_points.get(id(events))
+    if kept is not None and kept[0] is events:
+        return kept[1]
+    lat, lng = columns([point for event in events for point in event.path])
+    owner = np.repeat(np.arange(len(events)), [len(event.path) for event in events])
+    if isinstance(events, tuple):
+        if len(_kept_points) >= _POINTS_KEPT:
+            _kept_points.pop(next(iter(_kept_points)), None)
+        _kept_points[id(events)] = (events, (lat, lng, owner))
+    return lat, lng, owner
 
 
 # ---- WZDx: the Work Zone Data Exchange
@@ -224,7 +245,7 @@ class WzdxFeed:
         age = self._clock() - self._fetched_at
         if self._events is None or age > WZDX_REFRESH.total_seconds():
             try:
-                self._events = self._load()
+                self._events = tuple(self._load())
                 self._fetched_at = self._clock()
             except EventSourceError:
                 if self._events is None or age > WZDX_STALE_OK.total_seconds():
@@ -404,7 +425,7 @@ class Wi511Feed:
 
     def events(self, area: BBox) -> list[RoadEvent]:
         if self._events is None or self._clock() - self._fetched_at > WI511_REFRESH.total_seconds():
-            self._events = self._fetch()
+            self._events = tuple(self._fetch())
             self._fetched_at = self._clock()
         return in_area(self._events, area)
 
@@ -570,7 +591,7 @@ class TomTomFeed:
         age = self._clock() - self._fetched_at
         if self._events is None or box != self._fetched_box or age > TOMTOM_REFRESH.total_seconds():
             try:
-                self._events = self._fetch(box)
+                self._events = tuple(self._fetch(box))
                 self._fetched_box, self._fetched_at = box, self._clock()
             except EventSourceError:
                 if self._events is None or box != self._fetched_box or age > TOMTOM_STALE_OK.total_seconds():
@@ -618,7 +639,7 @@ class TomTomFeed:
         except (OSError, ValueError, KeyError, TypeError) as exc:
             logger.warning("Ignoring TomTom's kept answer in %s: %s", self._saved.name, exc)
             return
-        self._events, self._fetched_box, self._fetched_at = events, box, self._clock() - age
+        self._events, self._fetched_box, self._fetched_at = tuple(events), box, self._clock() - age
         logger.info("TomTom: using the answer from %.0f minutes ago, kept across a restart", age / 60)
 
     def _get(self, part: BBox) -> list[Mapping[str, Any]]:
@@ -1071,15 +1092,16 @@ def near_routes(events: Iterable[RoadEvent], routes: Sequence[Sequence[Point]], 
     """The events that come within about within_m of a route (up to three times that): the ones worth drawing."""
     if not any(routes):
         return []
+    events = list(events)
     cell_lat = within_m / 111_320.0
     cell_lng = cell_lat / max(math.cos(math.radians(next(route for route in routes if route)[0][0])), 0.01)
-
-    def cell(point: Point) -> tuple[int, int]:
-        return math.floor(point[0] / cell_lat), math.floor(point[1] / cell_lng)
-
-    on_routes = {cell(point) for route in routes for point in densify(route, within_m / 2)}
-    reach = {(i + a, j + b) for i, j in on_routes for a in (-1, 0, 1) for b in (-1, 0, 1)}
-    return [event for event in events if any(cell(point) in reach for point in densify(event.path, within_m / 2))]
+    route_ends = np.cumsum([0, *(len(route) for route in routes)], dtype=np.int64)
+    route_lat, route_lng = columns([point for route in routes for point in route])
+    event_ends = np.cumsum([0, *(len(event.path) for event in events)], dtype=np.int64)
+    event_lat, event_lng = columns([point for event in events for point in event.path])
+    near = np.zeros(len(events), dtype=np.bool_)
+    kernel.lines_near_lines(event_ends, event_lat, event_lng, route_ends, route_lat, route_lng, within_m / 2, cell_lat, cell_lng, near)
+    return [event for event, is_near in zip(events, near.tolist()) if is_near]
 
 
 def _near(points: Sequence[Point], events: Iterable[RoadEvent]) -> list[RoadEvent]:

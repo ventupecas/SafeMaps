@@ -547,6 +547,39 @@ def mark_carried(route, samples_lat, samples_lng, lines, has_direction, directio
             covered[s] = True
 
 
+@njit(cache=True, nogil=True)
+def lines_near_lines(lines_ptr, lines_lat, lines_lng, near_ptr, near_lat, near_lng, spacing_m, cell_lat, cell_lng, out):
+    """Set out[line] for each line that comes into a cell next to one that any of the near lines passes through."""
+    size = 0
+    for line in range(near_ptr.size - 1):
+        if near_ptr[line] != near_ptr[line + 1]:
+            dense_lat, _ = densified(near_lat[near_ptr[line] : near_ptr[line + 1]], near_lng[near_ptr[line] : near_ptr[line + 1]], spacing_m)
+            size += dense_lat.size
+    keys = np.empty(size * 9, dtype=np.int64)
+    at = 0
+    for line in range(near_ptr.size - 1):
+        if near_ptr[line] == near_ptr[line + 1]:
+            continue
+        dense_lat, dense_lng = densified(near_lat[near_ptr[line] : near_ptr[line + 1]], near_lng[near_ptr[line] : near_ptr[line + 1]], spacing_m)
+        for s in range(dense_lat.size):
+            row, column = int(math.floor(dense_lat[s] / cell_lat)), int(math.floor(dense_lng[s] / cell_lng))
+            for i in range(row - 1, row + 2):
+                for j in range(column - 1, column + 2):
+                    keys[at] = _key(i, j)
+                    at += 1
+    keys = np.sort(keys[:at])
+    for line in range(lines_ptr.size - 1):
+        if lines_ptr[line] == lines_ptr[line + 1]:
+            continue
+        dense_lat, dense_lng = densified(lines_lat[lines_ptr[line] : lines_ptr[line + 1]], lines_lng[lines_ptr[line] : lines_ptr[line + 1]], spacing_m)
+        for s in range(dense_lat.size):
+            key = _key(int(math.floor(dense_lat[s] / cell_lat)), int(math.floor(dense_lng[s] / cell_lng)))
+            place = _first_at(keys, key)
+            if place < keys.size and keys[place] == key:
+                out[line] = True
+                break
+
+
 # ---- Segments near a point
 
 
