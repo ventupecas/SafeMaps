@@ -30,6 +30,14 @@ pub struct RouteLine {
     pub west: f64,
     pub north: f64,
     pub east: f64,
+    // Which big cells the route is in or next to: most of what's looked up isn't near it, and one read says so.
+    pub cells: Arr<u8>,
+    pub cell_rows: i64,
+    pub cell_columns: i64,
+    pub cell_south: f64,
+    pub cell_west: f64,
+    pub cell_lat: f64,
+    pub cell_lng: f64,
 }
 
 #[repr(C)]
@@ -45,6 +53,73 @@ pub struct EventColumns {
     pub direction: Arr<f64>,
     pub along: Arr<u8>,
     pub ramp: Arr<u8>,
+    // Each event's line, sampled once: sample_ptr[event] up to sample_ptr[event + 1].
+    pub sample_ptr: Arr<i64>,
+    pub sample_lat: Arr<f64>,
+    pub sample_lng: Arr<f64>,
+    pub sample_line: Arr<f64>,
+    pub length_m: Arr<f64>,
+}
+
+#[repr(C)]
+pub struct EventSamples {
+    pub lat: Out<f64>,
+    pub lng: Out<f64>,
+    pub line: Out<f64>,
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn free_event_samples(samples: *mut EventSamples) {
+    (*samples).lat.free();
+    (*samples).lng.free();
+    (*samples).line.free();
+}
+
+/// Each event's line sampled every spacing_m, with the bearing of the line at each sample, and its length.
+#[no_mangle]
+pub unsafe extern "C" fn event_samples(
+    ptr: *const i64,
+    ptr_len: i64,
+    lat: *const f64,
+    lng: *const f64,
+    n: i64,
+    spacing_m: f64,
+    sample_ptr: *mut i64,
+    length_m: *mut f64,
+    out: *mut EventSamples,
+) {
+    let (ptr, lat, lng) = (Arr::new(ptr, ptr_len), Arr::new(lat, n), Arr::new(lng, n));
+    let (sample_ptr, length_m) = (Arr::new(sample_ptr, ptr_len), Arr::new(length_m, (ptr_len - 1).max(0)));
+    let (mut all_lat, mut all_lng, mut all_line) = (Vec::new(), Vec::new(), Vec::new());
+    sample_ptr.set(0, 0);
+    for event in 0..(ptr_len as usize).saturating_sub(1) {
+        let (start, stop) = (ptr.get(event) as usize, ptr.get(event + 1) as usize);
+        let (path_lat, path_lng) = (lat.part(start, stop), lng.part(start, stop));
+        let (samples_lat, samples_lng) = densify(path_lat, path_lng, spacing_m);
+        all_line.extend(bearings_along(&samples_lat, &samples_lng));
+        all_lat.extend(samples_lat);
+        all_lng.extend(samples_lng);
+        sample_ptr.set(event + 1, all_lat.len() as i64);
+        length_m.set(event, path_length(path_lat.p, path_lng.p, path_lat.n));
+    }
+    (*out).lat = Out::from_vec(all_lat);
+    (*out).lng = Out::from_vec(all_lng);
+    (*out).line = Out::from_vec(all_line);
+}
+
+/// Mark the big cells a route's points are in, and those next to them.
+#[no_mangle]
+pub unsafe extern "C" fn mark_route_cells(lat: *const f64, lng: *const f64, n: i64, south: f64, west: f64, cell_lat: f64, cell_lng: f64, rows: i64, columns: i64, cells: *mut u8) {
+    let (lat, lng, cells) = (Arr::new(lat, n), Arr::new(lng, n), Arr::new(cells, rows * columns));
+    for i in 0..n as usize {
+        let row = ((lat.get(i) - south) / cell_lat).floor() as i64;
+        let column = ((lng.get(i) - west) / cell_lng).floor() as i64;
+        for r in (row - 1).max(0)..=(row + 1).min(rows - 1) {
+            for c in (column - 1).max(0)..=(column + 1).min(columns - 1) {
+                cells.set((r * columns + c) as usize, 1);
+            }
+        }
+    }
 }
 
 #[repr(C)]
@@ -549,6 +624,13 @@ fn carries(travel: f64, line: Option<f64>, direction: Option<f64>, along: bool, 
 /// Whether the route passes within within_m of a point, going the way an event's traffic goes.
 #[inline(always)]
 unsafe fn route_carries(route: &RouteLine, lat: f64, lng: f64, within_m: f64, line: Option<f64>, direction: Option<f64>, along: bool, rules: &Matching) -> bool {
+    if route.cells.n > 0 {
+        let row = ((lat - route.cell_south) / route.cell_lat).floor() as i64;
+        let column = ((lng - route.cell_west) / route.cell_lng).floor() as i64;
+        if row < 0 || row >= route.cell_rows || column < 0 || column >= route.cell_columns || route.cells.get((row * route.cell_columns + column) as usize) == 0 {
+            return false;
+        }
+    }
     let grid = &route.grid;
     in_cells_around(grid, lat, lng, 1, route.reach_lng, |at| {
         haversine(lat, lng, grid.lat.get(at), grid.lng.get(at)) <= within_m && carries(route.bearings.get(at), line, direction, along, rules)
@@ -598,12 +680,9 @@ pub unsafe extern "C" fn runs_along_each(route: *const RouteLine, events: *const
             continue; // a ramp runs beside its freeway for a while: using it means passing both its ends
         }
         let spacing = rules.match_m / 2.0;
-        let (path_lat, path_lng) = (events.lat.part(start, stop), events.lng.part(start, stop));
-        let (samples_lat, samples_lng) = densify(path_lat, path_lng, spacing);
-        let lines = bearings_along(&samples_lat, &samples_lng);
         let (mut longest, mut run, mut misses) = (0i64, 0i64, 0i64);
-        for s in 0..samples_lat.len() {
-            if route_carries(route, samples_lat[s], samples_lng[s], rules.on_route_m, Some(lines[s]), direction, along, rules) {
+        for s in events.sample_ptr.get(event) as usize..events.sample_ptr.get(event + 1) as usize {
+            if route_carries(route, events.sample_lat.get(s), events.sample_lng.get(s), rules.on_route_m, Some(events.sample_line.get(s)), direction, along, rules) {
                 run += 1 + misses; // a single missed sample (a curve drawn differently) doesn't break the run
                 misses = 0;
             } else if run != 0 && misses == 0 {
@@ -614,8 +693,7 @@ pub unsafe extern "C" fn runs_along_each(route: *const RouteLine, events: *const
             }
             longest = longest.max(run);
         }
-        let length = path_length(path_lat.p, path_lng.p, path_lat.n);
-        out.set(event, (longest as f64 * spacing >= rules.event_on_route_m.min(length / 2.0)) as u8);
+        out.set(event, (longest as f64 * spacing >= rules.event_on_route_m.min(events.length_m.get(event) / 2.0)) as u8);
     }
 }
 
@@ -629,18 +707,16 @@ pub unsafe extern "C" fn share_along_each(route: *const RouteLine, events: *cons
         if wanted.get(event) == 0 || !overlaps(route, events, event, rules) {
             continue;
         }
-        let (start, stop) = (events.ptr.get(event) as usize, events.ptr.get(event + 1) as usize);
         let direction = event_direction(events, event);
         let along = events.along.get(event) != 0;
-        let (samples_lat, samples_lng) = densify(events.lat.part(start, stop), events.lng.part(start, stop), rules.match_m / 2.0);
-        let lines = bearings_along(&samples_lat, &samples_lng);
+        let (from, to) = (events.sample_ptr.get(event) as usize, events.sample_ptr.get(event + 1) as usize);
         let mut matched = 0i64;
-        for s in 0..samples_lat.len() {
-            if route_carries(route, samples_lat[s], samples_lng[s], rules.on_route_m, Some(lines[s]), direction, along, rules) {
+        for s in from..to {
+            if route_carries(route, events.sample_lat.get(s), events.sample_lng.get(s), rules.on_route_m, Some(events.sample_line.get(s)), direction, along, rules) {
                 matched += 1;
             }
         }
-        out.set(event, matched as f64 / samples_lat.len() as f64);
+        out.set(event, matched as f64 / (to - from) as f64);
     }
 }
 
@@ -820,6 +896,7 @@ unsafe fn decode_segment(map: &MapColumns, edge: usize, lat: &mut Vec<f64>, lng:
 }
 
 /// Segments of the road nearest a point (both ways of it unless direction says), within match_m: see RoadGraph.
+/// Those running most nearly along direction come first, then the nearest: at a junction, roads meet at one point.
 #[no_mangle]
 pub unsafe extern "C" fn roads_at(
     lat: f64,
@@ -856,7 +933,7 @@ pub unsafe extern "C" fn roads_at(
     candidates.dedup();
     let direction = if has_direction { Some(direction) } else { None };
     let m_per_deg_lng = map.m_per_deg_lookup * (lat * RADIANS).cos();
-    let mut near: Vec<(i32, f64)> = Vec::new();
+    let mut near: Vec<(i32, f64, f64)> = Vec::new();
     let mut nearest = f64::INFINITY;
     let (mut path_lat, mut path_lng) = (Vec::new(), Vec::new());
     for &edge in candidates.iter() {
@@ -876,12 +953,14 @@ pub unsafe extern "C" fn roads_at(
         decode_segment(map, edge_at, &mut path_lat, &mut path_lng);
         let (offset, heading) = distance_to_path(lat, lng, &path_lat, &path_lng, map.m_per_deg_geo);
         if offset <= rules.match_m && carries(heading, None, direction, false, rules) {
-            near.push((edge, offset));
+            let off_course = direction.map_or(0.0, |wanted| (angle_between(heading, wanted) * 1000.0).round());
+            near.push((edge, offset, off_course));
             nearest = nearest.min(offset);
         }
     }
-    let found: Vec<i32> = near.iter().filter(|(_, offset)| *offset <= nearest + same_road_m).map(|(edge, _)| *edge).collect();
-    *out = Out::from_vec(found);
+    near.retain(|(_, offset, _)| *offset <= nearest + same_road_m);
+    near.sort_by(|a, b| a.2.total_cmp(&b.2).then(a.1.total_cmp(&b.1)).then(a.0.cmp(&b.0)));
+    *out = Out::from_vec(near.into_iter().map(|(edge, _, _)| edge).collect());
 }
 
 /// Segments within match_m of a point running along heading, nearest first: those about as near as the nearest.

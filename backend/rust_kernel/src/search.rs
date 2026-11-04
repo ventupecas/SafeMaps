@@ -304,6 +304,17 @@ unsafe fn heap_pop(heap: &mut Vec<Entry>) -> Entry {
     top
 }
 
+/// With the sun low, segments heading toward it cost per_s more, for each second they take.
+#[no_mangle]
+pub unsafe extern "C" fn add_glare(edge_costs: *mut f64, bearings: *const f64, time_s: *const f64, edges: i64, azimuth: f64, per_s: f64, glare_deg: f64) {
+    let (edge_costs, bearings, time_s) = (Arr::new(edge_costs, edges), Arr::new(bearings, edges), Arr::new(time_s, edges));
+    for edge in 0..edges as usize {
+        if ((bearings.get(edge) - azimuth + 180.0).rem_euclid(360.0) - 180.0).abs() <= glare_deg {
+            edge_costs.set(edge, edge_costs.get(edge) + per_s * time_s.get(edge));
+        }
+    }
+}
+
 // ---- The search back
 
 /// What's left to the destination from each junction, along the roads alone, turns ignored. Returns the distance

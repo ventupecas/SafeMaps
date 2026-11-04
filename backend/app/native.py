@@ -44,7 +44,7 @@ def arr(values: np.ndarray) -> Arr:
 
 
 def address(values: np.ndarray) -> int:
-    return values.ctypes.data
+    return values.__array_interface__["data"][0]
 
 
 def copied(out: Out, dtype: type) -> np.ndarray:

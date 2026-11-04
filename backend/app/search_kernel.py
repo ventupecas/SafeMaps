@@ -92,6 +92,7 @@ declare("count_steps", [i64, pointer, pointer, i64, pointer], i64)
 declare("crossing_stress", [i32, i32, u8, pointer], i64)
 declare("build_steps", [pointer, pointer, pointer, pointer, i64, pointer, pointer, pointer, pointer, pointer, pointer, pointer, pointer, boolean, pointer], i64)
 declare("class_masks", [i64, i64, pointer, pointer, pointer, pointer, pointer, pointer, pointer, pointer])
+declare("add_glare", [pointer, pointer, pointer, i64, f64, f64, f64])
 
 
 class Roads:
@@ -232,6 +233,11 @@ class Workspace:
             return copied(out.path, np.int32), copied(out.maneuvers, np.uint8), copied(out.steps, np.int32), out.opened
         finally:
             lib.free_route(C.addressof(out))
+
+
+def add_glare(edge_costs: np.ndarray, bearings: np.ndarray, time_s: np.ndarray, azimuth: float, per_s: float, glare_deg: float) -> None:
+    """With the sun low, segments heading toward it cost per_s more, for each second they take."""
+    lib.add_glare(address(edge_costs), address(bearings), address(time_s), edge_costs.size, azimuth, per_s, glare_deg)
 
 
 def path_cost(departure: int, steps: np.ndarray, edge_costs: np.ndarray, step_costs: np.ndarray, first: np.ndarray, second: np.ndarray, kind: np.ndarray, zones: Zones) -> float:

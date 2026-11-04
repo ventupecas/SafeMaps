@@ -9,7 +9,8 @@ from __future__ import annotations
 
 import math
 from collections.abc import Iterable, Sequence
-from itertools import pairwise
+from functools import lru_cache
+from itertools import chain, pairwise
 
 import numpy as np
 
@@ -27,9 +28,15 @@ def decode_polyline(encoded: str, precision: int = 5) -> list[Point]:
     """
     if not encoded:
         return []
+    return list(_decoded(encoded, precision))
+
+
+@lru_cache(maxsize=512)
+def _decoded(encoded: str, precision: int) -> tuple[Point, ...]:
+    """Kept for a while, as a plan reads the same route several times over."""
     data = np.frombuffer(encoded.encode("latin-1"), dtype=np.uint8)
     lat, lng = kernel.decoded(data, 0, data.size, float(10**precision))
-    return list(zip(lat.tolist(), lng.tolist()))
+    return tuple(zip(lat.tolist(), lng.tolist()))
 
 
 def encode_polyline(points: Iterable[Point], precision: int = 5) -> str:
@@ -40,7 +47,7 @@ def encode_polyline(points: Iterable[Point], precision: int = 5) -> str:
 
 def columns(points: Sequence[Point]) -> tuple[np.ndarray, np.ndarray]:
     """A path's latitudes and longitudes, for the compiled functions."""
-    table = np.array(points, dtype=np.float64).reshape(-1, 2)
+    table = np.fromiter(chain.from_iterable(points), dtype=np.float64, count=2 * len(points)).reshape(-1, 2)
     return table[:, 0].copy(), table[:, 1].copy()
 
 

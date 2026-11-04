@@ -24,7 +24,8 @@ import math
 from collections import Counter
 from collections.abc import Iterable, Iterator, Sequence
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from functools import cached_property
 from threading import Lock
 from typing import Any
 
@@ -48,6 +49,8 @@ from app.road_events import MAX_SLOWDOWN, WORKERS_PRESENT_FACTOR, RoadEvent
 from app.roadgraph import DEFAULT_SPEED_FACTOR, RoadGraph
 from app.sun import GLARE_ANGLE_DEG, Sun, low_sun
 
+_EMPTY_INT32 = np.empty(0, dtype=np.int32)
+_EMPTY_INT64 = np.empty(0, dtype=np.int64)
 LINK_CLASSES = frozenset({"motorway_link", "trunk_link", "primary_link", "secondary_link", "tertiary_link"})
 FREEWAY_CLASSES = frozenset({"motorway", "trunk"})
 
@@ -65,7 +68,7 @@ ALTERNATIVE_SEARCHES_PER_ROUTE = 3
 EDGE_COSTS_KEPT = 12  # segment costs kept per router, by profile: about 3 MB each on Milwaukee's car map
 # How far past the trip's start the search back from the destination goes (see kernel.reverse_bound), as a
 # multiple of the road-only cost from there: farther, and more is settled than the forward search ever looks at.
-BOUND_REACH = 1.5
+BOUND_REACH = 1.1
 WORKSPACES_KEPT = 16  # scratch kept for the next trips, at most: more than this at once make their own
 MAX_SNAP_M = 1_000.0
 # A moving car whose road can't be matched starts from the nearest junction,
@@ -103,8 +106,6 @@ RAIL_CROSSING_S = 20.0
 SCHOOL_ZONE_KMH = 32.0
 
 _ALL_MANEUVERS = DECISION_MANEUVERS | {"STRAIGHT"}
-_EMPTY_INT32 = np.empty(0, dtype=np.int32)
-_EMPTY_INT64 = np.empty(0, dtype=np.int64)
 
 Move = tuple[int, str, bool, bool]  # next segment, maneuver, crosses traffic, busy junction
 Turn = tuple[int, str, bool, bool]  # junction, maneuver, crosses traffic, busy junction
@@ -126,11 +127,21 @@ class _Costs:
     profile: ScoringProfile
     edges: np.ndarray
     table: dict[tuple[str, bool], float]
-    zones: dict[int, frozenset[int]]  # segment -> the lane closures and hazards it's in, by event number
     zone_costs: dict[int, float]  # zone -> what driving into it costs
+    # The lane closures and hazards: each segment in one, beside the event number of the one it's in.
+    zone_edges: np.ndarray = field(default_factory=lambda: _EMPTY_INT64)
+    zone_numbers: np.ndarray = field(default_factory=lambda: _EMPTY_INT64)
     school_cost: float = 0.0  # what driving into a school zone costs: 0 outside school hours
     key: Any = None  # what the step costs depend on: trips with the same key share them
     extra: Any = None  # the bike router's own (app.bike): the rider's profile, and whether it's dark
+
+    @cached_property
+    def zones(self) -> dict[int, frozenset[int]]:
+        """Segment -> the zones it's in, for reading one step's cost from its parts."""
+        found: dict[int, set[int]] = {}
+        for edge, number in zip(self.zone_edges.tolist(), self.zone_numbers.tolist(), strict=True):
+            found.setdefault(edge, set()).add(number)
+        return {edge: frozenset(numbers) for edge, numbers in found.items()}
 
 
 class OutsideGraphError(LookupError):
@@ -198,7 +209,8 @@ class Router:
         self._connector = graph.column("length_m") < CONNECTOR_MAX_M
         self._kept_costs: Kept[np.ndarray] = Kept(EDGE_COSTS_KEPT)
         self._crashes: np.ndarray | None = None
-        self._event_edges: dict[tuple[Any, ...], frozenset[int]] = {}
+        self._event_edges: dict[tuple[Any, ...], tuple[frozenset[int], np.ndarray]] = {}
+        self._school_segments: tuple[np.ndarray, np.ndarray] | None = None
         self._bearings: np.ndarray | None = None
         # Junctions with a traffic signal: a busy crossing turn there costs SIGNALED_CROSSING_SHARE of one.
         self._signal_node = np.zeros(graph.node_count, dtype=np.bool_)
@@ -407,16 +419,13 @@ class Router:
         """The trip's zones, for the search. Few segments are in a lane closure or a hazard, and a trip without any has none."""
         g = self.graph
         index, ptr, ids = _EMPTY_INT32, _EMPTY_INT64, _EMPTY_INT32
-        if costs.zones:
+        if costs.zone_edges.size:
+            order = np.argsort(costs.zone_edges, kind="stable")
+            edges, starts = np.unique(costs.zone_edges[order], return_index=True)
             index = np.zeros(g.edge_count, dtype=np.int32)
-            ends = [0]
-            numbers: list[int] = []
-            for row, (edge, zones) in enumerate(costs.zones.items(), 1):
-                index[edge] = row
-                numbers.extend(zones)
-                ends.append(len(numbers))
-            ptr = np.array(ends, dtype=np.int64)
-            ids = np.array(numbers, dtype=np.int32)
+            index[edges] = np.arange(1, edges.size + 1, dtype=np.int32)
+            ptr = np.append(starts, order.size).astype(np.int64)
+            ids = costs.zone_numbers[order].astype(np.int32)
         cost = np.zeros(max(costs.zone_costs, default=-1) + 1)
         for zone, value in costs.zone_costs.items():
             cost[zone] = value
@@ -547,14 +556,29 @@ class Router:
 
     def event_edges(self, event: RoadEvent) -> frozenset[int]:
         """The segments a road event lies on, remembered by place: the same stretches come back trip after trip."""
+        return self._event_entry(event)[0]
+
+    def _event_array(self, event: RoadEvent) -> np.ndarray:
+        """The same segments as an array, for changing their costs all at once."""
+        return self._event_entry(event)[1]
+
+    def _event_entry(self, event: RoadEvent) -> tuple[frozenset[int], np.ndarray]:
         key = event.geometry_key()
-        edges = self._event_edges.get(key)
-        if edges is None:
+        entry = self._event_edges.get(key)
+        if entry is None:
             if len(self._event_edges) > 10_000:
                 self._event_edges.clear()
             edges = frozenset(self.graph.event_edges(event))
-            self._event_edges[key] = edges
-        return edges
+            entry = (edges, np.fromiter(edges, dtype=np.int64, count=len(edges)))
+            self._event_edges[key] = entry
+        return entry
+
+    def _school_zones(self) -> tuple[np.ndarray, np.ndarray]:
+        """The segments in school zones, and how many times longer each takes at school zone speed: worked out once."""
+        if self._school_segments is None:
+            edges = np.flatnonzero(self.graph.column("school_zone"))
+            self._school_segments = edges, np.maximum(1.0, self.graph.column("speed_kmh")[edges] / SCHOOL_ZONE_KMH)
+        return self._school_segments
 
     def _trip_costs(
         self, profile: Any, events: Sequence[RoadEvent], *, keep: Iterable[int], school_hours: bool, sun: Sun | None
@@ -578,48 +602,46 @@ class Router:
         """
         g = self.graph
         edge_costs = self._kept_edge_costs(profile).copy()  # a copy: this trip's zones and events change it
-        zones: dict[int, set[int]] = {}
-        zone_costs: dict[int, float] = {}
         if school_hours:
-            in_zone = g.column("school_zone") != 0
-            edge_costs[in_zone] *= np.maximum(1.0, g.column("speed_kmh")[in_zone] / SCHOOL_ZONE_KMH)
+            in_zone, slower_there = self._school_zones()
+            edge_costs[in_zone] *= slower_there
         if low_sun(sun) and profile.sun_glare_weight:
-            # app.sun.glare, for every segment of the map at once.
-            azimuth, per_s = sun[0], profile.sun_glare_weight / 60
-            into_sun = np.abs((self._edge_bearings() - azimuth + 180) % 360 - 180) <= GLARE_ANGLE_DEG
-            edge_costs[into_sun] += per_s * g.column("time_s")[into_sun]
-        keep = set(keep)
+            kernel.add_glare(edge_costs, self._edge_bearings(), g.column("time_s"), sun[0], profile.sun_glare_weight / 60, GLARE_ANGLE_DEG)
+        keep = np.fromiter(keep, dtype=np.int64)
+        zone_edges: list[np.ndarray] = []
+        zone_numbers: list[np.ndarray] = []
+        zone_costs: dict[int, float] = {}
         for number, event in enumerate(events):
-            edges = self.event_edges(event)
-            slowdown = self._slowdown(event, edges) if event.kind in ("jam", "slow") else 1.0
-            for edge in edges:
-                if event.kind == "closed":
-                    if edge not in keep:
-                        edge_costs[edge] = math.inf
-                elif event.kind == "lanes":
-                    # Slower by the reduced speed limit if there is one (the expected speed is
-                    # below the posted one, hence the factor), and by LANE_CLOSURE_FACTOR at least.
-                    slower = LANE_CLOSURE_FACTOR
-                    if event.speed_limit_kmh:
-                        slower = max(slower, g.speed_kmh[edge] / (event.speed_limit_kmh * DEFAULT_SPEED_FACTOR))
-                    edge_costs[edge] *= slower
-                    zones.setdefault(edge, set()).add(number)
-                    zone_costs[number] = profile.lane_closure_weight * (
-                        WORKERS_PRESENT_FACTOR if event.workers else 1.0
-                    )
-                elif event.kind == "hazard":
-                    # Fog, ice, flooding: driven slower, and entering it costs weather_hazard_weight once.
-                    edge_costs[edge] *= WEATHER_FACTOR
-                    zones.setdefault(edge, set()).add(number)
-                    zone_costs[number] = profile.weather_hazard_weight
-                else:
-                    edge_costs[edge] *= slowdown
+            edges = self._event_array(event)
+            if edges.size == 0:
+                continue
+            if event.kind == "closed":
+                edge_costs[edges[~np.isin(edges, keep)]] = math.inf
+            elif event.kind == "lanes":
+                # Slower by the reduced speed limit if there is one (the expected speed is
+                # below the posted one, hence the factor), and by LANE_CLOSURE_FACTOR at least.
+                slower = LANE_CLOSURE_FACTOR
+                if event.speed_limit_kmh:
+                    slower = np.maximum(slower, g.column("speed_kmh")[edges] / (event.speed_limit_kmh * DEFAULT_SPEED_FACTOR))
+                edge_costs[edges] *= slower
+                zone_edges.append(edges)
+                zone_numbers.append(np.full(edges.size, number, dtype=np.int64))
+                zone_costs[number] = profile.lane_closure_weight * (WORKERS_PRESENT_FACTOR if event.workers else 1.0)
+            elif event.kind == "hazard":
+                # Fog, ice, flooding: driven slower, and entering it costs weather_hazard_weight once.
+                edge_costs[edges] *= WEATHER_FACTOR
+                zone_edges.append(edges)
+                zone_numbers.append(np.full(edges.size, number, dtype=np.int64))
+                zone_costs[number] = profile.weather_hazard_weight
+            else:
+                edge_costs[edges] *= self._slowdown(event, edges.tolist()) if event.kind in ("jam", "slow") else 1.0
         return _Costs(
             profile=profile,
             edges=edge_costs,
             table=self._turn_table(profile),
-            zones={edge: frozenset(numbers) for edge, numbers in zones.items()},
             zone_costs=zone_costs,
+            zone_edges=np.concatenate(zone_edges) if zone_edges else _EMPTY_INT64,
+            zone_numbers=np.concatenate(zone_numbers) if zone_numbers else _EMPTY_INT64,
             school_cost=profile.school_zone_weight if school_hours else 0.0,
             key=profile.model_dump_json(),
         )

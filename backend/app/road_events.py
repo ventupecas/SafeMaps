@@ -1139,6 +1139,7 @@ class _EventTable:
             np.fromiter((event.direction or 0.0 for event in events), dtype=np.float64, count=count),
             np.fromiter((event.along for event in events), dtype=np.bool_, count=count),
             np.fromiter((event.road in RAMP_KINDS for event in events), dtype=np.bool_, count=count),
+            spacing_m=EVENT_MATCH_M / 2,
         )
         self.count = count
         self.closed = np.fromiter((event.kind == "closed" for event in events), dtype=np.bool_, count=count)
@@ -1179,6 +1180,8 @@ class _RouteIndex:
             float(lng.min()),
             float(lat.max()),
             float(lng.max()),
+            near_m=EVENT_MATCH_M,
+            m_per_deg=111_320.0,
         )
 
     def runs_along_each(self, table: _EventTable, wanted: np.ndarray) -> np.ndarray:

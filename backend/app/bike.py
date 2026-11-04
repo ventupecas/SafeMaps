@@ -127,26 +127,25 @@ class BikeRouter(Router):
     def _trip_costs(self, profile, events, *, keep, school_hours=False, sun=None) -> _Costs:  # type: ignore[override]
         g = self.graph
         slower = MAP_SPEED_KMH[g.mode] / profile.speed_kmh  # the map's times are at its own speed
-        weights = profile.stress_weights
+        weights = np.array(profile.stress_weights)
         edges = self._base(profile, dark(sun)).copy()  # a copy: this trip's closures change it
-        keep = set(keep)
+        keep = np.fromiter(keep, dtype=np.int64)
         for event in events:
-            for edge in self.event_edges(event):
-                if event.kind == "closed" and edge not in keep:
-                    edges[edge] = math.inf
-                elif event.kind == "lanes":
-                    # A lane closure squeezes the rider into traffic: one stress level worse.
-                    level = max(1, g.stress[edge])
-                    edges[edge] *= weights[min(4, level + 1) - 1] / weights[level - 1]
-                elif event.kind == "hazard":
-                    edges[edge] *= 2.0  # fog, ice, flooding: slower and riskier on a bike
+            on_it = self._event_array(event)
+            if event.kind == "closed":
+                edges[on_it[~np.isin(on_it, keep)]] = math.inf
+            elif event.kind == "lanes":
+                # A lane closure squeezes the rider into traffic: one stress level worse.
+                level = np.maximum(1, g.column("stress")[on_it])
+                edges[on_it] *= weights[np.minimum(4, level + 1) - 1] / weights[level - 1]
+            elif event.kind == "hazard":
+                edges[on_it] *= 2.0  # fog, ice, flooding: slower and riskier on a bike
         # What a turn takes and how it feels to a rider, whatever else is on the road.
         search = ScoringProfile(time_weight=slower, fuel_weight=0.0, maneuver_weight=0.3, busy_crossing_weight=0.0, hotspot_crossing_weight=0.0)
         return _Costs(
             profile=search,
             edges=edges,
             table=self._turn_table(search),
-            zones={},
             zone_costs={},
             key=(profile, dark(sun)),
             extra=_BikeTrip(profile, dark(sun)),

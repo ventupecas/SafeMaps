@@ -19,11 +19,30 @@ class _GridC(C.Structure):
 
 
 class _RouteLineC(C.Structure):
-    _fields_ = [("grid", _GridC), ("bearings", Arr), ("reach_lng", i64), ("south", f64), ("west", f64), ("north", f64), ("east", f64)]
+    _fields_ = [
+        ("grid", _GridC),
+        ("bearings", Arr),
+        ("reach_lng", i64),
+        ("south", f64),
+        ("west", f64),
+        ("north", f64),
+        ("east", f64),
+        ("cells", Arr),
+        ("cell_rows", i64),
+        ("cell_columns", i64),
+        ("cell_south", f64),
+        ("cell_west", f64),
+        ("cell_lat", f64),
+        ("cell_lng", f64),
+    ]
 
 
 class _EventColumnsC(C.Structure):
-    _fields_ = [(name, Arr) for name in ("ptr", "lat", "lng", "south", "west", "north", "east", "has_direction", "direction", "along", "ramp")]
+    _fields_ = [(name, Arr) for name in ("ptr", "lat", "lng", "south", "west", "north", "east", "has_direction", "direction", "along", "ramp", "sample_ptr", "sample_lat", "sample_lng", "sample_line", "length_m")]
+
+
+class _EventSamplesC(C.Structure):
+    _fields_ = [("lat", Out), ("lng", Out), ("line", Out)]
 
 
 class _MatchingC(C.Structure):
@@ -47,6 +66,9 @@ class _SegmentCellsC(C.Structure):
     _fields_ = [("keys", Out), ("edges", Out)]
 
 
+declare("event_samples", [pointer, i64, pointer, pointer, i64, f64, pointer, pointer, pointer])
+declare("free_event_samples", [pointer])
+declare("mark_route_cells", [pointer, pointer, i64, f64, f64, f64, f64, i64, i64, pointer])
 declare("free_points", [pointer])
 declare("free_i32", [pointer])
 declare("free_u8", [pointer])
@@ -84,21 +106,41 @@ class Grid:
         self.address = C.addressof(self.c)
 
 
-class RouteLine:
-    """A route's points in a grid, with the direction of travel at each."""
+_MOST_ROUTE_CELLS = 4_000_000  # past this, a route is looked up without them
 
-    def __init__(self, grid: Grid, bearings: np.ndarray, reach_lng: int, south: float, west: float, north: float, east: float) -> None:
+
+class RouteLine:
+    """A route's points in a grid, with the direction of travel at each, and which big cells it's in or next to."""
+
+    def __init__(self, grid: Grid, bearings: np.ndarray, reach_lng: int, south: float, west: float, north: float, east: float, near_m: float, m_per_deg: float) -> None:
+        """near_m: as far from the route as anything's ever looked for. The big cells are several times that."""
         self.grid, self.bearings = grid, bearings
-        self.c = _RouteLineC(grid.c, arr(bearings), reach_lng, south, west, north, east)
+        cell_lat = near_m * 4 / m_per_deg
+        cell_lng = cell_lat / max(math.cos(math.radians(max(abs(south), abs(north)))), 0.01)
+        cell_south, cell_west = south - cell_lat, west - cell_lng
+        rows = math.ceil((north - cell_south) / cell_lat) + 2
+        columns = math.ceil((east - cell_west) / cell_lng) + 2
+        self.cells = np.empty(0, dtype=np.uint8)
+        if rows * columns <= _MOST_ROUTE_CELLS:
+            self.cells = np.zeros(rows * columns, dtype=np.uint8)
+            lib.mark_route_cells(address(grid.lat), address(grid.lng), grid.lat.size, cell_south, cell_west, cell_lat, cell_lng, rows, columns, address(self.cells))
+        self.c = _RouteLineC(grid.c, arr(bearings), reach_lng, south, west, north, east, arr(self.cells), rows, columns, cell_south, cell_west, cell_lat, cell_lng)
         self.address = C.addressof(self.c)
 
 
 class EventColumns:
-    """Road events, each a line of points, as flat columns."""
+    """Road events, each a line of points, as flat columns, with each line sampled once."""
 
-    def __init__(self, *columns: np.ndarray) -> None:
-        self.columns = columns
-        self.c = _EventColumnsC(*map(arr, columns))
+    def __init__(self, *columns: np.ndarray, spacing_m: float) -> None:
+        ptr, lat, lng = columns[:3]
+        sample_ptr = np.zeros(ptr.size, dtype=np.int64)
+        length_m = np.zeros(max(ptr.size - 1, 0))
+        out = _EventSamplesC()
+        lib.event_samples(address(ptr), ptr.size, address(lat), address(lng), lat.size, spacing_m, address(sample_ptr), address(length_m), C.addressof(out))
+        samples = copied(out.lat, np.float64), copied(out.lng, np.float64), copied(out.line, np.float64)
+        lib.free_event_samples(C.addressof(out))
+        self.columns = (*columns, sample_ptr, *samples, length_m)
+        self.c = _EventColumnsC(*map(arr, self.columns))
         self.address = C.addressof(self.c)
 
 
