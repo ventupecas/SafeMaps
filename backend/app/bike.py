@@ -82,7 +82,7 @@ RISK_POINTS = {
 SAFETY_SCALE = 10.0
 LEFT_TURNS = ("TURN_LEFT", "TURN_SLIGHT_LEFT", "TURN_SHARP_LEFT", "UTURN_LEFT")
 RIGHT_TURNS = ("TURN_RIGHT", "TURN_SLIGHT_RIGHT", "TURN_SHARP_RIGHT", "UTURN_RIGHT")
-BASE_COSTS_KEPT = 4  # segment costs kept per router, by traveler and dark: 5 MB each on Milwaukee's walking map
+BASE_COSTS_KEPT = 4  # segment costs kept per router, by traveler and dark: 10 MB each on Milwaukee's walking map
 MIN_CRASHES = 1.0  # fatal cyclist crashes (FARS) are rare: one near a junction counts
 
 

@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import heapq
 import math
+from array import array
 from collections import Counter
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
@@ -55,6 +56,10 @@ ALTERNATIVE_PENALTY = 2.0
 MAX_OVERLAP = 0.5
 MAX_COST_RATIO = 2.0
 ALTERNATIVE_SEARCHES_PER_ROUTE = 3
+# The longer the trip, the longer each search: fewer alternatives, so a long trip stays worth waiting for.
+# The first search, the best route, is always made. (Straight-line km, at most routes, at most searches.)
+SEARCH_BUDGETS = ((20.0, 2, 3), (8.0, 3, 5))
+EDGE_COSTS_KEPT = 6  # segment costs kept per router, by profile: about 3 MB each on Milwaukee's car map
 # Searches for alternatives inflate the A* estimate by this factor: much
 # faster on penalized costs, and an alternative needs to be good and
 # different, not provably the best. The first design's search stays exact.
@@ -167,6 +172,15 @@ def turn_time_s(maneuver: str, crossing: bool) -> float:
 KNOWN_ROUTES_KEPT = 5000  # routes whose road lengths the graph remembers (graph.known_road_lengths)
 
 
+def _search_budget(km: float, count: int) -> tuple[int, int]:
+    """How many of the count routes asked for to look for on a trip this long, in how many searches."""
+    searches = count * ALTERNATIVE_SEARCHES_PER_ROUTE
+    for longer_than, most_routes, most_searches in SEARCH_BUDGETS:
+        if km >= longer_than:
+            return min(count, most_routes), min(searches, most_searches)
+    return count, searches
+
+
 class Router:
     def __init__(self, graph: RoadGraph, context: TurnContext = TurnContext()) -> None:
         self.graph = graph
@@ -180,6 +194,7 @@ class Router:
         self._freeway = flags(FREEWAY_CLASSES)
         self._cut_through = flags(CUT_THROUGH_CLASSES)
         self._connector = [length < CONNECTOR_MAX_M for length in graph.length_m]
+        self._kept_costs: dict[str, array] = {}
         self._moves: dict[int, list[Move]] = {}
         self._steps: dict[int, list[Step]] = {}
         self._crashes: dict[int, float] = {}
@@ -224,10 +239,11 @@ class Router:
             return []
 
         costs = self._trip_costs(profile, events, keep=departures, school_hours=school_hours, sun=sun)
+        count, searches = _search_budget(haversine_m(origin, destination) / 1000, count)
         on_offer = [edges for edges in (g.edges_along(points) for points in avoid) if edges]
         penalties: dict[int, float] = {}
         found: list[RoutedPath] = []
-        for _ in range(count * ALTERNATIVE_SEARCHES_PER_ROUTE):
+        for _ in range(searches):
             greed = ALTERNATIVE_SEARCH_GREED if found else 1.0
             result = self._search(departures, end, costs, penalties, greed=greed)
             if result is None:
@@ -443,7 +459,7 @@ class Router:
         With the sun low, segments heading toward it cost sun_glare_weight per minute more.
         """
         g = self.graph
-        edge_costs = self._edge_costs(profile)
+        edge_costs = array("d", self._kept_edge_costs(profile))  # a copy: this trip's zones and events change it
         zones: dict[int, set[int]] = {}
         zone_costs: dict[int, float] = {}
         if school_hours:
@@ -584,6 +600,17 @@ class Router:
         for node, maneuver, crossing, busy in step.turns:
             cost += self._turn_cost(costs.table, costs.profile, node, maneuver, crossing, busy)
         return cost
+
+    def _kept_edge_costs(self, profile: ScoringProfile) -> array:
+        """_edge_costs, a pass over every segment of the map, made once per profile."""
+        key = profile.model_dump_json()
+        kept = self._kept_costs.get(key)
+        if kept is None:
+            kept = array("d", self._edge_costs(profile))
+            if len(self._kept_costs) >= EDGE_COSTS_KEPT:
+                self._kept_costs.pop(next(iter(self._kept_costs)), None)
+            self._kept_costs[key] = kept
+        return kept
 
     def _edge_costs(self, profile: ScoringProfile) -> list[float]:
         g = self.graph
