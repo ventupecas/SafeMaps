@@ -42,9 +42,11 @@ from typing import Any, Literal
 
 import httpx
 from fastapi import FastAPI, Header, HTTPException, Request, Response
+from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, FiniteFloat
 
 from app.cache import CacheMiss
 from app.candidates import CandidateOptions
@@ -126,7 +128,7 @@ class TripRequest(BaseModel):
         description="Leave this many minutes from now. School zones and sun glare are judged at that time; "
         "traffic and closures are today's as they are now.",
     )
-    weights: dict[str, float] = Field(
+    weights: dict[str, FiniteFloat] = Field(
         default_factory=dict, description='Overrides for the preset\'s weights, e.g. {"busy_crossing_weight": 4}.'
     )
     country_code: str | None = Field(
@@ -579,6 +581,12 @@ def create_app(settings: Settings | None = None, *, http: httpx.Client | None = 
         description="Ranks Google's routes and our own router's designs for a driver profile.",
         lifespan=lifespan,
     )
+    @app.exception_handler(RequestValidationError)
+    def bad_request(_request: Request, exc: RequestValidationError) -> JSONResponse:
+        """What's wrong with a request, without what it said: 1e999 reads as infinity, which JSON can't say back."""
+        wrong = [{key: value for key, value in error.items() if key in ("type", "loc", "msg")} for error in exc.errors()]
+        return JSONResponse(status_code=422, content={"detail": wrong})
+
     app.add_middleware(
         CORSMiddleware,
         allow_origins=list(settings.cors_origins),

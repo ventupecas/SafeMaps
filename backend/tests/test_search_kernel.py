@@ -553,3 +553,17 @@ def test_steps_of_a_kind_are_the_same_in_every_way_a_traveler_could_cost():
     assert columns[0].size < table.first.size  # fewer kinds than steps: the point of them
     # No two kinds are the same: a kind that lost something in the packing would have merged with another.
     assert len({tuple(column[k] for column in columns) for k in range(columns[0].size)}) == columns[0].size
+
+
+@pytest.mark.parametrize("seed", SEEDS[:4])
+def test_a_moving_car_gets_a_real_route_on_a_road_or_off_every_road(seed):
+    """heading goes down a path of its own: the segment under the car, or the junctions ahead of it."""
+    rng = random.Random(9000 + seed)
+    graph = random_city(seed)
+    router = Router(graph)
+    profile = ScoringProfile()
+    for origin, destination in trips(graph, rng, 12):
+        off_road = (origin[0] + 0.0007, origin[1] + 0.0007)  # about 90 m from the junction, off to one side
+        for start in (origin, off_road):
+            for path in router.routes(start, destination, profile, heading=rng.uniform(0, 360), count=2):
+                assert graph.edge_to[path.edges[0]] is not None and path.maneuvers[0] == "DEPART"

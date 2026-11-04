@@ -25,6 +25,7 @@ from __future__ import annotations
 import math
 from collections.abc import Sequence
 from dataclasses import dataclass, replace
+from functools import partial
 
 import numpy as np
 
@@ -35,7 +36,7 @@ from app.kept import Kept
 from app.models import LatLng, ScoringProfile
 from app.road_events import RoadEvent
 from app.roadgraph import BIKE_SPEED_KMH, WALK_SPEED_KMH, RoadGraph
-from app.router import RoutedPath, Router, _Costs
+from app.router import RoutedPath, Router, _Costs, side_by_side
 from app.sun import DARK_TURN_FACTOR, Sun, dark
 
 
@@ -303,9 +304,14 @@ def plan(
 ) -> dict:
     """Bike routes for one trip, best first: {"winner", "candidates"}, each candidate a dict the page draws."""
     start, end = origin.as_tuple(), destination.as_tuple()
-    # The shortest at the traveler's own speed, so turns weigh against minutes as they do for them.
-    shortest = router.bike_routes(start, end, replace(SHORTEST, speed_kmh=profile.speed_kmh), count=1, events=events, sun=sun)
-    designs = router.bike_routes(start, end, profile, count=3, events=events, sun=sun)
+    searches = [
+        # The shortest at the traveler's own speed, so turns weigh against minutes as they do for them.
+        partial(router.bike_routes, start, end, replace(SHORTEST, speed_kmh=profile.speed_kmh), count=1, events=events, sun=sun),
+        partial(router.bike_routes, start, end, profile, count=3, events=events, sun=sun),
+    ]
+    if router.graph.mode == "walk":
+        searches.append(partial(router.direct_routes, start, end, profile, count=3, events=events, sun=sun))
+    shortest, designs, *also = side_by_side(searches)
     after_dark = dark(sun)
     paths: list[tuple[str, RoutedPath]] = []
     seen: set[tuple[int, ...]] = set()
@@ -348,7 +354,7 @@ def plan(
     candidates.sort(key=rank)
     if router.graph.mode == "walk":
         # One takes the lead only by beating the best so far, so the recommendation can only get better.
-        direct = (path for path in router.direct_routes(start, end, profile, count=3, events=events, sun=sun) if path.edges not in seen)
+        direct = (path for path in also[0] if path.edges not in seen)
         for number, path in enumerate(direct, start=1):
             challenger = candidate(f"direct-{number}", path)
             challenger["eligible"] = challenger["features"]["duration_min"] <= limit_min + 1e-9

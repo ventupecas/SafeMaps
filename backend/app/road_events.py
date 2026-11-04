@@ -1121,6 +1121,7 @@ class _EventTable:
     """Road events as flat columns, for the compiled matching, with which kind each one is."""
 
     def __init__(self, events: Sequence[RoadEvent]) -> None:
+        events = [event for event in events if event.path]  # no source sends one without a place, and it can't be on a route
         ends = np.cumsum([0, *(len(event.path) for event in events)], dtype=np.int64)
         points = np.array([point for event in events for point in event.path], dtype=np.float64).reshape(-1, 2)
         lat, lng = points[:, 0].copy(), points[:, 1].copy()

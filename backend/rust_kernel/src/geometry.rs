@@ -801,6 +801,8 @@ pub unsafe extern "C" fn lines_near_lines(
 
 // ---- Segments near a point
 
+const TIE_M: f64 = 1e-9;
+
 /// Distance from a point to the nearest spot on a path, and the path's bearing there: see app.geo.
 #[inline(always)]
 fn distance_to_path(lat: f64, lng: f64, path_lat: &[f64], path_lng: &[f64], m_per_deg: f64) -> (f64, f64) {
@@ -813,12 +815,19 @@ fn distance_to_path(lat: f64, lng: f64, path_lat: &[f64], path_lng: &[f64], m_pe
         let length_sq = dx * dx + dy * dy;
         let t = if length_sq == 0.0 { 0.0 } else { (-(ax * dx + ay * dy) / length_sq).min(1.0).max(0.0) };
         let distance = (ax + t * dx).hypot(ay + t * dy);
-        if distance < best_m && length_sq > 0.0 {
+        // Two pieces of a road tie where they meet, but for rounding, which mustn't decide anything: the first stays.
+        if distance < best_m - TIE_M && length_sq > 0.0 {
             best_m = distance;
             best_bearing = bearing(path_lat[i], path_lng[i], path_lat[i + 1], path_lng[i + 1]);
         }
     }
     (best_m, best_bearing)
+}
+
+/// A distance with its rounding taken off: segments ending at one junction are as near as each other.
+#[inline(always)]
+fn tied(distance: f64) -> f64 {
+    (distance / TIE_M / 1000.0).round()
 }
 
 #[repr(C)]
@@ -959,7 +968,7 @@ pub unsafe extern "C" fn roads_at(
         }
     }
     near.retain(|(_, offset, _)| *offset <= nearest + same_road_m);
-    near.sort_by(|a, b| a.2.total_cmp(&b.2).then(a.1.total_cmp(&b.1)).then(a.0.cmp(&b.0)));
+    near.sort_by(|a, b| a.2.total_cmp(&b.2).then(tied(a.1).total_cmp(&tied(b.1))).then(a.0.cmp(&b.0)));
     *out = Out::from_vec(near.into_iter().map(|(edge, _, _)| edge).collect());
 }
 
@@ -1023,6 +1032,6 @@ pub unsafe extern "C" fn segments_under(
         }
     }
     let mut kept: Vec<(i32, f64)> = offsets.into_iter().filter(|(_, offset)| *offset <= nearest + same_road_m).collect();
-    kept.sort_by(|a, b| a.1.total_cmp(&b.1)); // stable: those as near keep their order
+    kept.sort_by(|a, b| tied(a.1).total_cmp(&tied(b.1))); // stable: those as near keep their order
     *out = Out::from_vec(kept.into_iter().map(|(edge, _)| edge).collect());
 }

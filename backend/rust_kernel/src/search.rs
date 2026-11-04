@@ -490,7 +490,7 @@ unsafe fn forward<F: Fn(&Workspace, usize) -> f64>(
         let edge_at = edge as usize;
         let cost = edge_costs.get(edge_at);
         let left = left_from(ws, table.edge_to.get(edge_at) as usize);
-        if left == f64::INFINITY {
+        if left == f64::INFINITY || cost.is_nan() {
             continue;
         }
         let state = ws.state(edge_at);

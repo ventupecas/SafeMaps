@@ -115,11 +115,13 @@ class RouteLine:
     def __init__(self, grid: Grid, bearings: np.ndarray, reach_lng: int, south: float, west: float, north: float, east: float, near_m: float, m_per_deg: float) -> None:
         """near_m: as far from the route as anything's ever looked for. The big cells are several times that."""
         self.grid, self.bearings = grid, bearings
+        # From the points in the grid: the curve between two corners of a route can go past them.
+        lowest, highest = float(grid.lat.min()), float(grid.lat.max())
         cell_lat = near_m * 4 / m_per_deg
-        cell_lng = cell_lat / max(math.cos(math.radians(max(abs(south), abs(north)))), 0.01)
-        cell_south, cell_west = south - cell_lat, west - cell_lng
-        rows = math.ceil((north - cell_south) / cell_lat) + 2
-        columns = math.ceil((east - cell_west) / cell_lng) + 2
+        cell_lng = cell_lat / max(math.cos(math.radians(max(abs(lowest), abs(highest)))), 0.01)
+        cell_south, cell_west = lowest - cell_lat, float(grid.lng.min()) - cell_lng
+        rows = math.ceil((highest - cell_south) / cell_lat) + 2
+        columns = math.ceil((float(grid.lng.max()) - cell_west) / cell_lng) + 2
         self.cells = np.empty(0, dtype=np.uint8)
         if rows * columns <= _MOST_ROUTE_CELLS:
             self.cells = np.zeros(rows * columns, dtype=np.uint8)
@@ -236,7 +238,7 @@ def make_grid(lat: np.ndarray, lng: np.ndarray, cell_deg: float, items: np.ndarr
 
 def reach_lng_at(lat: float) -> int:
     """Cells to search east and west of a point at this latitude: they narrow away from the equator."""
-    return math.ceil(1 / max(math.cos(math.radians(lat)), 0.01))
+    return math.ceil(1 / max(math.cos(math.radians(lat)), 0.01)) if lat == lat else 1
 
 
 def any_within(grid: Grid, lat: float, lng: float, within_m: float, reach_lng: int) -> bool:

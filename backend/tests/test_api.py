@@ -603,3 +603,16 @@ def test_a_walk_over_five_miles_suggests_another_mode(tmp_path, google):
         with_a_stop = client.post("/walk-route", json={"origin": ORIGIN, "stops": [halfway], "destination": ORIGIN})
         assert with_a_stop.status_code == 422
         assert client.post("/walk-route", json={"origin": ORIGIN, "destination": DESTINATION}).status_code == 200
+
+
+def test_a_weight_too_big_to_be_a_number_is_a_bad_request(tmp_path, google):
+    """JSON reads 1e999 as infinity. It's turned away, rather than reaching a search that would make no sense of it."""
+    app = create_app(make_settings(tmp_path), http=httpx.Client(transport=httpx.MockTransport(google)))
+    body = '{"origin": {"lat": %s, "lng": %s}, "destination": {"lat": %s, "lng": %s}, "weights": {"busy_crossing_weight": 1e999}}' % (
+        ORIGIN["lat"],
+        ORIGIN["lng"],
+        DESTINATION["lat"],
+        DESTINATION["lng"],
+    )
+    with TestClient(app) as client:
+        assert client.post("/route", content=body, headers={"Content-Type": "application/json"}).status_code == 422

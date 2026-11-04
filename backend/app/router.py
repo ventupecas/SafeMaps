@@ -21,13 +21,15 @@ turns a trip into the arrays it searches, and what it finds back into a route.
 from __future__ import annotations
 
 import math
+import os
 from collections import Counter
-from collections.abc import Iterable, Iterator, Sequence
+from collections.abc import Callable, Iterable, Iterator, Sequence
+from concurrent.futures import Future, ThreadPoolExecutor
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from functools import cached_property
 from threading import Lock
-from typing import Any
+from typing import Any, TypeVar
 
 import numpy as np
 
@@ -42,7 +44,7 @@ from app.features import (
     TurnContext,
 )
 from app.fuel import SIGNAL_L, TURN_L, cruise_liters_each
-from app.geo import Point, encode_polyline, haversine_m, initial_bearings_deg
+from app.geo import Point, angle_between_deg, encode_polyline, haversine_m, initial_bearings_deg
 from app.kept import Kept
 from app.models import SIGNALED_CROSSING_SHARE, ScoringProfile
 from app.road_events import MAX_SLOWDOWN, WORKERS_PRESENT_FACTOR, RoadEvent
@@ -51,6 +53,8 @@ from app.sun import GLARE_ANGLE_DEG, Sun, low_sun
 
 _EMPTY_INT32 = np.empty(0, dtype=np.int32)
 _EMPTY_INT64 = np.empty(0, dtype=np.int64)
+T = TypeVar("T")
+
 LINK_CLASSES = frozenset({"motorway_link", "trunk_link", "primary_link", "secondary_link", "tertiary_link"})
 FREEWAY_CLASSES = frozenset({"motorway", "trunk"})
 
@@ -155,6 +159,30 @@ class RoutedPath:
     cost: float  # perceived minutes, without alternative-route penalties
 
 
+_searches = ThreadPoolExecutor(max_workers=os.cpu_count(), thread_name_prefix="search")
+# Searches that don't depend on one another run on the computer's cores at once, as they let go of Python's lock.
+# ROUTES_SIDE_BY_SIDE=off runs them one after another: the answers are the same, in a fixed order.
+_ONE_AFTER_ANOTHER = (os.getenv("ROUTES_SIDE_BY_SIDE") or "on").strip().lower() in {"0", "false", "no", "off"}
+
+
+def soon(work: Callable[[], T]) -> Future[T]:
+    """Start work on another core, if there's one to be had. Its result() waits for it."""
+    if not _ONE_AFTER_ANOTHER:
+        return _searches.submit(work)
+    done: Future[T] = Future()
+    done.set_result(work())
+    return done
+
+
+def side_by_side(searches: Sequence[Callable[[], T]]) -> list[T]:
+    """Their answers, in order. The first runs right here, as this thread would only be waiting otherwise."""
+    if _ONE_AFTER_ANOTHER:
+        return [search() for search in searches]
+    started = [_searches.submit(search) for search in searches[1:]]
+    first = searches[0]()
+    return [first, *(future.result() for future in started)]
+
+
 def design_profile(profile: ScoringProfile) -> ScoringProfile:
     """The weights the router designs with: the profile's own, boosted for priority ranking."""
     if profile.ranking != "priority":
@@ -228,7 +256,7 @@ class Router:
         profile: ScoringProfile,
         *,
         count: int = 3,
-        avoid: Sequence[Sequence[Point]] = (),
+        avoid: Sequence[Sequence[Point]] | Callable[[], Sequence[Sequence[Point]]] = (),
         heading: float | None = None,
         events: Sequence[RoadEvent] = (),
         school_hours: bool = False,
@@ -240,7 +268,8 @@ class Router:
         The first is the best design, whatever it shares with other routes.
         Each alternative shares at most MAX_OVERLAP of its length with every
         earlier one and with each route in avoid (routes already on offer,
-        such as Google's suggestions). heading is the direction a moving car is
+        such as Google's suggestions), or what gives them, asked once the best
+        route is found, as nothing needs them before. heading is the direction a moving car is
         driving, in degrees clockwise from north: routes then start along the
         road it's on, without turning around. events are closures, lane
         closures and jams on the roads now: closed roads are left out (except
@@ -260,7 +289,7 @@ class Router:
             return []
 
         costs = self._trip_costs(profile, events, keep=departures, school_hours=school_hours, sun=sun)
-        on_offer = [edges for edges in (g.edges_along(points) for points in avoid) if edges]
+        on_offer: list[set[int]] = []
         table = self._steps()
         step_costs = self._step_costs(costs)
         zones = self._zone_table(costs)
@@ -300,6 +329,7 @@ class Router:
                         break
                 # Push the next search off this route, and after the best design, off the routes on offer.
                 if first:
+                    on_offer = [edges for edges in map(g.edges_along, avoid() if callable(avoid) else avoid) if edges]
                     searched = costs.edges.copy()
                 for used in [edges, *on_offer] if first else [edges]:
                     np.multiply.at(searched, np.fromiter(used, dtype=np.int64), ALTERNATIVE_PENALTY)
