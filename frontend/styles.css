@@ -39,6 +39,10 @@
   --icon-plus: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2.6' stroke-linecap='round'%3E%3Cpath d='M12 5v14M5 12h14'/%3E%3C/svg%3E");
   --icon-clock: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2.2' stroke-linecap='round'%3E%3Ccircle cx='12' cy='12' r='9.5'/%3E%3Cpath d='M12 7v5l3 2'/%3E%3C/svg%3E");
   --icon-thumb: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2.1' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M7 10v11H3V10zM7 10l4-7c1.7 0 2.8 1.4 2.4 3L12.8 10H19a2 2 0 0 1 2 2.3l-1.2 7A2 2 0 0 1 17.8 21H7'/%3E%3C/svg%3E");
+  --icon-turn: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='3' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M6 21v-8a4 4 0 0 1 4-4h10M15 4l5 5-5 5'/%3E%3C/svg%3E");
+  --icon-bear: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='3' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M8 21v-7c0-1 .4-2 1.2-2.8L18 3M11 3h7v7'/%3E%3C/svg%3E");
+  --icon-uturn: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='3' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M7 21V9a5 5 0 0 1 10 0v8M12 13l5 5 5-5'/%3E%3C/svg%3E");
+  --icon-ahead: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='3' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M12 21V4M6 10l6-6 6 6'/%3E%3C/svg%3E");
   --icon-bars: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2.8' stroke-linecap='round'%3E%3Cpath d='M5 20v-7M12 20V4M19 20V9'/%3E%3C/svg%3E");
   --icon-sliders: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2.2' stroke-linecap='round'%3E%3Cpath d='M3 7h10M19 7h2M3 17h2M11 17h10'/%3E%3Ccircle cx='16' cy='7' r='3'/%3E%3Ccircle cx='8' cy='17' r='3'/%3E%3C/svg%3E");
   --chevron: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%235b6573' stroke-width='2.2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E");
@@ -2569,5 +2573,253 @@ body[data-mode="transit"] [data-modes]:not([data-modes~="transit"]) {
   *::after {
     animation: none !important;
     transition: none !important;
+  }
+}
+
+/* ---- The third-person view while driving a car (drive3d.js) */
+
+/* Offered beside "Start driving", and only until the drive begins. */
+#drive[hidden] + #preview,
+.driving #preview {
+  display: none;
+}
+
+.drive-view {
+  position: absolute;
+  inset: 0;
+  z-index: 900;
+  overflow: hidden;
+  background: #cfe0ec;
+}
+
+.drive-view[hidden] {
+  display: none;
+}
+
+/* MapLibre makes its map position: relative, so this one sizes itself rather than by its edges. */
+.drive-view__map {
+  width: 100%;
+  height: 100%;
+}
+
+.driving3d #map .leaflet-control-container {
+  display: none;
+}
+
+.drive-car {
+  position: absolute;
+  left: 50%;
+  top: 75%;
+  width: clamp(64px, 11vmin, 104px);
+  transform: translate(-50%, -62%);
+  pointer-events: none;
+  filter: drop-shadow(0 4px 6px rgba(0, 0, 0, 0.3));
+}
+
+.driving3d .layers,
+.driving3d .recenter {
+  display: none;
+}
+
+.road-sign-spot {
+  pointer-events: none;
+}
+
+.road-sign {
+  position: relative;
+  transform-origin: bottom center;
+  margin-bottom: 34px;
+  filter: drop-shadow(0 3px 4px rgba(0, 0, 0, 0.4));
+}
+
+/* The pole. */
+.road-sign::after {
+  content: "";
+  position: absolute;
+  left: 50%;
+  top: 100%;
+  width: 5px;
+  height: 34px;
+  transform: translateX(-50%);
+  background: #5b6573;
+}
+
+.road-sign--stop {
+  display: grid;
+  place-items: center;
+  width: 60px;
+  height: 60px;
+}
+
+.road-sign--stop::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: #c8201b;
+  clip-path: polygon(29% 0, 71% 0, 100% 29%, 100% 71%, 71% 100%, 29% 100%, 0 71%, 0 29%);
+}
+
+.road-sign--stop span {
+  position: relative;
+  color: #fff;
+  font-size: 15px;
+  font-weight: 800;
+  letter-spacing: 0.02em;
+}
+
+/* All three lamps alike: the color of a real light isn't known. */
+.road-sign--signal {
+  display: grid;
+  gap: 4px;
+  width: 30px;
+  padding: 5px;
+  border-radius: 7px;
+  background: #1c2127;
+}
+
+.road-sign--signal i {
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  background: #e5484d;
+}
+
+.road-sign--signal i:nth-child(2) {
+  background: #f2b632;
+}
+
+.road-sign--signal i:nth-child(3) {
+  background: #30a46c;
+}
+
+.road-sign--turn {
+  width: 58px;
+  height: 58px;
+  border: 3px solid #fff;
+  border-radius: 12px;
+  background: var(--drive);
+}
+
+.road-sign--turn i,
+.drive-hud__turn i {
+  display: block;
+  width: 100%;
+  height: 100%;
+  background: #fff;
+  mask: var(--arrow) center / 78% no-repeat;
+  -webkit-mask: var(--arrow) center / 78% no-repeat;
+}
+
+.road-sign--turn-right,
+.road-sign--turn-left {
+  --arrow: var(--icon-turn);
+}
+
+.road-sign--bear-right,
+.road-sign--bear-left {
+  --arrow: var(--icon-bear);
+}
+
+.road-sign--uturn-right,
+.road-sign--uturn-left {
+  --arrow: var(--icon-uturn);
+}
+
+.road-sign--ahead {
+  --arrow: var(--icon-ahead);
+}
+
+.road-sign--turn-left i,
+.road-sign--bear-left i,
+.road-sign--uturn-right i {
+  transform: scaleX(-1);
+}
+
+.drive-hud {
+  position: absolute;
+  left: 12px;
+  bottom: 38px; /* clear of the map's credit */
+  display: grid;
+  justify-items: start;
+  gap: 8px;
+  max-width: calc(50% - 60px);
+}
+
+.drive-hud p {
+  margin: 0;
+}
+
+.drive-hud__turn {
+  display: grid;
+  justify-items: center;
+  gap: 2px;
+  padding: 8px 12px;
+  border-radius: var(--radius);
+  background: var(--drive);
+  color: #fff;
+  font-size: 1.05rem;
+  font-weight: 700;
+  box-shadow: var(--shadow);
+}
+
+.drive-hud__turn[hidden],
+.drive-hud__ahead[hidden] {
+  display: none;
+}
+
+.drive-hud__turn i {
+  width: 56px;
+  height: 56px;
+}
+
+.drive-hud__ahead {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 8px;
+  padding: 7px 12px;
+  border-radius: var(--radius);
+  background: rgba(255, 255, 255, 0.95);
+  box-shadow: var(--shadow);
+  font-size: 0.95rem;
+}
+
+.drive-hud__ahead i {
+  width: 14px;
+  height: 14px;
+  background: #1c2127;
+  border-radius: 50%;
+}
+
+.drive-hud__ahead[data-kind="stop"] i {
+  background: #c8201b;
+  border-radius: 0;
+  clip-path: polygon(29% 0, 71% 0, 100% 29%, 100% 71%, 71% 100%, 29% 100%, 0 71%, 0 29%);
+}
+
+.drive-hud__preview {
+  padding: 3px 10px;
+  border-radius: 999px;
+  background: #1c2127;
+  color: #fff;
+  font-size: 0.8rem;
+  font-weight: 700;
+}
+
+.drive-hud__note {
+  padding: 3px 8px;
+  border-radius: var(--radius-sm);
+  background: rgba(255, 255, 255, 0.85);
+  color: var(--muted);
+  font-size: 0.75rem;
+}
+
+@media (max-width: 760px) {
+  .driving3d .layout {
+    grid-template-rows: 74vh 1fr;
+  }
+
+  .driving3d .map-wrap {
+    height: 74vh;
   }
 }

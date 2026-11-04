@@ -61,7 +61,7 @@ function userIsHere() {
   restartIdleTimer();
 }
 
-function restartIdleTimer() {
+export function restartIdleTimer() {
   clearTimeout(state.demo.idleTimer);
   if (state.demo.on && !state.nav.active) state.demo.idleTimer = setTimeout(startDemo, DEMO.idleMs);
 }

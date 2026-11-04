@@ -54,6 +54,8 @@ class Settings:
     # Walking routes: the walking map (--walk) and fatal crashes where a pedestrian died (--pedestrians).
     walk_graph_path: Path | None = None
     walk_crash_data_path: Path | None = None
+    # Stop signs and traffic lights for the driving view (python -m app.road_controls). None: only the turns show.
+    road_controls_path: Path | None = None
     # For the expo's control page (pausing demo mode, restarting the stats). Unset: only this
     # computer itself may use it, not visitors coming through the tunnel.
     admin_code: str | None = None
@@ -143,6 +145,7 @@ class Settings:
             bike_crash_data_path=_backend_path(os.getenv("ROUTES_BIKE_CRASH_DATA")) if os.getenv("ROUTES_BIKE_CRASH_DATA") else None,
             walk_graph_path=_bike_graph_path(os.getenv("ROUTES_WALK_GRAPH"), os.getenv("ROUTES_GRAPH"), "-walk"),
             walk_crash_data_path=_backend_path(os.getenv("ROUTES_WALK_CRASH_DATA")) if os.getenv("ROUTES_WALK_CRASH_DATA") else None,
+            road_controls_path=_bike_graph_path(os.getenv("ROUTES_ROAD_CONTROLS"), os.getenv("ROUTES_GRAPH"), "-controls"),
             map=map_kind,
             school_hours=school_hours,
             fuel_price=fuel_price,

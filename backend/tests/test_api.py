@@ -9,9 +9,10 @@ from fastapi.testclient import TestClient
 
 from app.cache import CacheMode
 from app.config import Settings
-from app.geo import decode_polyline, haversine_m
+from app.geo import decode_polyline, encode_polyline, haversine_m, initial_bearing_deg
 from app.main import create_app
 from app.overpass import BBox
+from app.road_controls import Control, RoadControls
 from app.roadgraph import build_graph
 from tests.factories import highway_route, winding_route
 from tests.osm_factory import grid_city, point
@@ -605,6 +606,35 @@ def test_a_walk_over_ten_miles_suggests_another_mode(tmp_path, google):
         with_a_stop = client.post("/walk-route", json={"origin": ORIGIN, "stops": [halfway], "destination": ORIGIN})
         assert with_a_stop.status_code == 422
         assert client.post("/walk-route", json={"origin": ORIGIN, "destination": DESTINATION}).status_code == 200
+
+
+def test_the_signs_along_a_route_come_in_order_for_its_direction_of_travel(tmp_path, google):
+    controls = tmp_path / "controls.json.gz"
+    # Along Main St, west to east: a light on a junction, then a stop sign for eastbound traffic, then one for westbound.
+    west, middle, east = point(1, 0), point(1, 1), point(1, 2)
+    eastbound = initial_bearing_deg(west, east)
+    near_east = (east[0], east[1] - 0.0002)
+    RoadControls([
+        Control("signal", *middle),
+        Control("stop", *near_east, (eastbound,)),
+        Control("stop", *near_east, ((eastbound + 180) % 360,)),
+    ]).save(controls)
+    app = create_app(make_settings(tmp_path, road_controls_path=controls), http=httpx.Client(transport=httpx.MockTransport(google)))
+    with TestClient(app) as client:
+        assert client.get("/health").json()["road_controls"] == {"stop": 2, "signal": 1}
+        met = client.post("/road-controls", json={"encoded_polyline": encode_polyline([west, middle, east])}).json()["controls"]
+        assert [control["kind"] for control in met] == ["signal", "stop"]
+        assert met[0]["along_m"] < met[1]["along_m"]
+        back = client.post("/road-controls", json={"encoded_polyline": encode_polyline([east, middle, west])}).json()["controls"]
+        assert [control["kind"] for control in back] == ["stop", "signal"]
+
+
+def test_without_the_signs_file_a_route_has_no_signs_and_the_code_still_counts(tmp_path, google):
+    app = create_app(make_settings(tmp_path, access_code="expo"), http=httpx.Client(transport=httpx.MockTransport(google)))
+    line = {"encoded_polyline": encode_polyline([point(1, 0), point(1, 1)])}
+    with TestClient(app) as client:
+        assert client.post("/road-controls", json=line).status_code == 401
+        assert client.post("/road-controls", json=line, headers={"X-Access-Code": "expo"}).json() == {"controls": []}
 
 
 def test_a_weight_too_big_to_be_a_number_is_a_bad_request(tmp_path, google):
