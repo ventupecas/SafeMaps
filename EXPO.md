@@ -238,6 +238,10 @@ Open **Control** at the top of the planner (**http://127.0.0.1:3143/control.html
 
 Open **Stats** at the top of the planner, or **http://127.0.0.1:3143/stats.html** on a second screen: today's trips, how many got a safer route than the standard one, the risky turns, railroad crossings, school zones and closed roads they avoided, and the share who'd take the safer route. It updates every 20 seconds. Opened from the tunnel's https link, it also shows a QR code for phones. Sample trips (demo mode) and automatic re-plans aren't counted, and no places are kept (`backend/.cache/routes/trips.jsonl`).
 
+### Inside the app
+
+**Inside the app** at the top of the planner (**http://127.0.0.1:3143/city.html**) shows the whole app as a 3D model city, for visitors who ask how it works under the hood. Pick a journey on the right, and it follows a trip from the page, across the river to the server, down to the Rust subway and back. It sends nothing to the server except reading which map is set, so it costs no paid requests, and it opens without the internet once the planner has been seen. It needs WebGL, so try it on the booth screen beforehand; a laptop without a graphics card may run it slowly. It's in English only.
+
 ### Watch usage
 
 Every hour or so, run the `/health` check above and look at `google_requests_today` (Google's map), or `tomtom_requests_today` and `tomtom_tiles_today` (the OpenStreetMap map). When TomTom's daily cap is reached, trips still work with work zones and 511, and the **Traffic** map layer stops showing new map squares until midnight.
