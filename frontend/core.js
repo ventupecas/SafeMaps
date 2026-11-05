@@ -20,8 +20,9 @@ export const NAV = {
   followZoom: 16,
   announceFarM: 400, // spoken directions: "In a quarter mile, ..." this far before a turn
   announceNearM: 60, // and the turn itself this close
-  previewSpeedup: 3, // "Preview the drive" plays the route this many times faster than it would be driven
-  previewTickMs: 400,
+  previewRates: [1, 2, 3, 5, 10], // "Preview the drive" plays the route this many times faster than it would be driven
+  previewRate: 3, // until the viewer picks another
+  previewTickMs: 500, // how often it updates the directions; the view moves every frame
 };
 
 export const COLORS = {

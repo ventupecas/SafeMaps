@@ -27,7 +27,7 @@ from math import ceil
 from pathlib import Path
 from typing import Any
 
-from app.geo import Point, angle_between_deg, distance_to_path_m, haversine_m, initial_bearing_deg
+from app.geo import Point, angle_between_deg, densify, distance_to_path_m, haversine_m, initial_bearing_deg, midpoint
 from app.overpass import DRIVABLE_HIGHWAYS
 
 CELL_DEG = 0.001  # about 100 m
@@ -35,6 +35,8 @@ SAMPLE_M = 50.0  # a route's long segments are looked along at this spacing, und
 MATCH_M = 4.0  # a road's own sign is on its line, give or take the polyline's rounding (about 1 m)
 FACING_DEG = 50.0  # how far off a sign's direction of travel a route may head and still face it
 MERGE_M = 25.0  # the same kind this close along a route is one junction's
+ROAD_SAMPLE_M = 20.0
+MIN_ROAD_M = 45.0
 
 KINDS = {"stop": "stop", "traffic_signals": "signal"}
 TOWARD = {"forward": True, "backward": False}
@@ -118,6 +120,26 @@ class RoadControls:
             row, col = _cell(a[0] + (b[0] - a[0]) * share, a[1] + (b[1] - a[1]) * share)
             cells.update((row + r, col + c) for r in (-1, 0, 1) for c in (-1, 0, 1))
         return [control for cell in cells for control in self.cells.get(cell, ())]
+
+
+def roads_along(graph: Any, points: Sequence[Point]) -> list[dict[str, Any]]:
+    """The roads a route runs along, in order, each with along_m, where it starts; "" for a stretch without a name.
+    Passing a cross street can name it for a sample or two: a run this short is taken as more of the road before."""
+    runs: list[dict[str, Any]] = []
+    walked = 0.0
+    samples = densify(points, ROAD_SAMPLE_M)
+    for a, b in pairwise(samples):
+        step = haversine_m(a, b)
+        if step == 0:
+            continue
+        name = graph.road_name_at(midpoint(a, b), initial_bearing_deg(a, b))
+        if not runs or runs[-1]["name"] != name:
+            if runs and walked - runs[-1]["along_m"] < MIN_ROAD_M and len(runs) > 1:
+                runs.pop()
+            if not runs or runs[-1]["name"] != name:
+                runs.append({"name": name, "along_m": round(walked, 1)})
+        walked += step
+    return runs
 
 
 def _cell(lat: float, lng: float) -> tuple[int, int]:

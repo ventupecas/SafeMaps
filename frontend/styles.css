@@ -2621,15 +2621,56 @@ body[data-mode="transit"] [data-modes]:not([data-modes~="transit"]) {
   display: none;
 }
 
+/* Nothing to paint under the view. And a blur over a map that moves every frame costs frames. */
+.driving3d #map {
+  visibility: hidden;
+}
+
+.driving3d .nav-banner {
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+}
+
+.drive-road {
+  position: absolute;
+  left: 50%;
+  top: calc(75% + 34px);
+  transform: translateX(-50%);
+  max-width: min(70%, 420px);
+  margin: 0;
+  padding: 6px 14px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: rgba(20, 62, 110, 0.94);
+  color: #fff;
+  font-size: 0.95rem;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  box-shadow: var(--shadow);
+}
+
+.drive-road span {
+  opacity: 0.8;
+  font-size: 0.8rem;
+}
+
 .road-sign-spot {
   pointer-events: none;
 }
 
+/* Grows from the foot of its pole, so the sign stays planted on the road. */
 .road-sign {
+  --pole: 20px;
   position: relative;
-  transform-origin: bottom center;
-  margin-bottom: 34px;
-  filter: drop-shadow(0 3px 4px rgba(0, 0, 0, 0.4));
+  transform-origin: 50% calc(100% + var(--pole));
+  margin-bottom: var(--pole);
+  animation: sign-comes-up 0.5s ease-out;
+}
+
+@keyframes sign-comes-up {
+  from {
+    opacity: 0;
+  }
 }
 
 /* The pole. */
@@ -2638,8 +2679,8 @@ body[data-mode="transit"] [data-modes]:not([data-modes~="transit"]) {
   position: absolute;
   left: 50%;
   top: 100%;
-  width: 5px;
-  height: 34px;
+  width: 3px;
+  height: var(--pole);
   transform: translateX(-50%);
   background: #5b6573;
 }
@@ -2647,8 +2688,8 @@ body[data-mode="transit"] [data-modes]:not([data-modes~="transit"]) {
 .road-sign--stop {
   display: grid;
   place-items: center;
-  width: 60px;
-  height: 60px;
+  width: 34px;
+  height: 34px;
 }
 
 .road-sign--stop::before {
@@ -2662,24 +2703,23 @@ body[data-mode="transit"] [data-modes]:not([data-modes~="transit"]) {
 .road-sign--stop span {
   position: relative;
   color: #fff;
-  font-size: 15px;
+  font-size: 9px;
   font-weight: 800;
-  letter-spacing: 0.02em;
 }
 
 /* All three lamps alike: the color of a real light isn't known. */
 .road-sign--signal {
   display: grid;
-  gap: 4px;
-  width: 30px;
-  padding: 5px;
-  border-radius: 7px;
+  gap: 2px;
+  width: 16px;
+  padding: 3px;
+  border-radius: 4px;
   background: #1c2127;
 }
 
 .road-sign--signal i {
-  width: 20px;
-  height: 20px;
+  width: 10px;
+  height: 10px;
   border-radius: 50%;
   background: #e5484d;
 }
@@ -2693,6 +2733,7 @@ body[data-mode="transit"] [data-modes]:not([data-modes~="transit"]) {
 }
 
 .road-sign--turn {
+  --pole: 30px;
   width: 58px;
   height: 58px;
   border: 3px solid #fff;
@@ -2798,12 +2839,69 @@ body[data-mode="transit"] [data-modes]:not([data-modes~="transit"]) {
 }
 
 .drive-hud__preview {
-  padding: 3px 10px;
-  border-radius: 999px;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 2px;
+  padding: 4px 6px 4px 10px;
+  border-radius: var(--radius);
   background: #1c2127;
   color: #fff;
   font-size: 0.8rem;
   font-weight: 700;
+}
+
+.drive-hud__preview span {
+  margin-right: 6px;
+}
+
+.drive-hud__preview button {
+  min-width: 32px;
+  min-height: 30px;
+  padding: 0 6px;
+  border: none;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: #fff;
+  font: inherit;
+  cursor: pointer;
+}
+
+.drive-hud__preview button:hover {
+  background: rgba(255, 255, 255, 0.18);
+}
+
+.drive-hud__preview button[aria-pressed="true"] {
+  background: #fff;
+  color: #1c2127;
+}
+
+/* The dial turns with the car, so its red mark points north; the middle says which way the car is going. */
+.drive-compass {
+  position: absolute;
+  right: 12px;
+  bottom: 38px;
+  display: grid;
+  place-items: center;
+  width: 68px;
+  height: 68px;
+  border-radius: 50%;
+  box-shadow: var(--shadow);
+}
+
+.drive-compass__dial {
+  grid-area: 1 / 1;
+  width: 100%;
+  height: 100%;
+  will-change: transform;
+}
+
+.drive-compass strong {
+  grid-area: 1 / 1;
+  position: relative;
+  color: var(--text);
+  font-size: 1.15rem;
+  font-weight: 800;
 }
 
 .drive-hud__note {
@@ -2821,5 +2919,26 @@ body[data-mode="transit"] [data-modes]:not([data-modes~="transit"]) {
 
   .driving3d .map-wrap {
     height: 74vh;
+  }
+
+  /* One row of speeds: wider than the cards below it, which keep their width and stay clear of the car. */
+  .drive-hud {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .drive-hud__preview {
+    flex-wrap: nowrap;
+    width: max-content;
+    padding: 4px;
+  }
+
+  .drive-hud__preview span {
+    display: none;
+  }
+
+  /* Clear of the cards at the bottom left. */
+  .drive-road {
+    top: 112px;
+    max-width: calc(100% - 24px);
   }
 }

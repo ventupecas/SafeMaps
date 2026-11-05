@@ -14,6 +14,9 @@ ENV ROUTES_KERNEL_LIBRARY=/srv/routes/libroute_kernel.so
 
 WORKDIR /srv/routes/backend
 
+# osmium, which builds maps from an extract in here, needs Expat, and this image leaves it out.
+RUN apt-get update && apt-get install -y --no-install-recommends libexpat1 && rm -rf /var/lib/apt/lists/*
+
 COPY backend/requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 

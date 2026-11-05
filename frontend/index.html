@@ -240,8 +240,24 @@
             <rect x="82" y="44" width="23" height="9" rx="3" fill="#e5484d" />
             <rect x="46" y="58" width="28" height="9" rx="2" fill="#f4f6f8" />
           </svg>
+          <div id="drive-compass" class="drive-compass" role="img" translate="no">
+            <svg id="drive-compass-dial" class="drive-compass__dial" viewBox="0 0 64 64" aria-hidden="true">
+              <circle cx="32" cy="32" r="30" fill="#fff" />
+              <path d="M32 7v5M32 52v5M7 32h5M52 32h5M14.300 14.300l3.500 3.500M46.200 46.200l3.500 3.500M14.300 49.700l3.500-3.500M46.200 17.800l3.500-3.500" stroke="#5b6573" stroke-width="2" stroke-linecap="round" />
+              <path d="M32 3 26.500 13h11Z" fill="#d93025" />
+            </svg>
+            <strong id="drive-compass-point">N</strong>
+          </div>
+          <p id="drive-road" class="drive-road" hidden><span>Now on</span> <strong id="drive-road-name" translate="no"></strong></p>
           <div class="drive-hud">
-            <p id="drive-preview" class="drive-hud__preview" hidden>Preview at 3× speed</p>
+            <div id="drive-preview" class="drive-hud__preview" role="group" aria-label="Preview speed" hidden>
+              <span>Preview</span>
+              <button type="button" data-rate="1" translate="no">1×</button>
+              <button type="button" data-rate="2" translate="no">2×</button>
+              <button type="button" data-rate="3" translate="no">3×</button>
+              <button type="button" data-rate="5" translate="no">5×</button>
+              <button type="button" data-rate="10" translate="no">10×</button>
+            </div>
             <p id="drive-turn" class="drive-hud__turn" hidden><i></i><span id="drive-turn-distance"></span></p>
             <p id="drive-ahead" class="drive-hud__ahead" hidden><i></i><strong id="drive-ahead-what"></strong> <span id="drive-ahead-distance"></span></p>
             <p class="drive-hud__note">Not every stop sign is mapped. Watch the road.</p>
