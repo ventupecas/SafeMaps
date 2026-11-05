@@ -51,6 +51,7 @@ const PHRASES = [
   ["About this app", "Acerca de esta app"],
   ["Visitors' answers", "Respuestas de los visitantes"],
   ["Stats", "Estadísticas"],
+  ["Inside the app", "Por dentro de la app (en inglés)"], // that page is in English only
   ["Back to the planner", "Volver al planificador"],
   ["The road ahead, seen from behind the car", "El camino por delante, visto desde atrás del auto"],
   ["STOP", "ALTO"],

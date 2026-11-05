@@ -237,7 +237,43 @@ def test_the_page_opens_without_the_network_once_it_has_been_seen(browser, site)
     page.reload()
     page.wait_for_selector("#origin-search input")  # the map library and the server's settings came from the copy
     assert page.locator(".leaflet-container").count() == 1
+    page.goto(site + "city.html")  # the 3D city and its library are kept too
+    page.wait_for_selector(".jrow")
+    assert page.evaluate("typeof THREE.OrbitControls") == "function"
     context.close()
+
+
+def test_the_city_opens_from_the_planner_and_says_how_the_app_fits_together(page, site):
+    open_map(page, site)
+    page.click(".chip--city")
+    page.wait_for_selector(".jrow")  # with everything from outside blocked: its libraries come with the page
+    assert page.locator("h1").text_content() == "Safe Route City" and page.locator(".jrow").count() == 8
+    if page.locator("#stage canvas").count() == 0:  # no WebGL in this browser: the same words, as text
+        assert page.locator(".nogl").count() == 1
+        return
+    page.wait_for_selector("#map-osm[aria-pressed='true']")  # it starts on the map this server is set to
+
+    page.click("[data-tour='car-osm']")
+    page.wait_for_selector(".step.now")
+    assert page.locator("#s-count").text_content() == "Step 1 of 20"
+    page.click("#s-play")  # paused, so the steps below stay put
+    page.click("#s-next")
+    assert page.locator("#s-count").text_content() == "Step 2 of 20"
+    assert page.locator(".step.now b").text_content() == "A taxi crosses the river"
+
+    page.click("#tab-places")
+    page.click("[data-place='main']")
+    assert page.locator("#view h2").text_content() == "Central Station"
+    assert page.locator("#view [data-flow='t_route'] b").text_content() == "POST /route"
+    page.click("[data-mode='subway']")
+    assert page.locator("#view h2").text_content() == "Subway"
+    assert page.locator("#view [data-flow='u_price']").count() == 0  # that line only runs on Google's map
+    page.click("#map-google")
+    page.click("[data-mode='forklift']")
+    assert page.locator("#view [data-flow='k_cache']").count() == 1
+
+    page.click(".tool--back")
+    page.wait_for_selector("#origin-search input")
 
 
 def test_points_can_be_placed_from_the_keyboard(page, site):
@@ -320,6 +356,7 @@ def test_the_booths_pages_read_in_spanish(browser, site):
     page = context.new_page()
     open_map(page, site)
     assert page.locator(".chip--answers").text_content() == "Respuestas de los visitantes" and page.locator(".chip--stats").text_content() == "Estadísticas"
+    assert page.locator(".chip--city").text_content() == "Por dentro de la app (en inglés)"
     page.click(".chip--answers")
     page.wait_for_selector("#answers-today .tile")
     assert page.locator("h1").text_content() == "Respuestas de los visitantes" and page.locator("#answers-ever .tile span").nth(0).text_content() == "dijeron que tomarían la ruta recomendada"
