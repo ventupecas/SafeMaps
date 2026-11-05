@@ -12,7 +12,7 @@ from app.config import Settings
 from app.geo import decode_polyline, encode_polyline, haversine_m, initial_bearing_deg
 from app.main import create_app
 from app.overpass import BBox
-from app.road_controls import Control, RoadControls
+from app.road_controls import Control, RoadControls, roads_along
 from app.roadgraph import build_graph
 from tests.factories import highway_route, winding_route
 from tests.osm_factory import grid_city, point
@@ -634,7 +634,24 @@ def test_without_the_signs_file_a_route_has_no_signs_and_the_code_still_counts(t
     line = {"encoded_polyline": encode_polyline([point(1, 0), point(1, 1)])}
     with TestClient(app) as client:
         assert client.post("/road-controls", json=line).status_code == 401
-        assert client.post("/road-controls", json=line, headers={"X-Access-Code": "expo"}).json() == {"controls": []}
+        answer = client.post("/road-controls", json=line, headers={"X-Access-Code": "expo"}).json()
+        assert answer["controls"] == []
+
+
+def test_a_route_says_which_road_it_is_on_all_the_way_along(api):
+    east_then_north = [point(1, 0), point(1, 1), point(1, 2), point(2, 2)]
+    roads = api.post("/road-controls", json={"encoded_polyline": encode_polyline(east_then_north)}).json()["roads"]
+    assert roads[0] == {"name": "Main St", "along_m": 0.0}
+    assert len(roads) == 2 and roads[1]["name"] and roads[1]["name"] != "Main St"
+    assert abs(roads[1]["along_m"] - haversine_m(point(1, 0), point(1, 2))) < 40  # about where it turns
+
+
+def test_a_cross_street_passed_doesnt_name_the_road_for_a_moment():
+    class Map:
+        def road_name_at(self, spot, heading):
+            return "Cross St" if 43.0 + 0.0020 < spot[0] < 43.0 + 0.0023 else "Long Rd"
+
+    assert roads_along(Map(), [(43.0, -88.0), (43.005, -88.0)]) == [{"name": "Long Rd", "along_m": 0.0}]
 
 
 def test_a_weight_too_big_to_be_a_number_is_a_bad_request(tmp_path, google):

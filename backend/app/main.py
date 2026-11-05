@@ -16,7 +16,7 @@ try the API directly.
     POST /bike-route  bike routes for one trip, lowest stress first (app.bike; needs the bike map)
     POST /walk-route  walking routes for one trip, the same way (needs the walking map)
     GET  /bike-stress the bike map's traffic stress in a box, for the page's Bike stress layer
-    POST /road-controls  the stop signs and traffic lights along a car's route, for the driving view
+    POST /road-controls  the stop signs, traffic lights and road names along a car's route, for the driving view
     GET  /expo-stats  today's trips and answers, for the expo's stats screen (stats.html) and answers page (answers.html)
     POST /guess       a visitor's guess in the "Which route is safer?" game (game.html)
     GET  /expo-control, POST /expo-control   the expo's control page (control.html): pause demo mode, restart the stats
@@ -72,7 +72,7 @@ from app.hotspots import CrashHotspots
 from app.models import LatLng, RoutePlan, ScoringProfile
 from app.overpass import ATTRIBUTION
 from app.profiles import DEFAULT_PROFILE, PRESETS, get_profile
-from app.road_controls import RoadControls
+from app.road_controls import RoadControls, roads_along
 from app.road_events import (
     ApifyTraffic,
     EventReport,
@@ -1067,10 +1067,15 @@ def create_app(settings: Settings | None = None, *, http: httpx.Client | None = 
     def road_controls(
         line: RouteLine, request: Request, x_access_code: str | None = Header(None, include_in_schema=False)
     ) -> dict[str, Any]:
-        """The stop signs and traffic lights a car's route meets, in order, for the driving view. Only what's mapped."""
+        """What a car's route meets, in order, for the driving view: stop signs and traffic lights (only what's
+        mapped), and the roads it runs along."""
         check_access(x_access_code)
-        controls = request.app.state.engine.road_controls
-        return {"controls": controls.along(decode_polyline(line.encoded_polyline)) if controls else []}
+        engine: Engine = request.app.state.engine
+        points = decode_polyline(line.encoded_polyline)
+        return {
+            "controls": engine.road_controls.along(points) if engine.road_controls else [],
+            "roads": roads_along(engine.graph, points) if engine.graph else [],
+        }
 
     @app.post("/guess", status_code=204)
     def guess(

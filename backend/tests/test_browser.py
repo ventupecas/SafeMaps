@@ -11,6 +11,7 @@ Without one, these tests are skipped.
 """
 
 import os
+import re
 import socket
 import time
 from threading import Thread
@@ -357,11 +358,47 @@ def test_the_drive_can_be_previewed_without_a_location_and_ends_by_itself(page, 
     assert page.locator("#drive").text_content() == "Stop the preview" and page.locator("#drive-preview").is_visible()
     assert page.locator("#preview").is_hidden()
     page.wait_for_function("/ mi left/.test(document.getElementById('nav-banner').textContent)")
-    page.evaluate("import('./core.js').then(({ NAV }) => { NAV.previewSpeedup = 500; })")
+    page.wait_for_selector("#drive-road:not([hidden])")
+    assert page.locator("#drive-road-name").text_content() == "Main St"
+    page.evaluate("import('./core.js').then(({ state }) => { state.nav.preview.rate = 500; })")
     page.wait_for_function("!document.body.classList.contains('driving')", timeout=20000)
     assert page.locator("#nav-banner").text_content() == "That's the end of the preview."
     assert page.locator("#drive").text_content() == "Start driving" and page.locator("#drive-view").is_hidden()
     assert page.locator("#preview").is_visible()
+
+
+def test_the_previews_speed_can_be_changed_as_it_plays_and_is_remembered(page, site):
+    open_map(page, site + TRIP)
+    wait_for_routes(page)
+    page.click("#preview")
+    page.wait_for_selector("body.driving3d", timeout=20000)
+    rate = "import('./core.js').then(({ state }) => state.nav.preview.rate)"
+    assert page.evaluate(rate) == 3 and page.locator("#drive-preview [data-rate='3']").get_attribute("aria-pressed") == "true"
+    page.click("#drive-preview [data-rate='1']")
+    assert page.evaluate(rate) == 1
+    assert page.locator("#drive-preview [data-rate='1']").get_attribute("aria-pressed") == "true"
+    assert page.locator("#drive-preview [data-rate='3']").get_attribute("aria-pressed") == "false"
+    page.click("#drive")
+    page.wait_for_function("!document.body.classList.contains('driving')")
+    page.click("#preview")
+    page.wait_for_selector("body.driving3d", timeout=20000)
+    assert page.evaluate(rate) == 1
+
+
+def test_the_compass_says_which_way_the_car_is_going(page, site):
+    open_map(page, site + TRIP)
+    wait_for_routes(page)
+    page.click("#preview")
+    page.wait_for_selector("body.driving3d", timeout=20000)
+    page.wait_for_function("document.getElementById('drive-compass-point').textContent === 'E'")  # east along Main St
+    assert page.locator("#drive-compass").is_visible() and page.locator("#drive-compass").get_attribute("aria-label") == "Going east"
+    assert "rotate(-" in page.locator("#drive-compass-dial").get_attribute("style")
+    points = page.evaluate("""import('./drive3d.js').then(({ compassPoint }) => [
+      [0, 44, 46, 90, 180, 270, 359, -90, 450].map((degrees) => compassPoint(degrees)),
+      [compassPoint(24, 0), compassPoint(29, 0), compassPoint(350, 0)],
+    ])""")
+    assert points[0] == [0, 1, 1, 2, 4, 6, 0, 6, 2]
+    assert points[1] == [0, 1, 0]  # past the edge by a little it stays put, and not by more
 
 
 def test_a_preview_is_for_cars_and_can_be_stopped(page, site):
@@ -375,6 +412,36 @@ def test_a_preview_is_for_cars_and_can_be_stopped(page, site):
     open_map(page, site + TRIP + "&mode=bike")
     wait_for_routes(page)
     assert page.locator("#preview").is_hidden()
+
+
+def test_the_control_page_reads_in_spanish_down_to_its_messages(browser, site):
+    context = browser.new_context(locale="es-US", service_workers="block")
+    context.route("**/*", lambda route: route.continue_() if "127.0.0.1" in route.request.url else route.abort())
+    page = context.new_page()
+    asked = []
+
+    def answer(dialog):
+        asked.append(dialog.message)
+        dialog.dismiss()
+
+    page.on("dialog", answer)
+    page.goto(site + "control.html")
+    page.wait_for_selector("#ready li")
+    page.wait_for_function("document.getElementById('today').textContent.startsWith('Hoy')")
+    assert page.title() == "Control de la expo" and page.locator("h1").text_content() == "Control de la expo"
+    assert page.locator("#ready li").first.text_content() == "El servidor · funcionando"
+    words = page.locator("main").inner_text()
+    english = re.findall(r"\b(?:the|and|Today|trips|Ready|Used|Open|Pause|Restart|Admin|junctions|crossings|schools|requests|of|yes|running|none|not|turned)\b", words)
+    assert not english, (english, words)
+
+    page.click("#reset-stats")
+    assert asked and asked[0].startswith("¿Contar las estadísticas")
+    page.click("#demo-toggle")  # the test's browser is this computer, so the switch answers
+    page.wait_for_function("document.getElementById('control-message').textContent === 'Modo de demostración en pausa.'")
+    page.wait_for_function("document.getElementById('demo-toggle').textContent === 'Reanudar el modo de demostración'")
+    page.click("#demo-toggle")
+    page.wait_for_function("document.getElementById('control-message').textContent === 'Modo de demostración reanudado.'")
+    context.close()
 
 
 def test_bike_mode_plans_a_bike_route_colored_by_stress(page, site):

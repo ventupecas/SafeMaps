@@ -8,7 +8,7 @@ import { selectRoute, showTrip } from "./results.js";
 import { restartIdleTimer, stopDemo } from "./expo.js";
 import { locale, translate } from "./i18n.js";
 import { isActiveMode, requestActiveTrip, showActiveTrip, startLabel } from "./bike.js";
-import { closeDriveView, driveViewFix, driveViewOn, openDriveView, pointAt } from "./drive3d.js";
+import { closeDriveView, driveViewFix, driveViewOn, openDriveView, pointAt, roadBearing } from "./drive3d.js";
 
 function locationProblem() {
   if (!window.isSecureContext) return "Location only works on a secure page: https, or this computer's own address.";
@@ -68,34 +68,76 @@ export function startPreview() {
   const path = state.paths[state.activeRouteId];
   if (!path || !state.destination) return;
   beginFollowing();
-  state.nav.preview = { path, along: 0, at: Date.now() };
+  const rate = rememberedRate();
+  state.nav.preview = { path, along: 0, speed: 0, rate, at: performance.now() };
+  showRate(rate);
   $("drive").textContent = "Stop the preview";
   $("drive-preview").hidden = false;
   previewStep();
   state.nav.previewTimer = setInterval(previewStep, NAV.previewTickMs);
 }
 
+const RATE_KEY = "routes-preview-rate";
+
+function rememberedRate() {
+  try {
+    const saved = Number(localStorage.getItem(RATE_KEY));
+    if (NAV.previewRates.includes(saved)) return saved;
+  } catch {
+    // Storage blocked: the usual speed.
+  }
+  return NAV.previewRate;
+}
+
+// A speed picked while the preview plays: the car eases to it.
+export function setPreviewRate(rate) {
+  if (!state.nav.preview) return;
+  state.nav.preview.rate = rate;
+  showRate(rate);
+  try {
+    localStorage.setItem(RATE_KEY, String(rate));
+  } catch {
+    // For this preview only.
+  }
+}
+
+function showRate(rate) {
+  for (const button of $("drive-preview").querySelectorAll("button")) button.setAttribute("aria-pressed", String(Number(button.dataset.rate) === rate));
+}
+
 function previewStep() {
   const { preview } = state.nav;
-  const path = state.paths[state.activeRouteId];
+  const along = driveViewOn() ? preview.along : advancePreview(); // the view moves it every frame
+  const path = preview.path;
   if (!path) return;
-  if (path !== preview.path) {
-    // Another route picked: go on from the same place.
-    preview.along = state.nav.fix ? nearestOnPath(state.nav.fix, path).along : 0;
-    preview.path = path;
-  }
-  const now = Date.now();
-  const metersPerSecond = (path.lengthM / Math.max(0.1, path.minutes * 60)) * NAV.previewSpeedup;
-  preview.along += metersPerSecond * Math.min(2, (now - preview.at) / 1000);
-  preview.at = now;
-  if (preview.along >= path.lengthM) {
+  if (along >= path.lengthM) {
     stopDriving("That's the end of the preview.");
     speak("You have arrived.");
     return;
   }
-  const here = pointAt(path, preview.along);
-  const ahead = pointAt(path, preview.along + 10);
-  onFix({ coords: { latitude: here.lat, longitude: here.lng, accuracy: 5, heading: bearing(here, ahead), speed: metersPerSecond } });
+  const here = pointAt(path, along);
+  onFix({ coords: { latitude: here.lat, longitude: here.lng, accuracy: 5, heading: roadBearing(path, along), speed: preview.speed } });
+}
+
+// How far along the route a preview is by now, called as often as anyone wants to know: from the
+// view each frame, and from previewStep where there's no view. The car gathers speed, and slows for bends.
+export function advancePreview(now = performance.now()) {
+  const { preview, fix } = state.nav;
+  const path = state.paths[state.activeRouteId];
+  if (!path) return preview.along;
+  if (path !== preview.path) {
+    // Another route picked: go on from the same place.
+    preview.along = fix ? nearestOnPath(fix, path).along : 0;
+    preview.path = path;
+  }
+  const seconds = Math.max(0, Math.min(2, (now - preview.at) / 1000));
+  preview.at = now;
+  const cruise = (path.lengthM / Math.max(0.1, path.minutes * 60)) * preview.rate;
+  const bend = Math.abs(((roadBearing(path, Math.min(path.lengthM, preview.along + 45)) - roadBearing(path, preview.along) + 540) % 360) - 180);
+  const wanted = cruise * (1 - 0.65 * Math.min(1, bend / 80));
+  preview.speed += (wanted - preview.speed) * (1 - Math.exp(-seconds / 0.7));
+  preview.along = Math.min(path.lengthM, preview.along + preview.speed * seconds);
+  return preview.along;
 }
 
 function beginFollowing() {
@@ -147,7 +189,7 @@ function onFix(position) {
   nav.fix = here;
 
   moveCar(here, nav.heading);
-  driveViewFix(here, nav.heading);
+  if (!nav.preview) driveViewFix(here, nav.heading);
   if (nav.following && !driveViewOn()) {
     state.view.panTo(here);
     if (first) state.view.setZoom(NAV.followZoom);
@@ -162,6 +204,7 @@ function onFix(position) {
     const left = nav.stopsLeft.length;
     speak(left ? "You've reached your stop." : "You've reached your last stop.");
   }
+  if (nav.preview) return showProgress(nav.preview.path, nav.preview.along);
   if (accuracy > NAV.worstAccuracyM) return setNavStatus("Weak GPS signal…");
   checkRoute(here);
 }
@@ -293,6 +336,8 @@ export async function keepScreenOn() {
 // The banner over the map while driving; null hides it.
 export function setNavStatus(message) {
   const banner = $("nav-banner");
+  if (banner.dataset.english === (message || "")) return; // the same words: nothing to lay out or translate again
+  banner.dataset.english = message || "";
   banner.textContent = message || "";
   banner.hidden = !message;
 }

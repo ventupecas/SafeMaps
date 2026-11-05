@@ -6,7 +6,7 @@
 // expo computer itself: the server refuses them from anywhere else.
 
 import { $, element } from "./core.js";
-import { locale, startTranslating } from "./i18n.js";
+import { locale, startTranslating, translate } from "./i18n.js";
 
 const REFRESH_MS = 15000;
 const CODE_KEY = "routes-admin-code";
@@ -27,7 +27,7 @@ $("admin-code").addEventListener("change", (event) => {
 });
 $("demo-toggle").addEventListener("click", () => change({ demo_paused: !control.demo_paused }, control.demo_paused ? "Demo mode resumed." : "Demo mode paused."));
 $("reset-stats").addEventListener("click", () => {
-  if (window.confirm("Count today's stats from now? Earlier trips and answers stay saved but stop counting.")) {
+  if (window.confirm(translate("Count today's stats from now? Earlier trips and answers stay saved but stop counting."))) {
     change({ reset_stats: true }, "The stats count from now.");
   }
 });
@@ -53,7 +53,7 @@ async function show() {
     check(health.crash_data, "Crash data", health.crash_data ? `${number(health.hazards.crash_locations)} crash locations` : "none loaded (ROUTES_CRASH_DATA)"),
     check(health.hazards.rail_crossings > 0, "Railroad crossings and schools", `${number(health.hazards.rail_crossings)} crossings, ${number(health.hazards.schools)} schools`),
     check(health.road_controls.signal > 0, "Stop signs and lights for the driving view", health.road_controls.signal > 0 ? `${number(health.road_controls.stop)} stop signs, ${number(health.road_controls.signal)} lights` : "none: python -m app.road_controls (EXPO.md)"),
-    check(health.weather_alerts, "Weather alerts", health.weather_alerts ? "on" : "off (ROUTES_WEATHER_ALERTS)"),
+    check(health.weather_alerts, "Weather alerts", health.weather_alerts ? "turned on" : "off (ROUTES_WEATHER_ALERTS)"),
     ...(health.bus_routes ? [check(health.bus_routes_ready, "Bus routes", health.bus_routes_ready ? "ready" : "not downloaded yet")] : []),
   );
   $("usage").replaceChildren(
