@@ -72,6 +72,9 @@ const Z_OVERLAY = 2;
 const Z_TRAFFIC = 3;
 const PHOTON = "https://photon.komoot.io/api/";
 const PHOTON_REVERSE = "https://photon.komoot.io/reverse";
+// The OpenStreetMap Foundation's address lookup (fair use: one lookup per click is well inside it).
+const NOMINATIM_REVERSE = "https://nominatim.openstreetmap.org/reverse";
+const LOOKUP_TIMEOUT_MS = 5000;
 const SEARCH_BIAS = { lat: 43.0389, lng: -87.9065 }; // prefer places around Milwaukee
 
 // trafficTiles: the OpenStreetMap map's traffic layer, a tile URL template ({z}/{x}/{y}); none means no layer.
@@ -495,13 +498,27 @@ class OsmView {
     else this.credits.delete(text) && this.map.attributionControl.removeAttribution(text);
   }
 
+  // Photon first; where it fails or doesn't answer in time (some networks can't reach it), OpenStreetMap's
+  // own Nominatim, which then answers the rest of the visit's lookups.
   async reverse(point) {
+    if (!this.photonDown) {
+      try {
+        const params = new URLSearchParams({ lat: point.lat, lon: point.lng, lang: "en", limit: 1 });
+        const response = await fetch(`${PHOTON_REVERSE}?${params}`, { signal: AbortSignal.timeout(LOOKUP_TIMEOUT_MS) });
+        if (!response.ok) throw new Error(`Photon answered ${response.status}`);
+        const { features } = await response.json();
+        return features.length ? photonPlace(features[0]) : null;
+      } catch (error) {
+        console.warn("Address lookup through Photon failed, trying Nominatim:", error);
+        this.photonDown = true;
+      }
+    }
     try {
-      const params = new URLSearchParams({ lat: point.lat, lon: point.lng, lang: "en", limit: 1 });
-      const response = await fetch(`${PHOTON_REVERSE}?${params}`);
-      if (!response.ok) throw new Error(`Photon answered ${response.status}`);
-      const { features } = await response.json();
-      return features.length ? photonPlace(features[0]) : null;
+      const params = new URLSearchParams({ lat: point.lat, lon: point.lng, format: "jsonv2", "accept-language": "en" });
+      const response = await fetch(`${NOMINATIM_REVERSE}?${params}`, { signal: AbortSignal.timeout(LOOKUP_TIMEOUT_MS) });
+      if (!response.ok) throw new Error(`Nominatim answered ${response.status}`);
+      const place = await response.json();
+      return place.address ? nominatimPlace(place) : null;
     } catch (error) {
       console.warn("Address lookup failed:", error);
       return null;
@@ -656,6 +673,17 @@ function photonPlace({ geometry, properties: p }) {
     lng: geometry.coordinates[0],
     label: [...new Set(parts)].join(", "),
     countryCode: p.countrycode ? p.countrycode.toUpperCase() : null,
+  };
+}
+
+// A Nominatim answer in the same shape and wording as Photon's: the place's name, the street address, the town.
+function nominatimPlace({ name, address: a }) {
+  const street = [a.house_number, a.road].filter(Boolean).join(" ");
+  const town = a.city || a.town || a.village || a.hamlet || a.suburb;
+  const parts = [name, street, town, a.state].filter(Boolean);
+  return {
+    label: [...new Set(parts)].join(", "),
+    countryCode: a.country_code ? a.country_code.toUpperCase() : null,
   };
 }
 

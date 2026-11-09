@@ -151,6 +151,16 @@ def test_map_clicks_and_removed_pins_are_undone_newest_first(page, site):
     assert pins(page) == [0, 0, 0] and page.locator("#undo").is_hidden()
 
 
+def test_a_map_click_is_named_by_nominatim_where_photon_cant_be_reached(page, site):
+    page.route("https://photon.komoot.io/**", lambda route: route.abort())
+    nominatim = {"name": "", "address": {"house_number": "4748", "road": "Elizabeth Street", "town": "Caledonia", "state": "Wisconsin"}}
+    page.route("https://nominatim.openstreetmap.org/**", lambda route: route.fulfill(json=nominatim))
+    open_map(page, site)
+    page.mouse.click(*map_spot(page, 0.4, 0.5))
+    page.wait_for_function("document.getElementById('origin-picked').textContent.includes('Elizabeth')")
+    assert page.locator("#origin-picked").text_content() == "4748 Elizabeth Street, Caledonia, Wisconsin"
+
+
 def test_a_trip_link_is_planned_with_its_safety_score_explained_and_remembered(page, site):
     asked = route_request(page, lambda: open_map(page, site + TRIP))
     assert (asked["origin"]["lat"], asked["destination"]["lat"]) == (round(FROM[0], 5), round(TO[0], 5))

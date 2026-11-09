@@ -58,7 +58,7 @@ It takes a while.
 
 - **Network:** some workplace networks block the download (Overpass). Use another network if it times out.
 - **If the server is busy:** add `--endpoint https://overpass.kumi.systems/api/interpreter`.
-- **If Overpass can't be reached at all** (this computer's network blocks it and Geofabrik): get an extract instead. At https://slice.openstreetmap.us draw a box from 42.83, -88.55 to 43.55, -87.75 (or send it with `curl.exe -X POST https://slice.openstreetmap.us/api/` and a GeoJSON polygon, as in the README), download the `.osm.pbf` into `backend\data\osm\pbf\`, then build every map from it: about a minute each, from the same file.
+- **If Overpass can't be reached at all** (this computer's network blocks it and Geofabrik): get an extract instead. At https://slice.openstreetmap.us draw a box from 42.49, -88.73 to 43.60, -87.75 (or send it with `curl.exe -X POST https://slice.openstreetmap.us/api/` and a GeoJSON polygon, as in the README), download the `.osm.pbf` into `backend\data\osm\pbf\`, then build every map from it: about a minute each, from the same file.
 
   ```powershell
   .\.venv\Scripts\python.exe -m app.build_graph milwaukee-metro --pbf data\osm\pbf\milwaukee-metro.osm.pbf

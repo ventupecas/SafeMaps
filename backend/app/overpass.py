@@ -74,9 +74,10 @@ class BBox:
 
 
 AREAS: dict[str, BBox] = {
-    # Milwaukee, Waukesha, Ozaukee and Washington counties (the Milwaukee
-    # metropolitan area) with a small margin. Lake Michigan bounds it to the east.
-    "milwaukee-metro": BBox(south=42.83, west=-88.55, north=43.55, east=-87.75),
+    # Southeastern Wisconsin: Milwaukee, Waukesha, Ozaukee, Washington, Racine and
+    # Kenosha counties, down to the Illinois line, and the edges of the counties
+    # around them. Lake Michigan bounds it to the east.
+    "milwaukee-metro": BBox(south=42.49, west=-88.73, north=43.60, east=-87.75),
 }
 
 
