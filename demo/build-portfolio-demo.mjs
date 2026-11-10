@@ -126,9 +126,25 @@ edit('index.html',
   '            <a class="chip chip--answers" href="answers.html">Visitors\' answers</a>\n            <a class="chip chip--stats" href="stats.html">Stats</a>\n            <a class="chip chip--control" href="control.html">Control</a>\n', '');
 edit('index.html', '<p class="hint">\n            Search for a place, or click the map:', '<p class="hint">\n            Search for one of the 12 sample places, or click near one on the map:');
 
+// On the portfolio, every project shares its VP monogram as the tab and home-screen icon
+// (demo/static/icons, the same files as the portfolio's own favicon). The app's own
+// green route mark stays in frontend/icons for the live planner.
+cpSync(join(ROOT, 'demo', 'static', 'icons'), join(OUT, 'icons', 'vp'), { recursive: true });
+const VP_ICONS = `<link rel="icon" href="icons/vp/favicon.ico" sizes="any" />
+    <link rel="icon" type="image/png" sizes="32x32" href="icons/vp/favicon-32x32.png" />
+    <link rel="icon" type="image/png" sizes="16x16" href="icons/vp/favicon-16x16.png" />`;
+{
+  const path = join(OUT, 'index.html');
+  const text = readFileSync(path, 'utf8').replace(/\r\n/g, '\n');
+  const icon = text.match(/<link\s+rel="icon"\s+href="data:image\/svg\+xml,[^"]*"\s*\/>/);
+  if (!icon) throw new Error('index.html: the icon link to replace was not found');
+  writeFileSync(path, text.replace(icon[0], VP_ICONS));
+}
+edit('index.html', '<link rel="apple-touch-icon" href="icons/icon-180.png" />', '<link rel="apple-touch-icon" sizes="180x180" href="icons/vp/apple-touch-icon.png" />');
+
 // The game and the model city ask the server too
 for (const page of ['game.html', 'city.html']) {
-  edit(page, '<link rel="icon" href="icons/icon.svg" type="image/svg+xml" />', '<link rel="icon" href="icons/icon.svg" type="image/svg+xml" />\n    <script src="demo/demo.js"></script>');
+  edit(page, '<link rel="icon" href="icons/icon.svg" type="image/svg+xml" />', `${VP_ICONS}\n    <script src="demo/demo.js"></script>`);
 }
 
 // No map key file here (the OpenStreetMap map needs none), so the page doesn't ask for it
@@ -156,6 +172,12 @@ edit('drive.js',
 // The add-to-home-screen manifest stays inside this folder
 const manifest = JSON.parse(readFileSync(join(OUT, 'manifest.json'), 'utf8'));
 if (manifest.start_url !== './' || manifest.scope !== './') throw new Error('manifest.json: start_url and scope should be ./');
+manifest.icons = [
+  { src: 'icons/vp/android-chrome-192x192.png', sizes: '192x192', type: 'image/png' },
+  { src: 'icons/vp/android-chrome-512x512.png', sizes: '512x512', type: 'image/png' },
+  { src: 'icons/vp/icon-maskable-512.png', sizes: '512x512', type: 'image/png', purpose: 'maskable' }
+];
+writeFileSync(join(OUT, 'manifest.json'), JSON.stringify(manifest, null, 2) + '\n');
 
 // ---------------------------------------------------------------
 // Checks: no key or secret, no absolute links that would leave the folder

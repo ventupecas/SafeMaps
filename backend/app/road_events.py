@@ -52,6 +52,7 @@ from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from functools import lru_cache
+from threading import Lock
 from typing import Any, Literal
 
 import httpx
@@ -238,18 +239,21 @@ class WzdxFeed:
         self._now = now
         self._events: list[RoadEvent] | None = None
         self._fetched_at = 0.0
+        self._refreshing = Lock()
 
     def events(self, area: BBox) -> list[RoadEvent]:
-        age = self._clock() - self._fetched_at
-        if self._events is None or age > WZDX_REFRESH.total_seconds():
-            try:
-                self._events = tuple(self._load())
-                self._fetched_at = self._clock()
-            except EventSourceError:
-                if self._events is None or age > WZDX_STALE_OK.total_seconds():
-                    raise
-                logger.warning("WZDx refresh failed; using the copy from %.0f minutes ago", age / 60)
-        return in_area(self._events, area)
+        with self._refreshing:  # of trips planned at once, one fetches it and the rest use its answer
+            age = self._clock() - self._fetched_at
+            if self._events is None or age > WZDX_REFRESH.total_seconds():
+                try:
+                    self._events = tuple(self._load())
+                    self._fetched_at = self._clock()
+                except EventSourceError:
+                    if self._events is None or age > WZDX_STALE_OK.total_seconds():
+                        raise
+                    logger.warning("WZDx refresh failed; using the copy from %.0f minutes ago", age / 60)
+            events = self._events
+        return in_area(events, area)
 
     def _load(self) -> list[RoadEvent]:
         if self._file is not None:
@@ -420,12 +424,15 @@ class Wi511Feed:
         self._now = now
         self._events: list[RoadEvent] | None = None
         self._fetched_at = 0.0
+        self._refreshing = Lock()
 
     def events(self, area: BBox) -> list[RoadEvent]:
-        if self._events is None or self._clock() - self._fetched_at > WI511_REFRESH.total_seconds():
-            self._events = tuple(self._fetch())
-            self._fetched_at = self._clock()
-        return in_area(self._events, area)
+        with self._refreshing:  # of trips planned at once, one fetches it and the rest use its answer
+            if self._events is None or self._clock() - self._fetched_at > WI511_REFRESH.total_seconds():
+                self._events = tuple(self._fetch())
+                self._fetched_at = self._clock()
+            events = self._events
+        return in_area(events, area)
 
     def _fetch(self) -> list[RoadEvent]:
         items = self._get(WI511_EVENTS_URL)
@@ -581,21 +588,25 @@ class TomTomFeed:
         self._events: list[RoadEvent] | None = None
         self._fetched_box: BBox | None = None
         self._fetched_at = 0.0
+        self._refreshing = Lock()
 
     def events(self, area: BBox) -> list[RoadEvent]:
         box = self._box or area
-        if self._events is None:
-            self._load_saved(box)
-        age = self._clock() - self._fetched_at
-        if self._events is None or box != self._fetched_box or age > TOMTOM_REFRESH.total_seconds():
-            try:
-                self._events = tuple(self._fetch(box))
-                self._fetched_box, self._fetched_at = box, self._clock()
-            except EventSourceError:
-                if self._events is None or box != self._fetched_box or age > TOMTOM_STALE_OK.total_seconds():
-                    raise
-                logger.warning("TomTom refresh failed; using the copy from %.0f minutes ago", age / 60)
-        return in_area(self._events, area)
+        # Of trips planned at once, one asks and the rest use its answer: each request counts against the day's.
+        with self._refreshing:
+            if self._events is None:
+                self._load_saved(box)
+            age = self._clock() - self._fetched_at
+            if self._events is None or box != self._fetched_box or age > TOMTOM_REFRESH.total_seconds():
+                try:
+                    self._events = tuple(self._fetch(box))
+                    self._fetched_box, self._fetched_at = box, self._clock()
+                except EventSourceError:
+                    if self._events is None or box != self._fetched_box or age > TOMTOM_STALE_OK.total_seconds():
+                        raise
+                    logger.warning("TomTom refresh failed; using the copy from %.0f minutes ago", age / 60)
+            events = self._events
+        return in_area(events, area)
 
     def _fetch(self, box: BBox) -> list[RoadEvent]:
         parts = split_box(box, TOMTOM_MAX_BOX_KM2)
@@ -1065,9 +1076,10 @@ def without_repeats(events: Sequence[RoadEvent]) -> list[RoadEvent]:
     ]
     if not official:
         return list(events)
+    boxes = _boxes(official)  # once: each of TomTom's events is tested against all of them
 
     def repeated(event: RoadEvent) -> bool:
-        lines = [_route_index(other.path) for other in _near(event.path, official) if other.kind in ("closed", event.kind)]
+        lines = [_route_index(other.path) for other in _near(event.path, official, boxes) if other.kind in ("closed", event.kind)]
         if not lines:
             return False
         samples_lat, samples_lng = kernel.densified(*columns(event.path), EVENT_MATCH_M / 2)
@@ -1102,19 +1114,24 @@ def near_routes(events: Iterable[RoadEvent], routes: Sequence[Sequence[Point]], 
     return [event for event, is_near in zip(events, near.tolist()) if is_near]
 
 
-def _near(points: Sequence[Point], events: Iterable[RoadEvent]) -> list[RoadEvent]:
-    """The events whose box overlaps the route's: a quick test first, as a trip can have a hundred around it."""
+def _boxes(events: Sequence[RoadEvent]) -> np.ndarray:
+    """Each event's box, a row of south, west, north, east: for _near."""
+    rows = []
+    for event in events:
+        lat, lng = zip(*event.path)
+        rows.append((min(lat), min(lng), max(lat), max(lng)))
+    return np.array(rows, dtype=np.float64).reshape(-1, 4)
+
+
+def _near(points: Sequence[Point], events: Sequence[RoadEvent], boxes: np.ndarray) -> list[RoadEvent]:
+    """The events whose box (their row of boxes, from _boxes) overlaps the route's: a quick test first, as a
+    trip can have a hundred around it."""
     margin = EVENT_MATCH_M / 111_320.0 * 2
-    south, north = min(p[0] for p in points) - margin, max(p[0] for p in points) + margin
-    west, east = min(p[1] for p in points) - margin * 1.5, max(p[1] for p in points) + margin * 1.5
-    return [
-        event
-        for event in events
-        if min(p[0] for p in event.path) <= north
-        and max(p[0] for p in event.path) >= south
-        and min(p[1] for p in event.path) <= east
-        and max(p[1] for p in event.path) >= west
-    ]
+    lat, lng = zip(*points)
+    south, north = min(lat) - margin, max(lat) + margin
+    west, east = min(lng) - margin * 1.5, max(lng) + margin * 1.5
+    overlapping = (boxes[:, 0] <= north) & (boxes[:, 2] >= south) & (boxes[:, 1] <= east) & (boxes[:, 3] >= west)
+    return [events[index] for index in np.flatnonzero(overlapping).tolist()]
 
 
 class _EventTable:

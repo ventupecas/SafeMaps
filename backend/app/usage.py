@@ -13,11 +13,16 @@ import logging
 import os
 import tempfile
 import threading
+import time
 from collections.abc import Callable
 from datetime import date
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
+
+# How long a count read for show (used_today) stands before the file is read again. Every trip's
+# answer carries it, and through Docker on Windows each read takes about a hundredth of a second.
+SHOWN_FOR_S = 1.0
 
 
 class DailyUsage:
@@ -27,6 +32,7 @@ class DailyUsage:
         self.limit = limit
         self._today = today
         self._lock = threading.Lock()
+        self._shown: tuple[str, int, float] | None = None  # the day, its count, and when that was read or written
 
     def take(self, count: int = 1) -> bool:
         """Count count requests. Returns False, counting nothing, if they don't fit in what's left today."""
@@ -38,8 +44,15 @@ class DailyUsage:
             return True
 
     def used_today(self) -> int:
+        """Today's count, to show. The cap doesn't go by it: take() reads the file every time, as other
+        workers and the command line count in the same file. This is at most SHOWN_FOR_S behind them."""
         with self._lock:
-            return self._load()
+            day = self._today().isoformat()
+            if self._shown and self._shown[0] == day and time.monotonic() - self._shown[2] < SHOWN_FOR_S:
+                return self._shown[1]
+            used = self._load()
+            self._shown = (day, used, time.monotonic())
+            return used
 
     def _load(self) -> int:
         try:
@@ -58,6 +71,7 @@ class DailyUsage:
             with os.fdopen(fd, "w", encoding="utf-8") as handle:
                 json.dump({"date": self._today().isoformat(), "requests": used}, handle)
             os.replace(tmp_name, self.path)
+            self._shown = (self._today().isoformat(), used, time.monotonic())
         except BaseException:
             Path(tmp_name).unlink(missing_ok=True)
             raise

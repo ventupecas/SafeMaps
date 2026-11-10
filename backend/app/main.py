@@ -9,7 +9,7 @@ try the API directly.
 
     GET  /health      what's loaded: road graph, crash data, cache mode, today's Google usage
     GET  /profiles    the preset driver profiles and their weights
-    GET  /app-config  which map the page shows (ROUTES_MAP), and whether it has a traffic layer
+    GET  /app-config  which map the page shows (ROUTES_MAP), whether it has a traffic layer, and the area trips stay in
     POST /route       rank routes for one trip; the map draws plan.winner.encoded_polyline
     GET  /traffic-tiles/{z}/{x}/{y}.png   TomTom's traffic map, for the OpenStreetMap page
     GET  /bus-routes  the county's bus routes, for the OpenStreetMap page's Transit layer
@@ -86,7 +86,7 @@ from app.road_events import (
 )
 from app.road_events import collect as collect_road_events
 from app.roadgraph import RoadGraph
-from app.router import Router
+from app.router import MAX_SNAP_M, Router
 from app.routes_client import DailyLimitReached, RoutesApiError, RoutesClient, daily_usage
 from app.sun import dark, low_sun, sun_position
 from app.traffic_tiles import TILE_REFRESH, TileError, TrafficTiles
@@ -466,6 +466,18 @@ def sources_for_map(order: Sequence[str], map_kind: str) -> tuple[str, ...]:
     return tuple(g for g in ("+".join(s for s in group.split("+") if s not in elsewhere) for group in order) if g)
 
 
+def place_off_the_map(graph: RoadGraph, places: Sequence[LatLng]) -> HTTPException | None:
+    """Why a trip on our own map found no route, when it's that one of its places (start, stops, destination)
+    has no road within the router's reach: it's outside the map's area, or out on the lake. The answer names
+    the place, in words the page shows as they are. None when every place is on the map."""
+    for number, place in enumerate(places):
+        if graph.nearest_node(place.as_tuple(), MAX_SNAP_M) is None:
+            name = "The start" if number == 0 else "The destination" if number == len(places) - 1 else f"Stop {number}"
+            detail = f"{name} isn't near any road on this map: pick a spot inside the area it covers."
+            return HTTPException(status_code=422, detail=detail)
+    return None
+
+
 def shown_events(events: Sequence[RoadEvent], plan: RoutePlan) -> list[RoadEventOut]:
     """What the map draws: closures and lane closures near the routes, once each, and the measured traffic.
 
@@ -657,7 +669,7 @@ def create_app(settings: Settings | None = None, *, http: httpx.Client | None = 
             else None,
             "bike_map": {
                 "segments": engine.bike_graph.edge_count,
-                "trails": sum(1 for e in range(engine.bike_graph.edge_count) if engine.bike_graph.class_name(e) in ("cycleway", "path")),
+                "trails": engine.bike_graph.count_of_classes("cycleway", "path"),
                 "cyclist_crash_locations": engine.bike_hotspots.locations if engine.bike_hotspots else 0,
             }
             if engine.bike_graph
@@ -672,10 +684,15 @@ def create_app(settings: Settings | None = None, *, http: httpx.Client | None = 
     @app.get("/app-config")
     def app_config(request: Request) -> dict[str, Any]:
         """What the web map needs before it loads: which map to show (ROUTES_MAP), whether
-        /traffic-tiles serves a traffic layer for it and /bus-routes its buses, and the price
-        of gas (ROUTES_FUEL_PRICE)."""
+        /traffic-tiles serves a traffic layer for it and /bus-routes its buses, the price
+        of gas (ROUTES_FUEL_PRICE), and the area every trip has to stay in (south, west, north, east):
+        the road map's, on the OpenStreetMap map, where our router designs every route. None on Google's,
+        whose own routes go anywhere."""
+        graph = request.app.state.engine.graph
+        area = graph.bbox if graph and settings.map != "google" else None
         return {
             "map": settings.map,
+            "area": [area.south, area.west, area.north, area.east] if area else None,
             "traffic_tiles": request.app.state.engine.tiles is not None,
             "bus_routes": request.app.state.engine.buses is not None,
             "bike": request.app.state.engine.bike_graph is not None,
@@ -809,7 +826,9 @@ def create_app(settings: Settings | None = None, *, http: httpx.Client | None = 
                 options = CandidateOptions(traffic_aware=trip.live_traffic, origin_heading=heading)
                 candidates = build_candidates(client, origin, destination, options, context)
         except NoRouteFoundError as exc:
-            raise HTTPException(status_code=404, detail=str(exc)) from None
+            trip_places = [trip.origin, *trip.stops, trip.destination]
+            off_the_map = place_off_the_map(engine.graph, trip_places) if engine.graph and settings.map != "google" else None
+            raise off_the_map or HTTPException(status_code=404, detail=str(exc)) from None
         except CacheMiss as exc:
             raise HTTPException(status_code=503, detail=str(exc)) from None
         except DailyLimitReached as exc:
@@ -1032,7 +1051,7 @@ def create_app(settings: Settings | None = None, *, http: httpx.Client | None = 
             router = engine.bike_router() if mode == "bike" else engine.walk_router()
             result = bike.plan_with_stops(router, places, profile, events=events, sun=sun)
         except (LookupError, ValueError) as exc:
-            raise HTTPException(status_code=404, detail=str(exc)) from None
+            raise place_off_the_map(graph, places) or HTTPException(status_code=404, detail=str(exc)) from None
         return {
             "plan": result,
             "attribution": [f"{'Bike' if mode == 'bike' else 'Walking'} routes: map data {ATTRIBUTION}"],

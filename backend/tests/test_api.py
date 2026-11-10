@@ -157,6 +157,24 @@ def test_no_route_is_404(tmp_path):
         assert api.post("/route", json={"origin": far, "destination": DESTINATION}).status_code == 404
 
 
+def test_a_place_off_the_openstreetmap_map_is_named_and_its_area_is_given(tmp_path, google):
+    box = BBox(south=ORIGIN["lat"] - 0.05, west=ORIGIN["lng"] - 0.05, north=ORIGIN["lat"] + 0.05, east=ORIGIN["lng"] + 0.05)
+    build_graph(grid_city().osm.elements, area="grid", bbox=box).save(tmp_path / "grid.json.gz")
+    app = create_app(make_settings(tmp_path, map="osm"), http=httpx.Client(transport=httpx.MockTransport(google)))
+    far = {"lat": 44.5, "lng": -88.0}
+    with TestClient(app) as api:
+        assert api.get("/app-config").json()["area"] == [box.south, box.west, box.north, box.east]
+        for trip, place in (
+            ({"origin": far, "destination": DESTINATION}, "The start"),
+            ({"origin": ORIGIN, "destination": far}, "The destination"),
+            ({"origin": ORIGIN, "stops": [DESTINATION, far], "destination": ORIGIN}, "Stop 2"),
+        ):
+            answer = api.post("/route", json=trip)
+            assert answer.status_code == 422, trip
+            assert answer.json()["detail"] == f"{place} isn't near any road on this map: pick a spot inside the area it covers."
+        assert api.post("/route", json={"origin": ORIGIN, "destination": DESTINATION}).status_code == 200
+
+
 def test_unrecorded_trip_in_replay_is_503(tmp_path, google):
     app = create_app(make_settings(tmp_path, cache_mode=CacheMode.REPLAY), http=httpx.Client(transport=httpx.MockTransport(google)))
     with TestClient(app) as api:
@@ -361,7 +379,7 @@ def test_routes_come_with_turn_by_turn_directions(api):
 def test_the_openstreetmap_map_never_asks_google(tmp_path, google):
     app = create_app(make_settings(tmp_path, map="osm"), http=httpx.Client(transport=httpx.MockTransport(google)))
     with TestClient(app) as client:
-        assert client.get("/app-config").json() == {"map": "osm", "traffic_tiles": False, "bus_routes": False, "bike": False, "walk": False, "transit": False, "fuel_price": 3.25}  # no TomTom key
+        assert client.get("/app-config").json() == {"map": "osm", "area": None, "traffic_tiles": False, "bus_routes": False, "bike": False, "walk": False, "transit": False, "fuel_price": 3.25}  # no TomTom key
         trip = client.post("/route", json={"origin": ORIGIN, "destination": DESTINATION, "live_traffic": True}).json()
     assert google.requests == []  # no Google: not even with live traffic asked for
     standard = [route for route in trip["plan"]["candidates"] if route["is_standard"]]
@@ -373,7 +391,7 @@ def test_the_openstreetmap_map_never_asks_google(tmp_path, google):
 def test_googles_default_is_the_standard_route_on_the_google_map(api):
     trip = api.post("/route", json={"origin": ORIGIN, "destination": DESTINATION}).json()
     assert [r["id"] for r in trip["plan"]["candidates"] if r["is_standard"]] == ["google-1"]
-    assert api.get("/app-config").json() == {"map": "google", "traffic_tiles": False, "bus_routes": False, "bike": False, "walk": False, "transit": False, "fuel_price": 3.25}
+    assert api.get("/app-config").json() == {"map": "google", "area": None, "traffic_tiles": False, "bus_routes": False, "bike": False, "walk": False, "transit": False, "fuel_price": 3.25}
 
 
 class FakeTomTom:
@@ -402,7 +420,7 @@ def test_tomtom_traffic_on_the_openstreetmap_map(tmp_path, google):
     tomtom = FakeTomTom(main_st_closed_both_ways(), google)
     settings = make_settings(tmp_path, map="osm", tomtom_api_key="tt-key")
     with TestClient(create_app(settings, http=httpx.Client(transport=httpx.MockTransport(tomtom)))) as client:
-        assert client.get("/app-config").json() == {"map": "osm", "traffic_tiles": True, "bus_routes": False, "bike": False, "walk": False, "transit": False, "fuel_price": 3.25}
+        assert client.get("/app-config").json() == {"map": "osm", "area": None, "traffic_tiles": True, "bus_routes": False, "bike": False, "walk": False, "transit": False, "fuel_price": 3.25}
         trip = client.post("/route", json={"origin": ORIGIN, "destination": DESTINATION}).json()
         first = client.get("/traffic-tiles/12/1047/1504.png")
         again = client.get("/traffic-tiles/12/1047/1504.png")
@@ -526,10 +544,14 @@ def test_bike_routes_through_the_api(tmp_path, google):
         assert client.post("/bike-route", json={"origin": ORIGIN, "destination": DESTINATION, "profile": "racing"}).status_code == 422
         box = {"south": 43.03, "west": -87.91, "north": 43.05, "east": -87.89}
         stress = client.get("/bike-stress", params=box).json()
+        health = client.get("/health").json()
     winner = trip["plan"]["winner"]
     assert 0 <= winner["safety_score"] <= 100 and winner["stress_segments"] and winner["features"]["duration_min"] > 0
     assert any(c["is_standard"] for c in trip["plan"]["candidates"])
     assert stress["lines"]["1"] and stress["lines"]["4"]  # quiet avenues, and Main St
+    built = build_graph(city_with_a_trail().osm.elements, area="grid", mode="bike")
+    trails = sum(1 for edge in range(built.edge_count) if built.class_name(edge) in ("cycleway", "path"))
+    assert trails > 0 and health["bike_map"] == {"segments": built.edge_count, "trails": trails, "cyclist_crash_locations": 0}
 
 
 def test_no_bike_map_no_bike_routes(api):
@@ -601,7 +623,8 @@ def test_a_walk_over_ten_miles_suggests_another_mode(tmp_path, google):
     with TestClient(app) as client:
         too_far = client.post("/walk-route", json={"origin": ORIGIN, "destination": far})
         assert too_far.status_code == 422 and "over 10 miles" in too_far.json()["detail"]
-        assert client.post("/walk-route", json={"origin": ORIGIN, "destination": within}).status_code == 404
+        off_the_map = client.post("/walk-route", json={"origin": ORIGIN, "destination": within})
+        assert off_the_map.status_code == 422 and off_the_map.json()["detail"].startswith("The destination isn't near any road on this map")
         # There and back past a stop counts all the way.
         with_a_stop = client.post("/walk-route", json={"origin": ORIGIN, "stops": [halfway], "destination": ORIGIN})
         assert with_a_stop.status_code == 422

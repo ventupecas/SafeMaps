@@ -21,7 +21,7 @@
 
 import { createMapView } from "./maps.js";
 import { $, MILWAUKEE, NARROW, PROFILE_LABELS, element, state } from "./core.js";
-import { addStop, addStopOnMap, changeOnMap, chosenStops, clearPoint, mapTouchAllowed, removeStop, setPoint, swapEnds, undoMapChange, unnamed } from "./editing.js";
+import { addStop, addStopOnMap, changeOnMap, chosenStops, clearPoint, mapTouchAllowed, onTheMap, removeStop, setPoint, swapEnds, undoMapChange, unnamed } from "./editing.js";
 import { clearRoutes, drawClosures, drawTraffic, showTrip } from "./results.js";
 import { keepScreenOn, recenter, setNavStatus, setPreviewRate, startDriving, startPreview, stopDriving, useMyLocation } from "./drive.js";
 import { applyBaseMap, drawBuses, isNight, rememberLayers, restoreLayers, savedLayers, showTransit } from "./layers.js";
@@ -49,6 +49,10 @@ async function boot() {
     state.buses.available = Boolean(appConfig.bus_routes);
     state.modesAvailable = { bike: Boolean(appConfig.bike), walk: Boolean(appConfig.walk), transit: Boolean(appConfig.transit) };
     if (Number.isFinite(appConfig.fuel_price)) state.fuelPrice = appConfig.fuel_price;
+    if (Array.isArray(appConfig.area)) {
+      const [south, west, north, east] = appConfig.area;
+      state.area = { south, west, north, east };
+    }
   } catch {
     state.mapKind = "google"; // an older server: it only knew Google's map
   }
@@ -111,7 +115,7 @@ async function initMap() {
     zoom: 11,
     dark: state.dark,
     onClick: (point) => {
-      if (!mapTouchAllowed()) return;
+      if (!mapTouchAllowed() || !onTheMap(point)) return;
       // First click sets the start; after that, clicks move the destination.
       const kind = state.origin ? "destination" : "origin";
       changeOnMap(kind, unnamed(point));
@@ -131,6 +135,7 @@ async function initMap() {
     ),
   );
   state.closureMarkers = state.view.markerGroup();
+  if (state.area) state.view.outline(state.area);
 }
 
 // ---- Undo: changes made on the map (clicks, drags, pins added or removed), taken back newest first
@@ -201,6 +206,7 @@ function placeByKeyboard(event) {
   if (!state.view || !mapTouchAllowed()) return;
   event.preventDefault();
   const point = state.view.center();
+  if (!onTheMap(point)) return;
   const before = { origin: state.origin, destination: state.destination, stops: state.stops.length };
   if (key === "s") addStopOnMap(point);
   else changeOnMap(state.origin ? "destination" : "origin", unnamed(point));

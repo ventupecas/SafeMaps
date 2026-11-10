@@ -44,6 +44,16 @@ def test_no_limit_still_counts(tmp_path):
     assert usage.used_today() == 5
 
 
+def test_the_count_shown_is_remembered_for_a_moment_but_the_cap_always_reads_the_file(tmp_path, monkeypatch):
+    mine, another_worker = DailyUsage(tmp_path / "usage.json", limit=3), DailyUsage(tmp_path / "usage.json", limit=3)
+    assert mine.take() and mine.used_today() == 1
+    assert another_worker.take() and another_worker.take()  # counting in the same file
+    assert mine.used_today() == 1  # shown from memory: no file read for every trip's answer
+    assert not mine.take()  # the cap holds: all 3 are used
+    monkeypatch.setattr("app.usage.SHOWN_FOR_S", 0.0)  # a moment later
+    assert mine.used_today() == 3
+
+
 def test_client_stops_live_calls_at_the_limit_but_serves_the_cache(tmp_path):
     calls = []
 

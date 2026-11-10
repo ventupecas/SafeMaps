@@ -75,6 +75,10 @@ const PHRASES = [
   ["Where from?", "¿Desde dónde?"],
   ["Where to?", "¿A dónde?"],
   ["Add a stop", "Agregar una parada"],
+  ["Press Enter to search.", "Presiona Enter para buscar."],
+  ["Searching…", "Buscando…"],
+  ["No place found by that name.", "No se encontró ningún lugar con ese nombre."],
+  ["The place search didn't answer. Click the map instead.", "La búsqueda de lugares no respondió. Mejor haz clic en el mapa."],
   ["Remove", "Quitar"],
   [
     "Search for a place, or click the map: the first click sets the start, the next the destination. Right-click (or press and hold) to add a stop. Drag a pin to move it, click it to remove it;",
@@ -154,6 +158,7 @@ const PHRASES = [
   ["Traffic: flowing → jammed", "Tráfico: fluido → congestionado"],
   ["Bus routes, each its own color", "Rutas de autobús, cada una con su color"],
   ["Up to 3 stops: remove one to add another.", "Hasta 3 paradas: quita una para agregar otra."],
+  ["That's outside the map's area (the dashed line).", "Eso está fuera del área del mapa (la línea punteada)."],
   ["Destination set.", "Destino marcado."],
   ["Start set.", "Punto de partida marcado."],
   ["Put the start back", "Volver a poner el punto de partida"],
@@ -244,6 +249,14 @@ const PHRASES = [
   ["Can't reach the routing server. Open this page from it, e.g. http://127.0.0.1:3143", "No se puede conectar con el servidor de rutas. Abre esta página desde él, p. ej. http://127.0.0.1:3143"],
   ["This demo needs its access code: open it from the link or QR code you were given.", "Esta demostración necesita su código de acceso: ábrela desde el enlace o el código QR que te dieron."],
   ["No drivable route was found between these points.", "No se encontró una ruta en auto entre estos puntos."],
+  [
+    "The start isn't near any road on this map: pick a spot inside the area it covers.",
+    "El punto de partida no está cerca de ninguna calle de este mapa: elige un lugar dentro del área que cubre.",
+  ],
+  [
+    "The destination isn't near any road on this map: pick a spot inside the area it covers.",
+    "El destino no está cerca de ninguna calle de este mapa: elige un lugar dentro del área que cubre.",
+  ],
   [
     "Today's live traffic limit is used up. Turn off Live traffic to keep planning, or try again tomorrow.",
     "Se agotó el límite de tráfico en vivo de hoy. Desactiva «Tráfico en vivo» para seguir planificando, o inténtalo mañana.",
@@ -683,6 +696,10 @@ const PATTERNS = [
   [/^In (\d+) minutes$/, "En $1 minutos"],
   [/^Stop (\d+)$/, "Parada $1"],
   [/^Stop (\d+) added\.$/, "Parada $1 agregada."],
+  [
+    /^Stop (\d+) isn't near any road on this map: pick a spot inside the area it covers\.$/,
+    "La parada $1 no está cerca de ninguna calle de este mapa: elige un lugar dentro del área que cubre.",
+  ],
   [/^Stop (\d+): drag to move, click to remove$/, "Parada $1: arrastra para mover, haz clic para quitar"],
   [/^(.+) → (.+) · (\d+) stops?$/, (_, from, to, n) => `${from} → ${to} · ${n} ${plural(n, "parada", "paradas")}`],
   // The result

@@ -1926,6 +1926,18 @@ body:not(.map-osm) .osm-only {
   background: var(--accent-soft);
 }
 
+/* A line under the search box when it has no suggestions to offer ("Press Enter to search."). */
+.search-note {
+  margin: 4px 2px 0;
+  font-size: 0.8rem;
+  color: var(--muted);
+}
+
+.search-note:empty,
+.osm-search:placeholder-shown ~ .search-note {
+  display: none; /* nothing to say, or the box was emptied (a click on the map does that) */
+}
+
 /* ---- The expo's stats screen (stats.html): big numbers for across the booth */
 
 .stats-page {

@@ -161,6 +161,48 @@ def test_a_map_click_is_named_by_nominatim_where_photon_cant_be_reached(page, si
     assert page.locator("#origin-picked").text_content() == "4748 Elizabeth Street, Caledonia, Wisconsin"
 
 
+def test_the_search_box_asks_nominatim_on_enter_where_photon_cant_be_reached(page, site):
+    page.route("https://photon.komoot.io/**", lambda route: route.abort())
+    place = {
+        "name": "Fiserv Forum",
+        "lat": str(FROM[0]),
+        "lon": str(FROM[1]),
+        "address": {"house_number": "1111", "road": "Vel R. Phillips Avenue", "city": "Milwaukee", "state": "Wisconsin", "country_code": "us"},
+    }
+    searches = []
+
+    def nominatim(route):
+        searches.append(route.request.url)
+        route.fulfill(json=[place])
+
+    page.route("https://nominatim.openstreetmap.org/search**", nominatim)
+    open_map(page, site)
+    box = page.locator("#origin-search input")
+    box.fill("fiserv")
+    page.wait_for_function("document.querySelector('#origin-search .search-note').textContent === 'Press Enter to search.'")
+    assert searches == []  # Nominatim isn't asked as letters are typed: its terms don't allow it
+    box.press("Enter")
+    page.wait_for_selector("#origin-search-suggestions li")
+    box.press("Enter")  # the first place found
+    assert box.input_value() == "Fiserv Forum, 1111 Vel R. Phillips Avenue, Milwaukee, Wisconsin"
+    assert pins(page) == [1, 0, 0] and len(searches) == 1 and "q=fiserv" in searches[0]
+
+
+def test_the_maps_area_is_outlined_and_a_spot_outside_it_cant_be_picked(page, site):
+    def with_an_area(route):  # the west half of what the map shows at first
+        answer = route.fetch()
+        route.fulfill(response=answer, json={**answer.json(), "area": [42.0, -89.5, 44.0, -87.9065]})
+
+    page.route("**/app-config", with_an_area)
+    open_map(page, site)
+    assert page.locator(".leaflet-under-pane path").count() == 1  # the dashed line around it
+    page.mouse.click(*map_spot(page, 0.8, 0.5))
+    assert pins(page) == [0, 0, 0]
+    assert page.locator("#nav-banner").text_content() == "That's outside the map's area (the dashed line)."
+    page.mouse.click(*map_spot(page, 0.3, 0.5))
+    assert pins(page) == [1, 0, 0]
+
+
 def test_a_trip_link_is_planned_with_its_safety_score_explained_and_remembered(page, site):
     asked = route_request(page, lambda: open_map(page, site + TRIP))
     assert (asked["origin"]["lat"], asked["destination"]["lat"]) == (round(FROM[0], 5), round(TO[0], 5))

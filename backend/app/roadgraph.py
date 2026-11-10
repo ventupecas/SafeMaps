@@ -390,6 +390,11 @@ class RoadGraph:
     def class_name(self, edge: int) -> str:
         return self.classes[self.road_class[edge]]
 
+    def count_of_classes(self, *names: str) -> int:
+        """How many segments are of these road classes, e.g. the bike map's trails."""
+        wanted = [index for index, name in enumerate(self.classes) if name in names]
+        return int(np.isin(self.column("road_class"), wanted).sum())
+
     def nearest_node(self, point: Point, max_distance_m: float = 1_000.0) -> int | None:
         """Closest junction a trip can start or end at, or None if none is within max_distance_m."""
         return self._nearest(point, max_distance_m, snappable_only=True)

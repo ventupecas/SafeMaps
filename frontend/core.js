@@ -100,6 +100,7 @@ export const PROFILE_LABELS = {
 export const state = {
   view: null, // the map (see maps.js)
   mapKind: "google", // or "osm": no Google at all; traffic from 511 and TomTom
+  area: null, // { south, west, north, east }: where trips have to stay, on the OpenStreetMap map (our road map's area)
   mode: "car", // or "bike" or "walk" (bike.js), or "transit" (transit.js): as the server has maps for
   origin: null, // { lat, lng, label, countryCode }
   destination: null,

@@ -2,6 +2,8 @@
 
 import itertools
 import json
+import time
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 
 import httpx
@@ -528,6 +530,22 @@ def test_tomtom_is_asked_about_the_whole_map_at_most_every_ten_minutes(tmp_path)
     clock.now = 601
     feed.events(METRO)
     assert len(requests) == 2
+
+
+def test_trips_planned_at_once_share_one_request_to_tomtom(tmp_path):
+    line = [DOWNTOWN, destination_point(DOWNTOWN, 0, 300)]
+    requests: list[httpx.Request] = []
+
+    def slow(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        time.sleep(0.2)  # long enough for every trip to arrive while the first one's request is out
+        return httpx.Response(200, json={"incidents": [tomtom_incident(8, line)]})
+
+    usage = DailyUsage(tmp_path / "tomtom.json", 80)
+    feed = TomTomFeed("tt-secret", httpx.Client(transport=httpx.MockTransport(slow)), usage, box=METRO, clock=Clock())
+    with ThreadPoolExecutor(6) as trips:
+        answers = list(trips.map(lambda _: len(feed.events(METRO)), range(6)))
+    assert answers == [1] * 6 and len(requests) == 1 and usage.used_today() == 1
 
 
 def test_a_restarted_server_reuses_tomtoms_answer_for_ten_minutes(tmp_path):

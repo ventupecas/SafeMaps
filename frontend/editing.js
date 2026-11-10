@@ -63,7 +63,7 @@ export function placePin(kind, point) {
     title: `${kind === "origin" ? "Start" : "Destination"}: drag to move, click to remove`,
     zIndex: PIN_Z,
     onClick: () => mapTouchAllowed() && changeOnMap(kind, null),
-    onDragEnd: (to) => (mapTouchAllowed() ? changeOnMap(kind, unnamed(to)) : placePin(kind, state[kind])),
+    onDragEnd: (to) => (mapTouchAllowed() && onTheMap(to) ? changeOnMap(kind, unnamed(to)) : placePin(kind, state[kind])),
   });
 }
 
@@ -86,6 +86,15 @@ const PIN_Z = 40;
 // No accidental trip changes while driving, or from the touch that stopped the demo.
 export function mapTouchAllowed() {
   return !state.nav.active && Date.now() - (state.demo.stoppedAt || 0) >= 800;
+}
+
+// On the OpenStreetMap map our router designs every route, so a trip's places have to be in the road
+// map's area (state.area, outlined on the map). A spot picked outside it changes nothing, and a note says why.
+export function onTheMap(point) {
+  const area = state.area;
+  if (!area || (point.lat >= area.south && point.lat <= area.north && point.lng >= area.west && point.lng <= area.east)) return true;
+  mapNotice("That's outside the map's area (the dashed line).");
+  return false;
 }
 
 // kind: what changed ("origin", "destination" or "stops"); what: the button's tooltip; undo: puts it back.
@@ -215,7 +224,7 @@ function showStopName(stop) {
 // A right-click or long press adds a stop where it fits the trip best. Before the trip has
 // both ends, it sets them like a click.
 export function addStopOnMap(point) {
-  if (!mapTouchAllowed()) return;
+  if (!mapTouchAllowed() || !onTheMap(point)) return;
   if (!state.origin || !state.destination) return changeOnMap(state.origin ? "destination" : "origin", unnamed(point));
   if (state.stops.length >= MAX_STOPS) return mapNotice(`Up to ${MAX_STOPS} stops: remove one to add another.`);
   const id = state.nextStopId++;
@@ -265,7 +274,7 @@ function renumberStops() {
           title: `Stop ${number}: drag to move, click to remove`,
           zIndex: PIN_Z,
           onClick: () => mapTouchAllowed() && removeStopOnMap(stop.id),
-          onDragEnd: (to) => (mapTouchAllowed() ? moveStopOnMap(stop.id, unnamed(to)) : renumberStops()),
+          onDragEnd: (to) => (mapTouchAllowed() && onTheMap(to) ? moveStopOnMap(stop.id, unnamed(to)) : renumberStops()),
         })
       : null;
   });
