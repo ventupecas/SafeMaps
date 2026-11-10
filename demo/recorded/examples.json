@@ -1,0 +1,26 @@
+[
+ {
+  "from": 0,
+  "to": 8,
+  "mode": "car",
+  "note": "By car: the safer route scores 100 for safety against the standard route's 26, for about 7 more minutes."
+ },
+ {
+  "from": 11,
+  "to": 1,
+  "mode": "car",
+  "note": "By car: the safer route scores 100 for safety against the standard route's 37, for about 9 more minutes."
+ },
+ {
+  "from": 3,
+  "to": 0,
+  "mode": "bike",
+  "note": "By bike: the lowest-stress streets and trails, with busy crossings marked."
+ },
+ {
+  "from": 0,
+  "to": 1,
+  "mode": "transit",
+  "note": "By bus: walk, ride and walk, with the safest option first."
+ }
+]
