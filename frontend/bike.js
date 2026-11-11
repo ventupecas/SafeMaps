@@ -10,8 +10,10 @@
 
 import { decodePolyline } from "./maps.js";
 import { $, KM_TO_MI, capitalize, element, state } from "./core.js";
+
+const FEET_PER_M = 3.28084;
 import { postJson } from "./app.js";
-import { chosenStops } from "./editing.js";
+import { avoidedSpots, chosenStops } from "./editing.js";
 import { clearRoutes, drawRoutes, isStandard, routeLabel, routeKind, scorePill, scoreRing, selectRoute } from "./results.js";
 
 export const STRESS_COLORS = { 1: "#1a9850", 2: "#8bbd2a", 3: "#f08c00", 4: "#d7191c" };
@@ -141,6 +143,7 @@ export async function requestActiveTrip(origin, destination, { stops = chosenSto
     stops: stops.map((point) => ({ lat: point.lat, lng: point.lng })),
     profile: $(words.profile).value,
     departure_offset_min: Number($("leave").value) || 0,
+    avoid: avoidedSpots(),
   });
 }
 
@@ -228,6 +231,8 @@ function winnerCard(plan, standard) {
         ["Distance", `${(f.distance_km * KM_TO_MI).toFixed(1)} mi`],
         ["Busy crossings", String(f.busy_crossings)],
         ["Railroad tracks", String(f.rail_crossings)],
+        // On a bike map built with the ground's heights: what the ride climbs, all its rises added up.
+        ...(f.climb_m ? [["Climb", Math.round(f.climb_m * FEET_PER_M) + " ft"]] : []),
         ...(f.crash_spots ? [[ACTIVE[state.mode].killed, String(f.crash_spots)]] : []),
       ].map(([label, value]) => element("div", {}, element("dt", {}, label), element("dd", {}, value))),
     ),

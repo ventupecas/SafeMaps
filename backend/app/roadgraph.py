@@ -22,7 +22,7 @@ import tempfile
 from array import array
 from collections import Counter, defaultdict
 from collections.abc import Iterable, Iterator, Mapping, Sequence
-from dataclasses import dataclass, field, replace
+from dataclasses import MISSING, dataclass, field, fields, replace
 from pathlib import Path
 from typing import Any
 
@@ -48,6 +48,7 @@ from app.road_events import EVENT_MATCH_DEG, MATCHING, RAMP_KINDS, RoadEvent, ro
 logger = logging.getLogger(__name__)
 
 GRAPH_FORMAT = 1
+QUICK_FORMAT = 1  # the fast copy's layout (RoadGraph._save_quick): a new number when it changes, and old copies are made again
 MPH_TO_KMH = 1.609344
 
 # Posted speed when OSM has no maxspeed tag, in mph (typical US values).
@@ -158,6 +159,7 @@ _COLUMN_TYPES = {
     "stress": "b",
     "lit": "b",
     "cross": "b",
+    "climb_m": "f",
 }
 
 
@@ -178,6 +180,7 @@ _SEGMENT_COLUMNS = (
     "stress",
     "lit",
     "cross",
+    "climb_m",
 )
 
 
@@ -209,6 +212,13 @@ class PackedStrings:
         self.blob = np.frombuffer("".join(strings).encode("latin-1"), dtype=np.uint8) if strings else np.empty(0, dtype=np.uint8)
         self.ptr = np.concatenate(([0], np.cumsum(np.fromiter(map(len, strings), dtype=np.int64, count=len(strings))))).astype(np.int64)
 
+    @classmethod
+    def of(cls, blob: np.ndarray, ptr: np.ndarray) -> PackedStrings:
+        """From the block of bytes and where each string starts in it, as kept in a map's fast copy."""
+        packed = cls.__new__(cls)
+        packed.blob, packed.ptr = blob, ptr
+        return packed
+
     def __getitem__(self, index: int) -> str:
         return self.blob[self.ptr[index] : self.ptr[index + 1]].tobytes().decode("latin-1")
 
@@ -227,6 +237,13 @@ class Adjacency:
     def __init__(self, junctions: np.ndarray, count: int) -> None:
         self._edges = array("i", np.argsort(junctions, kind="stable").astype(np.int32).tobytes())
         self._ptr = array("q", np.concatenate(([0], np.cumsum(np.bincount(junctions, minlength=count)))).astype(np.int64).tobytes())
+
+    @classmethod
+    def of(cls, edges: np.ndarray, ptr: np.ndarray) -> Adjacency:
+        """From its two arrays, as kept in a map's fast copy."""
+        adjacency = cls.__new__(cls)
+        adjacency._edges, adjacency._ptr = array("i", edges.tobytes()), array("q", ptr.tobytes())
+        return adjacency
 
     def __getitem__(self, node: int) -> list[int]:
         return self._edges[self._ptr[node] : self._ptr[node + 1]].tolist()
@@ -280,6 +297,9 @@ class RoadGraph:
     # Per segment: how hard its traffic is to cross, 1-4 (its Level of Traffic Stress). On the bike map,
     # the same as stress; on the walking map, a street with a sidewalk is easy to walk along but not to cross.
     cross: list[int] = field(default_factory=list)
+    # Per segment: the meters climbed along it, in its direction, on a bike map built with the ground's
+    # heights (app.elevation). Zero everywhere on a map built without them.
+    climb_m: list[float] = field(default_factory=list)
 
     time_s: array = field(init=False, repr=False)
     out_edges: Adjacency = field(init=False, repr=False)
@@ -301,6 +321,7 @@ class RoadGraph:
         self.stress = self.stress or [0] * len(self.edge_from)
         self.lit = self.lit or [True] * len(self.edge_from)
         self.cross = self.cross or list(self.stress)
+        self.climb_m = self.climb_m or [0.0] * len(self.edge_from)
         self._number_by_place()
         # The columns, compactly: a list of a million floats takes four times the memory.
         for name, code in _COLUMN_TYPES.items():
@@ -917,6 +938,7 @@ class RoadGraph:
                 "school": [int(x) for x in self.school_zone],
                 **({"stress": self.stress.tolist(), "lit": [int(x) for x in self.lit]} if self.mode != "car" else {}),
                 **({"cross": self.cross.tolist()} if self.mode == "walk" else {}),
+                **({"climb_m": [round(x, 1) for x in self.climb_m]} if any(self.climb_m) else {}),
             },
             "banned": [[edge, other] for edge, others in sorted(self.banned.items()) for other in sorted(others)],
             "rail_crossing_points": [[round(lat, 7), round(lng, 7)] for lat, lng in self.rail_crossing_points],
@@ -935,6 +957,92 @@ class RoadGraph:
 
     @classmethod
     def load(cls, path: Path) -> RoadGraph:
+        """The map from its file, or from the fast copy beside it when that was made from this very file.
+
+        The file is JSON: reading it, and numbering the map by place, takes seconds on a metro's map.
+        The copy (<name>.quick.npz, made the first time the file is read) holds the finished map's
+        columns as they are in memory, and reads in a fraction of that."""
+        quick = path.with_name(path.name.removesuffix(".json.gz") + ".quick.npz")
+        made_from = [path.stat().st_size, path.stat().st_mtime_ns]
+        if quick.exists():
+            try:
+                return cls._load_quick(quick, made_from)
+            except (OSError, ValueError, KeyError) as exc:
+                logger.info("Not using %s (%s): reading %s", quick.name, exc, path.name)
+        graph = cls._load_json(path)
+        try:
+            graph._save_quick(quick, made_from)
+        except OSError as exc:
+            logger.warning("No fast copy of %s kept: %s", path.name, exc)
+        return graph
+
+    def _save_quick(self, path: Path, made_from: list[int]) -> None:
+        meta = {
+            "quick": QUICK_FORMAT,
+            "format": GRAPH_FORMAT,
+            "made_from": made_from,  # the map file's size and time: another file, another copy
+            "area": self.area,
+            "mode": self.mode,
+            "bbox": [self.bbox.south, self.bbox.west, self.bbox.north, self.bbox.east] if self.bbox else None,
+            "stats": self.stats,
+            "classes": self.classes,
+            "names": self.names,
+        }
+        columns = {name: self.column(name) for name in (*_COLUMN_TYPES, "time_s")}
+        fd, tmp_name = tempfile.mkstemp(dir=path.parent, suffix=".tmp")
+        try:
+            with os.fdopen(fd, "wb") as handle:
+                np.savez(
+                    handle,
+                    **columns,
+                    geometry_blob=self.geometry.blob,
+                    geometry_ptr=self.geometry.ptr,
+                    out_edges=self.out_edges.column_edges(),
+                    out_ptr=self.out_edges.column_ptr(),
+                    in_edges=self.in_edges.column_edges(),
+                    in_ptr=self.in_edges.column_ptr(),
+                    banned=np.array([[edge, other] for edge, others in self.banned.items() for other in others], dtype=np.int64).reshape(-1, 2),
+                    rail_crossing_points=np.array(self.rail_crossing_points, dtype=np.float64).reshape(-1, 2),
+                    school_points=np.array(self.school_points, dtype=np.float64).reshape(-1, 2),
+                    meta=np.frombuffer(json.dumps(meta).encode("utf-8"), dtype=np.uint8),
+                )
+            os.replace(tmp_name, path)
+        except BaseException:
+            Path(tmp_name).unlink(missing_ok=True)
+            raise
+
+    @classmethod
+    def _load_quick(cls, path: Path, made_from: list[int]) -> RoadGraph:
+        with np.load(path) as data:
+            meta = json.loads(data["meta"].tobytes().decode("utf-8"))
+            if (meta.get("quick"), meta.get("format")) != (QUICK_FORMAT, GRAPH_FORMAT):
+                raise ValueError("it's from another version of the app")
+            if meta.get("made_from") != made_from:
+                raise ValueError("it was made from another map file")
+            graph = cls.__new__(cls)  # not built up from lists, as __init__ would: it's finished already
+            for spec in fields(cls):  # what a map starts with besides what's read here: its empty indexes
+                if spec.default is not MISSING:
+                    setattr(graph, spec.name, spec.default)
+                elif spec.default_factory is not MISSING:
+                    setattr(graph, spec.name, spec.default_factory())
+            for name, code in (*_COLUMN_TYPES.items(), ("time_s", "d")):
+                setattr(graph, name, array(code, data[name].tobytes()))
+            graph.geometry = PackedStrings.of(data["geometry_blob"], data["geometry_ptr"])
+            graph.out_edges = Adjacency.of(data["out_edges"], data["out_ptr"])
+            graph.in_edges = Adjacency.of(data["in_edges"], data["in_ptr"])
+            banned: dict[int, set[int]] = defaultdict(set)
+            for edge, other in data["banned"].tolist():
+                banned[edge].add(other)
+            graph.banned = {edge: frozenset(others) for edge, others in banned.items()}
+            graph.rail_crossing_points = [(lat, lng) for lat, lng in data["rail_crossing_points"].tolist()]
+            graph.school_points = [(lat, lng) for lat, lng in data["school_points"].tolist()]
+        graph.area, graph.mode, graph.stats = meta["area"], meta["mode"], meta["stats"]
+        graph.classes, graph.names = meta["classes"], meta["names"]
+        graph.bbox = BBox(*meta["bbox"]) if meta["bbox"] else None
+        return graph
+
+    @classmethod
+    def _load_json(cls, path: Path) -> RoadGraph:
         with gzip.open(path, "rt", encoding="utf-8") as handle:
             data = json.load(handle)
         if data.get("format") != GRAPH_FORMAT:
@@ -974,6 +1082,7 @@ class RoadGraph:
             stress=edges.get("stress", []),
             lit=[bool(x) for x in edges.get("lit", [])],
             cross=edges.get("cross", []),
+            climb_m=edges.get("climb_m", []),
         )
 
 

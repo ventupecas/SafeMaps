@@ -78,12 +78,14 @@ const PHOTON_REVERSE = "https://photon.komoot.io/reverse";
 const NOMINATIM_REVERSE = "https://nominatim.openstreetmap.org/reverse";
 const NOMINATIM_SEARCH = "https://nominatim.openstreetmap.org/search";
 const LOOKUP_TIMEOUT_MS = 5000;
-const SEARCH_BIAS = { lat: 43.0389, lng: -87.9065 }; // prefer places around Milwaukee
+const SEARCH_BIAS = { lat: 43.0389, lng: -87.9065 }; // Milwaukee: where search looks first unless the page says (home)
 
 // trafficTiles: the OpenStreetMap map's traffic layer, a tile URL template ({z}/{x}/{y}); none means no layer.
 // language: "en" or "es", for Google's map: its labels, controls and place search.
-export function createMapView(kind, { mapsApiKey, mapId, onAuthFailure, trafficTiles = null, language = "en" } = {}) {
-  return kind === "osm" ? new OsmView(trafficTiles) : new GoogleView(mapsApiKey, mapId, onAuthFailure, language);
+// home: where place search looks first (the middle of the server's road map). area: the box trips stay in, on the
+// OpenStreetMap map: its place search suggests nothing outside it.
+export function createMapView(kind, { mapsApiKey, mapId, onAuthFailure, trafficTiles = null, language = "en", home = SEARCH_BIAS, area = null } = {}) {
+  return kind === "osm" ? new OsmView(trafficTiles, home, area) : new GoogleView(mapsApiKey, mapId, onAuthFailure, language, home);
 }
 
 // ---- Google
@@ -92,8 +94,9 @@ class GoogleView {
   hasTraffic = true;
   switchesDark = false;
 
-  constructor(apiKey, mapId, onAuthFailure, language) {
+  constructor(apiKey, mapId, onAuthFailure, language, home) {
     this.language = language;
+    this.home = home;
     this.apiKey = apiKey;
     this.mapId = mapId || "DEMO_MAP_ID";
     this.onAuthFailure = onAuthFailure;
@@ -318,7 +321,7 @@ class GoogleView {
       try {
         search = new PlaceAutocompleteElement({
           includedRegionCodes: ["us"],
-          locationBias: { center: SEARCH_BIAS, radius: 50000 },
+          locationBias: { center: this.home, radius: 50000 },
         });
       } catch (error) {
         console.warn("Place search options not accepted; using defaults:", error);
@@ -351,7 +354,9 @@ class GoogleView {
 class OsmView {
   switchesDark = true;
 
-  constructor(trafficTiles) {
+  constructor(trafficTiles, home, area) {
+    this.home = home;
+    this.area = area;
     this.trafficTiles = trafficTiles;
     this.hasTraffic = Boolean(trafficTiles);
     this.trafficLayer = null;
@@ -613,7 +618,7 @@ class OsmView {
     const suggest = async (text) => {
       if (this.photonDown) return null;
       try {
-        return await photon(text);
+        return await photon(text, this.home, this.area);
       } catch (error) {
         console.warn("Place search through Photon failed; Enter searches Nominatim:", error);
         this.photonDown = true;
@@ -624,7 +629,7 @@ class OsmView {
       show("Searching…");
       let found = null;
       try {
-        found = await nominatim(text);
+        found = await nominatim(text, this.home, this.area);
       } catch (error) {
         console.warn("Place search failed:", error);
       }
@@ -703,25 +708,28 @@ export function loadScript(src) {
   });
 }
 
-async function photon(text) {
-  const params = new URLSearchParams({ q: text, lat: SEARCH_BIAS.lat, lon: SEARCH_BIAS.lng, limit: 5, lang: "en" });
+// Places near home first; with an area ({ south, west, north, east }), only places inside it.
+async function photon(text, home, area) {
+  const params = new URLSearchParams({ q: text, lat: home.lat, lon: home.lng, limit: 5, lang: "en" });
+  if (area) params.set("bbox", [area.west, area.south, area.east, area.north].join(","));
   const response = await fetch(`${PHOTON}?${params}`, { signal: AbortSignal.timeout(LOOKUP_TIMEOUT_MS) });
   if (!response.ok) throw new Error(`Photon answered ${response.status}`);
   const { features } = await response.json();
   return features.map(photonPlace);
 }
 
-// One search of Nominatim, for a name typed in full: places around Milwaukee first, as Photon's are.
-async function nominatim(text) {
-  const { lat, lng } = SEARCH_BIAS;
+// One search of Nominatim, for a name typed in full: places near home first, or only those in the area, as Photon's are.
+async function nominatim(text, home, area) {
+  const { lat, lng } = home;
   const params = new URLSearchParams({
     q: text,
     format: "jsonv2",
     addressdetails: 1,
     limit: 5,
     "accept-language": "en",
-    viewbox: [lng - 1, lat + 1, lng + 1, lat - 1].join(","), // preferred, not required
+    viewbox: area ? [area.west, area.north, area.east, area.south].join(",") : [lng - 1, lat + 1, lng + 1, lat - 1].join(","), // preferred ...
   });
+  if (area) params.set("bounded", "1"); // ... or, with an area, required
   const response = await fetch(`${NOMINATIM_SEARCH}?${params}`, { signal: AbortSignal.timeout(LOOKUP_TIMEOUT_MS) });
   if (!response.ok) throw new Error(`Nominatim answered ${response.status}`);
   return (await response.json()).filter((place) => place.address).map(nominatimPlace);

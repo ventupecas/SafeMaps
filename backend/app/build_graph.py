@@ -29,7 +29,10 @@ import time
 from collections.abc import Sequence
 from pathlib import Path
 
+import httpx
+
 from app.config import BACKEND_DIR
+from app.elevation import Elevation, ElevationError, add_climb
 from app.overpass import AREAS, DEFAULT_ENDPOINT, OverpassError, build_bike_query, build_walk_query, download_area, iter_elements
 from app.osm_extract import extract
 from app.roadgraph import build_graph
@@ -46,6 +49,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--walk", action="store_true", help="build the walking map (roads plus footways, sidewalks and steps)")
     parser.add_argument("--roads-only", action="store_true", help="with --bike or --walk: skip the paths download (streets only)")
     parser.add_argument("--pbf", type=Path, help="read an OpenStreetMap extract (.osm.pbf) instead of downloading from Overpass")
+    parser.add_argument("--no-hills", action="store_true", help="with --bike: leave out each segment's climb (no terrain tiles are fetched)")
     args = parser.parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
 
@@ -95,6 +99,13 @@ def main(argv: Sequence[str] | None = None) -> int:
 def _build(args: argparse.Namespace, paths: list[Path], started: float) -> int:
     mode = "bike" if args.bike else "walk" if args.walk else "car"
     graph = build_graph(iter_elements(paths), area=args.area, bbox=AREAS[args.area], mode=mode)
+    if mode == "bike" and not args.no_hills:
+        # The climb along each segment, from public terrain tiles kept in data/elevation/ (app.elevation).
+        try:
+            with httpx.Client() as http:
+                add_climb(graph, Elevation(BACKEND_DIR / "data" / "elevation", http))
+        except ElevationError as exc:
+            print(f"warning: built without hills ({exc}): routes show no climb, and the flat profile rides as everyday", file=sys.stderr)
     out = BACKEND_DIR / "data" / "graphs" / f"{args.area}{'' if mode == 'car' else '-' + mode}.json.gz"
     graph.save(out)
 

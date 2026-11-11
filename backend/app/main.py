@@ -32,13 +32,14 @@ from __future__ import annotations
 
 import hmac
 import logging
+import math
 import time
 from collections.abc import AsyncIterator, Sequence
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta
 from itertools import pairwise
-from threading import Lock, Thread
+from threading import Event, Lock, Thread
 from typing import Any, Literal
 
 import httpx
@@ -70,7 +71,7 @@ from app.feedback import FeedbackLog
 from app.geo import decode_polyline, encode_polyline, haversine_m
 from app.hotspots import CrashHotspots
 from app.models import LatLng, RoutePlan, ScoringProfile
-from app.overpass import ATTRIBUTION
+from app.overpass import ATTRIBUTION, CENTERS
 from app.profiles import DEFAULT_PROFILE, PRESETS, get_profile
 from app.road_controls import RoadControls, roads_along
 from app.road_events import (
@@ -90,13 +91,13 @@ from app.router import MAX_SNAP_M, Router
 from app.routes_client import DailyLimitReached, RoutesApiError, RoutesClient, daily_usage
 from app.sun import dark, low_sun, sun_position
 from app.traffic_tiles import TILE_REFRESH, TileError, TrafficTiles
-from app.transit import BusRoutes
+from app.transit import AllBusRoutes
 from app import bike, transit_plan
 from app.timetable import TimetableSource
 from app.expo_control import ExpoControl
 from app.trip_log import TripLog
 from app.usage import DailyUsage
-from app.weather import WeatherAlert, WeatherAlerts, for_the_weather
+from app.weather import WeatherAlert, WeatherAlerts, WeatherForecast, for_the_weather
 
 logger = logging.getLogger(__name__)
 
@@ -105,6 +106,11 @@ LOCALHOST_ORIGINS = r"https?://(localhost|127\.0\.0\.1)(:\d+)?"
 FRONTEND_DIR = BACKEND_DIR.parent / "frontend"
 MAX_EVENTS_SHOWN = 200
 MAX_STOPS = 3
+MAX_AVOID = 5  # spots on roads a visitor rules out (TripRequest.avoid)
+# While trips are being planned (one within KEEP_FRESH_FOR_S), the road events are looked at every
+# KEEP_FRESH_EVERY_S and fetched a little before they're due, so no trip waits for a feed.
+KEEP_FRESH_EVERY_S = 30.0
+KEEP_FRESH_FOR_S = 10 * 60.0
 LEAVE_OFFSETS_MIN = (0, 15, 30, 60)  # the departures "Best time to leave" compares
 # Closures are drawn when they're about this close to a route shown: the rest of
 # the trip's area (5 km around it) would bury the routes under a city's closures.
@@ -165,6 +171,19 @@ class TripRequest(BaseModel):
         description="Where closures, lane closures and jams come from. auto: the server's ROUTES_ROAD_EVENT_SOURCES "
         "order, the first that's set up and answers. A named source is used alone.",
     )
+    avoid: list[LatLng] = Field(
+        default_factory=list,
+        max_length=MAX_AVOID,
+        description="Spots on roads to keep off: the stretch of road at each (between its junctions, both ways) "
+        "counts as closed for this trip.",
+    )
+    arrive_in_min: int | None = Field(
+        None,
+        ge=0,
+        le=24 * 60,
+        description="Be there this many minutes from now. The trip then leaves as late as gets it there in time "
+        "(departure_offset_min is worked out, not read), or now if that's already too late.",
+    )
 
 
 class GoogleUsage(BaseModel):
@@ -179,6 +198,7 @@ class WeatherAlertOut(BaseModel):
     headline: str
     ends: str = Field(description="When it ends, ISO 8601; empty if not given.")
     slippery: bool = Field(description="Snow or ice: turning across traffic counts as riskier while it lasts.")
+    wet: bool = Field(False, description="Rain: turning across traffic counts as a little riskier.")
 
 
 class RoadEventOut(BaseModel):
@@ -204,6 +224,8 @@ class TripResponse(BaseModel):
     low_sun: bool = Field(False, description="The sun is low at departure: routes heading into it count sun glare.")
     after_dark: bool = Field(False, description="It's dark at departure: turns across traffic count more.")
     leaving_at: str = Field("", description="The departure time the trip was judged at, local, ISO 8601.")
+    arrive_by: str = Field("", description="When the trip was asked to be there by (arrive_in_min), local, ISO 8601.")
+    late_min: float = Field(0.0, description="With arrive_by: how late the trip gets there even leaving now.")
     weather_alerts: list[WeatherAlertOut] = Field(
         default_factory=list, description="National Weather Service alerts in force where the trip starts."
     )
@@ -241,6 +263,7 @@ class BikeTripRequest(BaseModel):
     origin: LatLng
     destination: LatLng
     stops: list[LatLng] = Field(default_factory=list, max_length=MAX_STOPS, description="Places to stop at on the way, in order.")
+    avoid: list[LatLng] = Field(default_factory=list, max_length=MAX_AVOID, description="Spots on streets or paths to keep off, as for car trips.")
     profile: str = Field(
         bike.DEFAULT_PROFILE,
         description="Bikes: everyday, family, confident or ebike (app.bike.PROFILES). Walking: everyday, careful or stepfree.",
@@ -315,8 +338,9 @@ class Engine:
     apify: ApifyTraffic | None = None
     tiles: TrafficTiles | None = None  # TomTom's traffic map, on the OpenStreetMap page only
     weather: WeatherAlerts | None = None  # the National Weather Service's alerts (ROUTES_WEATHER_ALERTS)
+    forecast: WeatherForecast | None = None  # ... and its forecast for the hour a trip leaves
     feedback: FeedbackLog | None = None  # visitors' "Would you take this route?" answers
-    buses: BusRoutes | None = None  # bus routes for the OpenStreetMap map's Transit layer
+    buses: AllBusRoutes | None = None  # bus routes for the OpenStreetMap map's Transit layer
     trips: TripLog | None = None  # the trips visitors plan, for the expo's stats (no places)
     control: ExpoControl | None = None  # what the expo's control page set
     guesses: FeedbackLog | None = None  # "Which route is safer?" guesses, right or wrong (no places)
@@ -329,6 +353,8 @@ class Engine:
     schedule: TimetableSource | None = None  # the buses' timetable, for transit trips (app.timetable)
     _bike_router: bike.BikeRouter | None = None
     warmed_up: bool = False  # the road events across the map are matched to it (warm_up)
+    last_trip_at: float = float("-inf")  # when a trip was last planned (time.monotonic), for keep_events_fresh
+    stopped: Event = field(default_factory=Event)  # set when the server shuts down
     _routers: dict[DrivingSide, Router] = field(default_factory=dict)
     _snapped: dict[tuple[Any, ...], list[RoadEvent]] = field(default_factory=dict)
     _lock: Lock = field(default_factory=Lock)
@@ -377,19 +403,7 @@ class Engine:
             maps = [(graph, routed()) for graph, routed in ((self.bike_graph, self.bike_router), (self.walk_graph, self.walk_router)) if graph is not None]
             for graph, active in maps:
                 self._practice_trip(active, graph)
-            report = collect_road_events(
-                sources_for_map(self.settings.road_event_sources, self.settings.map),
-                self.graph.bbox,
-                wzdx=self.wzdx,
-                wi511=self.wi511,
-                tomtom=self.tomtom,
-                apify=None,
-                google_ready=False,
-            )
-            snapped = self.snap(report.events)
-            for active in (driving, *(active for _, active in maps)):
-                for event in snapped:
-                    active.event_edges(event)  # the router's own lookup, remembered too
+            report = self._match_events_ahead()
             logger.info(
                 "Ready for trips: %d closures, lane closures and jams from %s matched to the map in %.0f s",
                 len(report.events),
@@ -399,6 +413,44 @@ class Engine:
             self.warmed_up = True
         except Exception:  # a background nicety: trips still match what they need
             logger.exception("Matching road events ahead of trips failed")
+
+    def _match_events_ahead(self, ahead_s: float = 0.0) -> EventReport:
+        """The road events across the whole road map, fetched (ahead_s before they're due) and matched to
+        every map, so a trip finds them ready. The paid sources (apify) and Google's are left out."""
+        report = collect_road_events(
+            sources_for_map(self.settings.road_event_sources, self.settings.map),
+            self.graph.bbox,
+            wzdx=self.wzdx,
+            wi511=self.wi511,
+            tomtom=self.tomtom,
+            apify=None,
+            google_ready=False,
+            ahead_s=ahead_s,
+        )
+        snapped = self.snap(report.events)
+        routers = [self.router(make_turn_context(self.settings, self.hotspots, None, self.graph))]
+        routers += [routed() for graph, routed in ((self.bike_graph, self.bike_router), (self.walk_graph, self.walk_router)) if graph is not None]
+        for active in routers:
+            for event in snapped:
+                active.event_edges(event)  # the router's own lookup, remembered too
+        return report
+
+    def keep_events_fresh(self, ahead_s: float = 2 * KEEP_FRESH_EVERY_S) -> bool:
+        """One look, every KEEP_FRESH_EVERY_S: while trips are being planned, the road events are fetched
+        a little before they're due and the new ones matched to the map, so no trip waits for a feed.
+        With no trip in the last KEEP_FRESH_FOR_S nothing is fetched (TomTom's requests are counted by
+        the day), and the next trip fetches what it needs itself. Returns whether it looked."""
+        if not self.warmed_up or time.monotonic() - self.last_trip_at > KEEP_FRESH_FOR_S:
+            return False
+        self._match_events_ahead(ahead_s)
+        return True
+
+    def keep_events_fresh_until_stopped(self) -> None:
+        while not self.stopped.wait(KEEP_FRESH_EVERY_S):
+            try:
+                self.keep_events_fresh()
+            except Exception:  # a background nicety: trips still fetch what they need
+                logger.exception("Refreshing road events ahead of trips failed")
 
     def _practice_drive(self, router: Router) -> None:
         """A short drive in the middle of the map, as _practice_trip: for the default profile and the
@@ -466,6 +518,16 @@ def sources_for_map(order: Sequence[str], map_kind: str) -> tuple[str, ...]:
     return tuple(g for g in ("+".join(s for s in group.split("+") if s not in elsewhere) for group in order) if g)
 
 
+VISITOR = "visitor"  # the source of a road event the visitor made: a road to keep off
+
+
+def avoided_roads(spots: Sequence[LatLng]) -> list[RoadEvent]:
+    """The roads a visitor rules out, as closures: the router leaves a closed road out, and one it can't
+    (the trip starts on it) counts against the route as any closure does. Each is a spot, matched to the
+    stretch of road there as a source's one-point event is (RoadGraph.event_edges)."""
+    return [RoadEvent(source=VISITOR, kind="closed", path=((spot.lat, spot.lng),), description="A road you chose to avoid") for spot in spots]
+
+
 def place_off_the_map(graph: RoadGraph, places: Sequence[LatLng]) -> HTTPException | None:
     """Why a trip on our own map found no route, when it's that one of its places (start, stops, destination)
     has no road within the router's reach: it's outside the map's area, or out on the lake. The answer names
@@ -486,8 +548,10 @@ def shown_events(events: Sequence[RoadEvent], plan: RoutePlan) -> list[RoadEvent
     """
     routes = [decode_polyline(route.encoded_polyline) for route in plan.candidates]
     closures = near_routes(
-        [event for event in events if event.kind in ("closed", "lanes", "hazard")], routes, SHOWN_NEAR_ROUTES_M
-    )
+        [event for event in events if event.kind in ("closed", "lanes", "hazard") and event.source != VISITOR],
+        routes,
+        SHOWN_NEAR_ROUTES_M,
+    )  # the roads a visitor rules out are the page's own to show
     traffic = [event for event in events if event.category == "traffic"]
     shown: list[RoadEventOut] = []
     drawn: set[tuple[str, tuple[Any, ...]]] = set()
@@ -558,6 +622,7 @@ def create_app(settings: Settings | None = None, *, http: httpx.Client | None = 
             if settings.apify_token and "apify" in settings.road_event_sources
             else None,
             weather=WeatherAlerts(client) if settings.weather_alerts else None,
+            forecast=WeatherForecast(client) if settings.weather_alerts else None,
             feedback=FeedbackLog(settings.cache_dir / "feedback.jsonl"),
             trips=TripLog(settings.cache_dir / "trips.jsonl"),
             control=ExpoControl(settings.cache_dir / "expo-control.json"),
@@ -573,15 +638,15 @@ def create_app(settings: Settings | None = None, *, http: httpx.Client | None = 
             if settings.walk_graph_path and settings.walk_graph_path.exists()
             else None,
             walk_hotspots=CrashHotspots.from_csv(settings.walk_crash_data_path) if settings.walk_crash_data_path else None,
-            buses=BusRoutes(client, settings.bus_routes_url, settings.cache_dir / "bus-routes.json")
-            if settings.bus_routes_url and settings.map == "osm"
-            else None,
-            schedule=TimetableSource(client, settings.bus_routes_url, settings.cache_dir / "transit-feed.zip")
-            if settings.bus_routes_url and settings.transit
+            buses=AllBusRoutes.of(client, settings.bus_feeds, settings.cache_dir) if settings.bus_feeds and settings.map == "osm" else None,
+            schedule=TimetableSource(client, settings.bus_feeds, settings.cache_dir / "transit-feed.zip")
+            if settings.bus_feeds and settings.transit
             else None,
         )
         app.state.engine = engine
         Thread(target=engine.warm_up, name="road-events-warm-up", daemon=True).start()
+        if graph and graph.bbox:
+            Thread(target=engine.keep_events_fresh_until_stopped, name="road-events-keep-fresh", daemon=True).start()
         if engine.buses:  # fetched ahead, so the Transit layer shows at once
             Thread(target=engine.buses.routes, name="bus-routes", daemon=True).start()
         if engine.schedule:  # read in the background: transit trips wait for it, nothing else does
@@ -596,6 +661,7 @@ def create_app(settings: Settings | None = None, *, http: httpx.Client | None = 
             "; matching them to the map before trips (about a minute)" if graph and graph.bbox else "",
         )
         yield
+        engine.stopped.set()
         if http is None:
             engine.http.close()
 
@@ -690,9 +756,15 @@ def create_app(settings: Settings | None = None, *, http: httpx.Client | None = 
         whose own routes go anywhere."""
         graph = request.app.state.engine.graph
         area = graph.bbox if graph and settings.map != "google" else None
+        # Where the page's map opens and its place search looks first: the road map's downtown
+        # (app.overpass.CENTERS), or for a map without one the middle of its area.
+        center = CENTERS.get(graph.area) if graph else None
+        if center is None and graph and graph.bbox:
+            center = ((graph.bbox.south + graph.bbox.north) / 2, (graph.bbox.west + graph.bbox.east) / 2)
         return {
             "map": settings.map,
             "area": [area.south, area.west, area.north, area.east] if area else None,
+            "center": list(center) if center else None,
             "traffic_tiles": request.app.state.engine.tiles is not None,
             "bus_routes": request.app.state.engine.buses is not None,
             "bike": request.app.state.engine.bike_graph is not None,
@@ -746,8 +818,11 @@ def create_app(settings: Settings | None = None, *, http: httpx.Client | None = 
 
     def prepare(engine: Engine, trip: TripRequest) -> PreparedTrip:
         """Everything about a trip that doesn't depend on the route: profile, weather, time, road events."""
+        engine.last_trip_at = time.monotonic()
         departure = datetime.now() + timedelta(minutes=trip.departure_offset_min)
         alerts = engine.weather.at(trip.origin) if engine.weather else []
+        if engine.forecast:
+            alerts = [*alerts, *engine.forecast.at(trip.origin, departure)]
         try:
             limit = {} if trip.max_extra_min is None else {"max_extra_min": trip.max_extra_min}
             profile = for_the_weather(get_profile(trip.profile, {**trip.weights, **limit}), alerts)
@@ -782,7 +857,7 @@ def create_app(settings: Settings | None = None, *, http: httpx.Client | None = 
         notes += report.notes
         # Redrawn along the roads they lie on, for routing, scoring and the map alike,
         # less TomTom's reports of closures an official feed already gives.
-        events = without_repeats(engine.snap(report.events))
+        events = without_repeats(engine.snap(report.events)) + avoided_roads(trip.avoid)
         return PreparedTrip(
             trip=trip,
             profile=profile,
@@ -842,15 +917,35 @@ def create_app(settings: Settings | None = None, *, http: httpx.Client | None = 
         plans = [plan_leg(engine, client, prepared, *leg) for leg in legs(prepared.trip)]
         return plans[0] if len(plans) == 1 else combine_legs(plans, prepared.trip.stops)
 
+    def plan_at_its_time(engine: Engine, client: RoutesClient, trip: TripRequest) -> tuple[PreparedTrip, RoutePlan]:
+        """The trip prepared and planned, leaving when it says: or, with arrive_in_min, as late as gets it there
+        in time. That can take a few plans. When to leave depends on how long the trip takes, and how long it
+        takes on when it leaves: the recommended route changes with the school zones and the sun."""
+        if trip.arrive_in_min is None:
+            prepared = prepare(engine, trip)
+            return prepared, plan_trip(engine, client, prepared)
+        offset = 0  # leaving now, first: if that's too late already, it's the answer
+        for attempt in range(4):
+            prepared = prepare(engine, trip.model_copy(update={"departure_offset_min": offset}))
+            plan = plan_trip(engine, client, prepared)
+            latest = max(0, math.floor(trip.arrive_in_min - plan.winner.features.duration_min))
+            if latest == offset or (attempt and latest > offset) or attempt == 3:
+                break
+            offset = latest
+        return prepared, plan
+
     @app.post("/route", response_model=TripResponse)
     def route(
         trip: TripRequest, request: Request, x_access_code: str | None = Header(None, include_in_schema=False)
     ) -> TripResponse:
         engine: Engine = request.app.state.engine
         check_access(x_access_code)
-        prepared = prepare(engine, trip)
+        asked_for = None
+        if trip.arrive_in_min is not None:
+            # To the nearest minute: the page counted the minutes to a time on the clock, and shows it again.
+            asked_for = (datetime.now() + timedelta(minutes=trip.arrive_in_min, seconds=30)).replace(second=0, microsecond=0)
         with engine.routes_client() as client:
-            plan = plan_trip(engine, client, prepared)
+            prepared, plan = plan_at_its_time(engine, client, trip)
             google = GoogleUsage(
                 live_requests=client.live_requests,
                 served_from_cache=client.cache.hits,
@@ -862,9 +957,15 @@ def create_app(settings: Settings | None = None, *, http: httpx.Client | None = 
             engine.trips.add(plan, trip.profile)
         context = prepared.context
         own_used = any(candidate.source == "own" for candidate in plan.candidates)
+        notes = list(prepared.notes)
+        if engine.graph and any(not engine.router(context).event_edges(event) for event in avoided_roads(trip.avoid)):
+            notes.append("A spot to avoid isn't on a road of the map, so it changed nothing.")
+        # How late the trip gets there, asked to be there by a time: from a whole minute on, as times are told to the minute.
+        arrival = prepared.departure + timedelta(minutes=plan.winner.features.duration_min)
+        late = (arrival - asked_for).total_seconds() / 60 if asked_for else 0.0
         return TripResponse(
             plan=plan,
-            notes=prepared.notes,
+            notes=notes,
             driving_side=context.driving_side,
             own_router_used=own_used,
             attribution=[f"Route design: map data {ATTRIBUTION}"] if own_used else [],
@@ -873,8 +974,10 @@ def create_app(settings: Settings | None = None, *, http: httpx.Client | None = 
             low_sun=low_sun(context.sun),
             after_dark=dark(context.sun),
             leaving_at=prepared.departure.isoformat(timespec="minutes"),
+            arrive_by=asked_for.isoformat(timespec="minutes") if asked_for else "",
+            late_min=round(late, 1) if late >= 1 else 0.0,
             weather_alerts=[
-                WeatherAlertOut(event=a.event, headline=a.headline, ends=a.ends, slippery=a.slippery) for a in prepared.alerts
+                WeatherAlertOut(event=a.event, headline=a.headline, ends=a.ends, slippery=a.slippery, wet=a.wet) for a in prepared.alerts
             ],
             road_events_source=prepared.report.source,
             road_events_skipped=prepared.report.skipped,
@@ -1017,7 +1120,7 @@ def create_app(settings: Settings | None = None, *, http: httpx.Client | None = 
             raise HTTPException(status_code=404, detail=str(exc)) from None
         return {
             "plan": result,
-            "attribution": ["Bus schedule: Milwaukee County Transit System", f"Walking routes: map data {ATTRIBUTION}"],
+            "attribution": [f"Bus schedule: {', '.join(table.agencies) or 'the transit agency'}", f"Walking routes: map data {ATTRIBUTION}"],
             "leaving_at": departure.isoformat(timespec="minutes"),
             "after_dark": dark(sun_position(departure, trip.origin.lat, trip.origin.lng)),
             "scheduled": True,  # times are the timetable's, not live
@@ -1045,7 +1148,8 @@ def create_app(settings: Settings | None = None, *, http: httpx.Client | None = 
             apify=None,
             google_ready=False,
         )
-        events = without_repeats(engine.snap(report.events))
+        engine.last_trip_at = time.monotonic()
+        events = without_repeats(engine.snap(report.events)) + avoided_roads(trip.avoid)
         sun = make_turn_context(settings, None, None, None, now=departure, where=trip.origin).sun
         try:
             router = engine.bike_router() if mode == "bike" else engine.walk_router()

@@ -52,6 +52,9 @@ class BikeProfile:
     max_detour_ratio: float  # at most this many times the shortest route's time ...
     max_extra_min: float  # ... and at most this many minutes more
     avoid_steps: bool = False  # walking with a stroller or a wheelchair
+    # Each 10 m climbed feels like this many minutes more, and more again on a steep street (STEEP_GRADE).
+    # Zero: hills aren't looked at. Only on a bike map built with the ground's heights (RoadGraph.climb_m).
+    climb_minutes: float = 0.0
 
 
 PROFILES = {
@@ -59,7 +62,10 @@ PROFILES = {
     "family": BikeProfile("family", 13.0, (1.0, 2.0, 8.0, 40.0), (8.0, 25.0), 10.0, 2.0, 1.0, 2.0, 25.0),
     "confident": BikeProfile("confident", 20.0, (1.0, 1.15, 1.6, 3.0), (1.0, 3.0), 3.0, 0.5, 0.3, 1.3, 8.0),
     "ebike": BikeProfile("ebike", 22.0, (1.0, 1.4, 3.0, 8.0), (3.0, 8.0), 5.0, 1.0, 0.5, 1.5, 15.0),
+    # Everyday, around the hills: a little farther on the flat beats a climb.
+    "flat": BikeProfile("flat", 16.0, (1.0, 1.4, 3.0, 8.0), (3.0, 8.0), 5.0, 1.0, 0.5, 1.6, 15.0, climb_minutes=1.5),
 }
+STEEP_GRADE = 0.04  # a climb this steep feels twice what the same height does on a gentle one, and so on up
 DEFAULT_PROFILE = "everyday"
 # Walkers: most people; careful (children, older walkers: quiet streets, signals to cross); step-free
 # (strollers, wheelchairs: no steps).
@@ -164,6 +170,10 @@ class BikeRouter(Router):
             if night:
                 weights = weights + profile.unlit_weight * (g.column("lit") == 0)
             base = g.column("time_s") / 60 * slower * weights + g.column("rail_crossings") * profile.rail_minutes
+            if profile.climb_minutes:
+                climb = g.column("climb_m").astype(np.float64)
+                grade = np.minimum(climb / np.maximum(g.column("length_m"), 1.0), 0.15)
+                base = base + climb / 10 * profile.climb_minutes * (1 + grade / STEEP_GRADE)
             if profile.avoid_steps and "steps" in g.classes:
                 base[g.column("road_class") == g.classes.index("steps")] = math.inf
             self._base_costs.put(key, base)
@@ -257,6 +267,7 @@ def route_features(router: BikeRouter, path: RoutedPath, profile: BikeProfile, e
         "unlit_minutes": round(unlit, 2),
         "after_dark": after_dark,
         "crossings": crossings,
+        "climb_m": round(sum(g.climb_m[edge] for edge in path.edges)),  # 0 on a map built without the ground's heights
     }
 
 
@@ -439,7 +450,7 @@ def _joined(legs: Sequence[dict], stops: Sequence[LatLng], route_id: str, *, sta
             stop = stops[number - 1]
             maneuvers.append({"maneuver": "WAYPOINT", "instruction": f"Arrive at stop {number}", "location": {"lat": stop.lat, "lng": stop.lng}})
         maneuvers += leg["maneuvers"]
-    added = ("duration_min", "distance_km", "busy_crossings", "rail_crossings", "crash_spots", "lane_closures", "closures", "unlit_minutes")
+    added = ("duration_min", "distance_km", "busy_crossings", "rail_crossings", "crash_spots", "lane_closures", "closures", "unlit_minutes", "climb_m")
     features = {key: round(sum(leg["features"].get(key, 0) for leg in legs), 2) for key in added}
     features["minutes_by_stress"] = [round(sum(leg["features"]["minutes_by_stress"][i] for leg in legs), 2) for i in range(4)]
     features["crossings"] = [c for leg in legs for c in leg["features"]["crossings"]]

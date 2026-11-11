@@ -74,6 +74,8 @@
               </div>
             </div>
             <button id="add-stop" class="link-button add-stop" type="button" data-modes="car bike walk">Add a stop</button>
+            <button id="avoid-road" class="link-button avoid-road" type="button" data-modes="car bike walk" aria-pressed="false">Avoid a road</button>
+            <div id="saved-places" class="saved-places"></div>
           </div>
           <p class="hint">
             Search for a place, or click the map: the first click sets the start, the next the destination. Right-click (or
@@ -98,6 +100,7 @@
                 <option value="family">Family: the quietest streets, even if longer</option>
                 <option value="confident">Confident: busier streets are fine</option>
                 <option value="ebike">E-bike: like most adults, but faster</option>
+                <option value="flat">Fewer hills: like most adults, around the climbs</option>
               </select>
             </div>
             <div class="field" data-modes="walk">
@@ -125,6 +128,10 @@
                 <option value="30">In 30 minutes</option>
                 <option value="60">In 1 hour</option>
               </select>
+            </div>
+            <div class="field" data-modes="car">
+              <label class="field__label" for="arrive-by">Or be there by</label>
+              <input id="arrive-by" type="time" />
             </div>
           </div>
 

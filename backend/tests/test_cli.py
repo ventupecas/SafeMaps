@@ -166,9 +166,9 @@ def test_no_router_flag(recorded_cache, capsys):
 
 
 def test_bus_routes_setting_takes_on_off_or_a_feed_address(monkeypatch):
-    from app.config import BUS_ROUTES_URL, Settings
+    from app.config import BUS_FEEDS, Settings
 
-    for value, expected in [("", BUS_ROUTES_URL), ("on", BUS_ROUTES_URL), ("off", None), ("https://x.example/gtfs.zip", "https://x.example/gtfs.zip")]:
+    for value, expected in [("", BUS_FEEDS), ("on", BUS_FEEDS), ("off", None), ("https://x.example/gtfs.zip", "https://x.example/gtfs.zip"), ("https://x.example/a.zip, https://y.example/b.zip", "https://x.example/a.zip,https://y.example/b.zip")]:
         monkeypatch.setenv("ROUTES_BUS_ROUTES", value)
         assert Settings.from_env().bus_routes_url == expected
     monkeypatch.setenv("ROUTES_BUS_ROUTES", "kamino.mcts.org/gtfs.zip")

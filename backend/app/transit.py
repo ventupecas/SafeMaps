@@ -21,7 +21,7 @@ import re
 import time
 import zipfile
 from collections import Counter
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterable, Iterator, Sequence
 from dataclasses import asdict, dataclass
 from datetime import timedelta
 from pathlib import Path
@@ -128,6 +128,10 @@ class BusRoutes:
     def attribution(self) -> str:
         return f"Bus routes: {self._agency or 'the transit agency'}"
 
+    @property
+    def agency(self) -> str | None:
+        return self._agency
+
     def routes_now(self) -> list[BusRoute]:
         """The lines already in hand, without fetching: for /health."""
         with self._lock:
@@ -189,3 +193,32 @@ class BusRoutes:
             self._saved.write_text(json.dumps(data), encoding="utf-8")
         except OSError as exc:
             logger.warning("Bus routes not saved: %s", exc)
+
+
+class AllBusRoutes:
+    """Several agencies' bus routes as one: each feed fetched, kept and retried on its own (a BusRoutes each),
+    so one agency's feed failing leaves the others' lines on the map."""
+
+    def __init__(self, feeds: Sequence[BusRoutes]) -> None:
+        self._feeds = list(feeds)
+
+    @classmethod
+    def of(cls, http: httpx.Client, urls: Sequence[str], folder: Path) -> AllBusRoutes:
+        """The first feed's lines are kept in bus-routes.json, as before there could be several; the next in bus-routes-2.json."""
+        names = ["bus-routes.json", *(f"bus-routes-{number}.json" for number in range(2, len(urls) + 1))]
+        return cls([BusRoutes(http, url, folder / name) for url, name in zip(urls, names)])
+
+    @property
+    def attribution(self) -> str:
+        agencies = [feed.agency for feed in self._feeds if feed.agency]
+        return f"Bus routes: {', '.join(agencies) or 'the transit agencies'}"
+
+    def routes_now(self) -> list[BusRoute]:
+        return self._merged(feed.routes_now() for feed in self._feeds)
+
+    def routes(self) -> list[BusRoute]:
+        return self._merged(feed.routes() for feed in self._feeds)
+
+    @staticmethod
+    def _merged(lists: Iterable[list[BusRoute]]) -> list[BusRoute]:
+        return sorted((route for routes in lists for route in routes), key=lambda route: _number_order(route.name))

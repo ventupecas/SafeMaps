@@ -78,6 +78,17 @@ AREAS: dict[str, BBox] = {
     # Kenosha counties, down to the Illinois line, and the edges of the counties
     # around them. Lake Michigan bounds it to the east.
     "milwaukee-metro": BBox(south=42.49, west=-88.73, north=43.60, east=-87.75),
+    # Other cities, each a map of its own: build it, then point ROUTES_GRAPH at it (README, "Another city").
+    # Madison and the towns around its lakes, Sun Prairie to Verona.
+    "madison": BBox(south=42.93, west=-89.62, north=43.25, east=-89.16),
+    # Green Bay, De Pere and the west shore of the bay's foot.
+    "green-bay": BBox(south=44.38, west=-88.22, north=44.64, east=-87.86),
+}
+# Where each area's page opens and its place search looks first: downtown, which isn't the middle of its box.
+CENTERS: dict[str, tuple[float, float]] = {
+    "milwaukee-metro": (43.0389, -87.9065),
+    "madison": (43.0747, -89.3842),
+    "green-bay": (44.5133, -88.0133),
 }
 
 

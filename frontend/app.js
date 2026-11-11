@@ -20,12 +20,12 @@
 // expo.js (demo mode, "How it works", the phone link).
 
 import { createMapView } from "./maps.js";
-import { $, MILWAUKEE, NARROW, PROFILE_LABELS, element, state } from "./core.js";
-import { addStop, addStopOnMap, changeOnMap, chosenStops, clearPoint, mapTouchAllowed, onTheMap, removeStop, setPoint, swapEnds, undoMapChange, unnamed } from "./editing.js";
+import { $, NARROW, PROFILE_LABELS, element, state } from "./core.js";
+import { addStop, addStopOnMap, avoidOnMap, avoidedSpots, changeOnMap, chosenStops, clearAvoids, clearPoint, mapTouchAllowed, onTheMap, removeStop, setPoint, swapEnds, toggleAvoiding, undoMapChange, unnamed } from "./editing.js";
 import { clearRoutes, drawClosures, drawTraffic, showTrip } from "./results.js";
 import { keepScreenOn, recenter, setNavStatus, setPreviewRate, startDriving, startPreview, stopDriving, useMyLocation } from "./drive.js";
 import { applyBaseMap, drawBuses, isNight, rememberLayers, restoreLayers, savedLayers, showTransit } from "./layers.js";
-import { forgetRecentTrips, openTripFromLink, rememberTrip, showRecentTrips, tripLink } from "./trips.js";
+import { forgetRecentTrips, openTripFromLink, rememberTrip, showRecentTrips, showSavedPlaces, tripLink } from "./trips.js";
 import { setUpDemo, showAbout, showPhoneLink } from "./expo.js";
 import { lang, startTranslating, switchLanguage } from "./i18n.js";
 import { isActiveMode, requestActiveTrip, setUpModes, showActiveTrip } from "./bike.js";
@@ -53,6 +53,7 @@ async function boot() {
       const [south, west, north, east] = appConfig.area;
       state.area = { south, west, north, east };
     }
+    if (Array.isArray(appConfig.center)) state.center = { lat: appConfig.center[0], lng: appConfig.center[1] };
   } catch {
     state.mapKind = "google"; // an older server: it only knew Google's map
   }
@@ -71,6 +72,8 @@ async function boot() {
     language: lang,
     mapId: config.mapId,
     trafficTiles: trafficTiles ? trafficTileUrl() : null,
+    home: state.center,
+    area: state.area,
     onAuthFailure: () =>
       showSetup("The map key was rejected. Check which websites it allows and that the map service is enabled for it."),
   });
@@ -86,6 +89,7 @@ async function boot() {
   setInterval(applyBaseMap, 5 * 60 * 1000); // dusk and dawn come while the page is open
   setUpDemo();
   showRecentTrips();
+  showSavedPlaces();
   openTripFromLink();
 }
 
@@ -111,10 +115,11 @@ async function initMap() {
   const saved = savedLayers();
   state.dark = (!saved || saved["dark-at-night"] !== false) && (!saved || !saved.base || saved.base === "roadmap") && isNight();
   await state.view.create($("map"), {
-    center: MILWAUKEE,
+    center: state.center,
     zoom: 11,
     dark: state.dark,
     onClick: (point) => {
+      if (state.avoiding) return avoidOnMap(point);
       if (!mapTouchAllowed() || !onTheMap(point)) return;
       // First click sets the start; after that, clicks move the destination.
       const kind = state.origin ? "destination" : "origin";
@@ -188,6 +193,8 @@ function wireControls() {
   $("about-open").addEventListener("click", showAbout);
   $("phone-open").addEventListener("click", showPhoneLink);
   $("add-stop").addEventListener("click", () => addStop());
+  $("avoid-road").addEventListener("click", () => toggleAvoiding());
+  $("arrive-by").addEventListener("change", tripChanged);
   // The map key starts folded on a phone, where it would cover much of the map.
   if (window.matchMedia(NARROW).matches) $("legend").open = false;
   // A screen wake lock is dropped whenever the page is hidden; take it again on return.
@@ -244,6 +251,7 @@ function clearAll() {
   if (state.nav.active) stopDriving();
   for (const kind of ["origin", "destination"]) clearPoint(kind);
   for (const stop of [...state.stops]) removeStop(stop.id);
+  clearAvoids();
   clearTrip();
 }
 
@@ -336,11 +344,24 @@ export function tripPayload(origin, destination, { heading = null, stops = chose
     use_router: $("use-router").checked,
     road_events: $("road-events").value,
     departure_offset_min: Number($("leave").value) || 0,
+    avoid: avoidedSpots(),
     counted,
   };
+  const arriveIn = minutesUntil($("arrive-by").value);
+  if (arriveIn !== null) payload.arrive_in_min = arriveIn; // the server then works out when to leave
   if ($("extra-time").value) payload.max_extra_min = Number($("extra-time").value);
   if (heading !== null) payload.heading = Math.round(heading * 10) / 10;
   return payload;
+}
+
+// Minutes from now until the clock next reads a time ("08:30"): later today, or tomorrow. null without one.
+export function minutesUntil(time) {
+  const [hours, minutes] = (time || "").split(":").map(Number);
+  if (!Number.isFinite(hours) || !Number.isFinite(minutes)) return null;
+  const now = new Date();
+  const then = new Date(now.getFullYear(), now.getMonth(), now.getDate(), hours, minutes);
+  if (then < now) then.setDate(then.getDate() + 1);
+  return Math.round((then - now) / 60000);
 }
 
 export async function requestTrip(origin, destination, options = {}) {
@@ -405,6 +426,7 @@ const NOTE_MESSAGES = [
   [/not priced/, "Some of our designs couldn't be checked against live traffic, so they're left out."],
   [/Own router skipped/, "This trip is outside the area our router covers, so only standard routes are shown."],
   [/Own router unavailable/, "Our router isn't available right now, so only standard routes are shown."],
+  [/spot to avoid isn't on a road/, "A spot you chose to avoid isn't on a road, so it changed nothing. Click right on the road."],
   [/suggestions skipped/, "Standard routes weren't available for this trip, so only our designs are shown."],
 ];
 

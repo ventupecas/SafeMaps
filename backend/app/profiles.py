@@ -63,6 +63,20 @@ PRESETS: dict[str, ScoringProfile] = {
             sun_glare_weight=2.0,
             max_detour_ratio=1.8,
         ),
+        # On two wheels: railroad tracks catch a tire, a lane closure's uneven or grooved pavement
+        # and its forced merge are worse than in a car, and so are fog, ice and standing water.
+        # Being hit by a driver turning or pulling out at a junction is the commonest serious
+        # crash, so turning across traffic weighs more too. Fuel hardly matters on a motorcycle.
+        ScoringProfile(
+            name="motorcycle",
+            fuel_weight=3.0,
+            busy_crossing_weight=4.0,
+            hotspot_crossing_weight=8.0,
+            lane_closure_weight=6.0,
+            rail_crossing_weight=4.0,
+            weather_hazard_weight=8.0,
+            sun_glare_weight=1.5,
+        ),
     )
 }
 

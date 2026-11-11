@@ -169,3 +169,27 @@ def test_the_schedule_is_fetched_weekly_and_kept_on_disk(tmp_path):
 
     down = TimetableSource(httpx.Client(transport=httpx.MockTransport(lambda request: httpx.Response(503))), URL, tmp_path / "none.zip")
     assert down.load() is None and down.error == "HTTPStatusError"
+
+
+def test_two_agencies_schedules_plan_as_one_with_a_transfer_between_them(tmp_path):
+    # The second agency's feed is the same lines four kilometers on: its GreenLine starts where the first one's ends.
+    second = destination_point(START, 90, 3000 + 150)
+    both = Timetable.from_gtfs(feed(), feed(second))
+    alone = Timetable.from_gtfs(feed())
+    assert len(both.stop_ids) == 2 * len(alone.stop_ids) and len(both.patterns) == 2 * len(alone.patterns)
+    origin, destination = destination_point(START, 0, 60), destination_point(second, 90, 3000)
+    assert alone.journeys(origin, destination, TUESDAY) == []  # the first agency's buses stop four kilometers short
+    journeys = both.journeys(origin, destination, TUESDAY)
+    assert journeys and len(journeys[0].rides) == 2  # a ride with each agency, and a short walk between their stops
+
+    requests = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request.url.host)
+        return httpx.Response(200, content=feed()) if request.url.host == "transit.example" else httpx.Response(503)
+
+    http = httpx.Client(transport=httpx.MockTransport(handler))
+    source = TimetableSource(http, [URL, "https://down.example/gtfs.zip"], tmp_path / "feed.zip")
+    table_of_one = source.load()  # the agency whose feed is down is left out
+    assert table_of_one is not None and len(table_of_one.stop_ids) == len(alone.stop_ids) and source.error is None
+    assert requests == ["transit.example", "down.example"]

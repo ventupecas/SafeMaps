@@ -24,7 +24,7 @@ import time
 import zipfile
 from array import array
 from collections import defaultdict
-from collections.abc import Iterator
+from collections.abc import Iterator, Sequence
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
 from pathlib import Path
@@ -98,6 +98,7 @@ class Timetable:
         self.stop_names: list[str] = []
         self.stop_points: list[Point] = []
         self.routes: list[tuple[str, str, str]] = []  # (short name, long name, color)
+        self.agencies: list[str] = []  # who runs the buses, to credit
         self.patterns: list[Pattern] = []
         self.stop_patterns: list[list[tuple[Pattern, int]]] = []
         self.transfers: list[list[tuple[int, float]]] = []
@@ -108,10 +109,24 @@ class Timetable:
     # ---- Reading the feed
 
     @classmethod
-    def from_gtfs(cls, data: bytes) -> Timetable:
+    def from_gtfs(cls, *feeds: bytes) -> Timetable:
+        """The timetable of one agency's feed, or of several agencies' feeds as one: a rider transfers
+        between their buses where their stops are within TRANSFER_M, as between one agency's."""
         table = cls()
+        for data in feeds:
+            table._read(data)
+        table._index()
+        return table
+
+    def _read(self, data: bytes) -> None:
+        table = self
         with zipfile.ZipFile(io.BytesIO(data)) as feed:
             names = set(feed.namelist())
+            if "agency.txt" in names:
+                for row in _rows(feed, "agency.txt"):
+                    agency = (row.get("agency_name") or "").strip()
+                    if agency and agency not in table.agencies:
+                        table.agencies.append(agency)
             stop_index: dict[str, int] = {}
             for row in _rows(feed, "stops.txt"):
                 if row.get("location_type", "0") not in ("", "0"):
@@ -191,8 +206,6 @@ class Timetable:
             pattern.trips = [run[1] for run in runs]
             pattern.services = [trips[run[1]][1] for run in runs]
             table.patterns.append(pattern)
-        table._index()
-        return table
 
     def _index(self) -> None:
         self.stop_patterns = [[] for _ in self.stop_ids]
@@ -332,10 +345,15 @@ class Timetable:
 
 
 class TimetableSource:
-    """The schedule, fetched at most once a REFRESH_S (kept on disk) and read in the background."""
+    """The schedule, fetched at most once a REFRESH_S (kept on disk) and read in the background.
 
-    def __init__(self, http: httpx.Client, url: str, saved: Path, *, clock=time.time) -> None:
-        self._http, self._url, self._saved, self._clock = http, url, saved, clock
+    url is one agency's feed, or several agencies' (a list): each is kept in a file of its own (saved,
+    then saved's name with -2, -3...), and one that can't be fetched is left out, with a warning, as long
+    as another can be read."""
+
+    def __init__(self, http: httpx.Client, url: str | Sequence[str], saved: Path, *, clock=time.time) -> None:
+        self._http, self._saved, self._clock = http, saved, clock
+        self._urls = [url] if isinstance(url, str) else list(url)
         self._table: Timetable | None = None
         self._lock = Lock()
         self.error: str | None = None
@@ -349,14 +367,23 @@ class TimetableSource:
             if self._table is not None:
                 return self._table
             try:
-                fresh = self._saved.exists() and self._clock() - self._saved.stat().st_mtime < REFRESH_S
-                if not fresh:
-                    response = self._http.get(self._url, timeout=120.0, follow_redirects=True)
-                    response.raise_for_status()
-                    self._saved.parent.mkdir(parents=True, exist_ok=True)
-                    self._saved.write_bytes(response.content)
+                feeds = []
+                for number, url in enumerate(self._urls, start=1):
+                    saved = self._saved if number == 1 else self._saved.with_name(f"{self._saved.stem}-{number}{self._saved.suffix}")
+                    try:
+                        fresh = saved.exists() and self._clock() - saved.stat().st_mtime < REFRESH_S
+                        if not fresh:
+                            response = self._http.get(url, timeout=120.0, follow_redirects=True)
+                            response.raise_for_status()
+                            saved.parent.mkdir(parents=True, exist_ok=True)
+                            saved.write_bytes(response.content)
+                        feeds.append(saved.read_bytes())
+                    except (httpx.HTTPError, OSError) as exc:
+                        if number == len(self._urls) and not feeds:
+                            raise  # no agency's schedule could be read
+                        logger.warning("Bus schedule: %s left out, it can't be fetched (%s)", httpx.URL(url).host, type(exc).__name__)
                 started = time.perf_counter()
-                self._table = Timetable.from_gtfs(self._saved.read_bytes())
+                self._table = Timetable.from_gtfs(*feeds)
                 logger.info(
                     "Bus schedule: %d stops, %d route patterns read in %.0f s",
                     len(self._table.stop_ids),

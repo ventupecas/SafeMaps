@@ -2,7 +2,7 @@
 // Swap, and Undo for changes made on the map.
 
 import { distanceM } from "./maps.js";
-import { $, MAX_STOPS, element, state } from "./core.js";
+import { $, MAX_AVOID, MAX_STOPS, element, state } from "./core.js";
 import { clearTrip, tripChanged, updateFindButton } from "./app.js";
 import { setNavStatus } from "./drive.js";
 
@@ -139,6 +139,63 @@ function mapNotice(text) {
   setNavStatus(text);
   clearTimeout(state.noticeTimer);
   state.noticeTimer = setTimeout(() => state.nav.active || setNavStatus(null), 3500);
+}
+
+// ---- Roads to keep off. "Avoid a road", then a click on the map, marks the stretch of road there (between
+// its junctions): routes go around it. A click on the mark takes it off again, and Undo takes either back.
+
+export function toggleAvoiding(on = !state.avoiding) {
+  state.avoiding = on;
+  const button = $("avoid-road");
+  button.setAttribute("aria-pressed", String(on));
+  button.textContent = on ? "Now click the road on the map" : "Avoid a road";
+  document.body.classList.toggle("avoiding", on); // the map's cursor says a click picks a road
+}
+
+export function avoidOnMap(point) {
+  toggleAvoiding(false);
+  if (!mapTouchAllowed() || !onTheMap(point)) return;
+  if (state.avoid.length >= MAX_AVOID) return mapNotice("Up to " + MAX_AVOID + " roads to avoid: click one to take it off.");
+  const id = state.nextAvoidId++;
+  remember("avoid", "Take the avoided road off the map", () => removeAvoid(id));
+  addAvoid({ lat: point.lat, lng: point.lng }, id);
+}
+
+function addAvoid(point, id) {
+  const marker = state.view.marker(point, element("div", { className: "map-avoid" }), {
+    title: "A road to avoid: click to take it off",
+    zIndex: PIN_Z,
+    onClick: () => mapTouchAllowed() && removeAvoidOnMap(id),
+  });
+  state.avoid.push({ id, point, marker });
+  tripChanged();
+}
+
+function removeAvoid(id) {
+  const index = state.avoid.findIndex((spot) => spot.id === id);
+  if (index < 0) return;
+  const [spot] = state.avoid.splice(index, 1);
+  spot.marker.remove();
+  tripChanged();
+}
+
+function removeAvoidOnMap(id) {
+  const spot = state.avoid.find((candidate) => candidate.id === id);
+  if (!spot) return;
+  remember("avoid", "Put the avoided road back", () => addAvoid(spot.point, id));
+  removeAvoid(id);
+}
+
+// With Clear: the trip's roads to avoid go with its places.
+export function clearAvoids() {
+  toggleAvoiding(false);
+  forgetUndo("avoid");
+  for (const spot of [...state.avoid]) removeAvoid(spot.id);
+}
+
+// As the server takes them.
+export function avoidedSpots() {
+  return state.avoid.map(({ point }) => ({ lat: point.lat, lng: point.lng }));
 }
 
 // point: a place already picked on the map; index: its place in the order (last by default);

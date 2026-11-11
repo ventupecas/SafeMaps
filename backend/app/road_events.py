@@ -241,10 +241,11 @@ class WzdxFeed:
         self._fetched_at = 0.0
         self._refreshing = Lock()
 
-    def events(self, area: BBox) -> list[RoadEvent]:
+    def events(self, area: BBox, ahead_s: float = 0.0) -> list[RoadEvent]:
+        """ahead_s: fetch the feed this many seconds before it's due, so the trips that follow don't have to (Engine.keep_events_fresh)."""
         with self._refreshing:  # of trips planned at once, one fetches it and the rest use its answer
             age = self._clock() - self._fetched_at
-            if self._events is None or age > WZDX_REFRESH.total_seconds():
+            if self._events is None or age > WZDX_REFRESH.total_seconds() - ahead_s:
                 try:
                     self._events = tuple(self._load())
                     self._fetched_at = self._clock()
@@ -426,9 +427,9 @@ class Wi511Feed:
         self._fetched_at = 0.0
         self._refreshing = Lock()
 
-    def events(self, area: BBox) -> list[RoadEvent]:
+    def events(self, area: BBox, ahead_s: float = 0.0) -> list[RoadEvent]:
         with self._refreshing:  # of trips planned at once, one fetches it and the rest use its answer
-            if self._events is None or self._clock() - self._fetched_at > WI511_REFRESH.total_seconds():
+            if self._events is None or self._clock() - self._fetched_at > WI511_REFRESH.total_seconds() - ahead_s:
                 self._events = tuple(self._fetch())
                 self._fetched_at = self._clock()
             events = self._events
@@ -590,14 +591,14 @@ class TomTomFeed:
         self._fetched_at = 0.0
         self._refreshing = Lock()
 
-    def events(self, area: BBox) -> list[RoadEvent]:
+    def events(self, area: BBox, ahead_s: float = 0.0) -> list[RoadEvent]:
         box = self._box or area
         # Of trips planned at once, one asks and the rest use its answer: each request counts against the day's.
         with self._refreshing:
             if self._events is None:
                 self._load_saved(box)
             age = self._clock() - self._fetched_at
-            if self._events is None or box != self._fetched_box or age > TOMTOM_REFRESH.total_seconds():
+            if self._events is None or box != self._fetched_box or age > TOMTOM_REFRESH.total_seconds() - ahead_s:
                 try:
                     self._events = tuple(self._fetch(box))
                     self._fetched_box, self._fetched_at = box, self._clock()
@@ -967,6 +968,11 @@ class EventReport:
     google: bool = False  # ask Google for traffic along its suggestions; those events arrive with them
 
 
+def _asked(feed: Any, area: BBox, ahead_s: float) -> list[RoadEvent]:
+    """A kept feed's events in the area: fetched ahead of time only when that's asked for."""
+    return feed.events(area, ahead_s) if ahead_s else feed.events(area)
+
+
 def collect(
     order: Sequence[str],
     area: BBox,
@@ -976,8 +982,11 @@ def collect(
     apify: ApifyTraffic | None,
     google_ready: bool,
     tomtom: TomTomFeed | None = None,
+    ahead_s: float = 0.0,
 ) -> EventReport:
-    """Road events for a trip from the first group of sources in order ("a+b" is a group) where any answers."""
+    """Road events for a trip from the first group of sources in order ("a+b" is a group) where any answers.
+
+    ahead_s: the feeds kept by the server (WZDx, 511, TomTom) are fetched this many seconds before they're due."""
     report = EventReport(source=None, events=[])
     for group in order:
         answered: dict[str, list[RoadEvent]] = {}
@@ -986,15 +995,15 @@ def collect(
                 if name == "wzdx":
                     if wzdx is None:
                         raise EventSourceError("no WZDx feed is set up")
-                    answered[name] = wzdx.events(area)
+                    answered[name] = _asked(wzdx, area, ahead_s)
                 elif name == "wi511":
                     if wi511 is None:
                         raise EventSourceError("WI511_API_KEY is not set")
-                    answered[name] = wi511.events(area)
+                    answered[name] = _asked(wi511, area, ahead_s)
                 elif name == "tomtom":
                     if tomtom is None:
                         raise EventSourceError("TOMTOM_API_KEY is not set")
-                    answered[name] = tomtom.events(area)
+                    answered[name] = _asked(tomtom, area, ahead_s)
                 elif name == "google":
                     if not google_ready:
                         raise EventSourceError("it needs live traffic and our router")

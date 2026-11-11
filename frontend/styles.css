@@ -314,6 +314,7 @@ a.chip {
 }
 
 select,
+input[type="time"],
 .osm-search {
   width: 100%;
   min-height: 44px;
@@ -324,6 +325,10 @@ select,
   border-radius: 10px;
   background-color: var(--surface);
   transition: border-color 0.15s, box-shadow 0.15s;
+}
+
+input[type="time"] {
+  padding: 8px 12px;
 }
 
 select {
@@ -342,6 +347,7 @@ select:hover,
 }
 
 select:focus-visible,
+input[type="time"]:focus-visible,
 .osm-search:focus {
   outline: none;
   border-color: var(--focus);
@@ -1924,6 +1930,66 @@ body:not(.map-osm) .osm-only {
 .osm-suggestions li:hover,
 .osm-suggestions li[aria-selected="true"] {
   background: var(--accent-soft);
+}
+
+/* Home and Work, under the trip's places. */
+.saved-places {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 10px;
+  margin: 4px 0 2px 34px;
+}
+
+.saved-place {
+  padding: 5px 12px;
+  border: 1px solid var(--border-strong);
+  border-radius: 999px;
+  background: var(--surface);
+  color: var(--text);
+  font: inherit;
+  font-size: 0.8rem;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.saved-place:hover {
+  border-color: var(--subtle);
+}
+
+.saved-place__forget {
+  font-weight: 500;
+  margin-right: 6px;
+}
+
+/* "Avoid a road", and the spots picked with it: a no-entry sign on the map. */
+.avoid-road {
+  align-self: flex-start;
+  margin: 2px 0 2px 34px;
+}
+
+.avoid-road[aria-pressed="true"] {
+  color: var(--risk);
+}
+
+body.avoiding #map,
+body.avoiding #map .leaflet-interactive {
+  cursor: crosshair;
+}
+
+.map-avoid {
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  border: 2px solid #fff;
+  background: linear-gradient(#fff, #fff) center / 12px 4px no-repeat, #c62828;
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.4);
+  cursor: pointer;
+}
+
+/* When to leave to be somewhere by a time. */
+.status--leave-by {
+  font-weight: 600;
 }
 
 /* A line under the search box when it has no suggestions to offer ("Press Enter to search."). */

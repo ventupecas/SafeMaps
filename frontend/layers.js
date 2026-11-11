@@ -2,7 +2,7 @@
 // OpenStreetMap map's bus routes.
 
 import { decodePolyline, distanceM } from "./maps.js";
-import { $, LAYERS_KEY, MILWAUKEE, M_PER_DEG_LAT, NEAR_TRIP_M, NIGHT_SUN_DEG, state } from "./core.js";
+import { $, LAYERS_KEY, M_PER_DEG_LAT, NEAR_TRIP_M, NIGHT_SUN_DEG, state } from "./core.js";
 import { redrawLines } from "./results.js";
 
 export function rememberLayers() {
@@ -55,7 +55,7 @@ export function applyBaseMap({ always = false } = {}) {
 
 // Whether the sun is down where the map is (or where the trip starts).
 export function isNight() {
-  return sunAltitudeDeg(new Date(), state.origin || MILWAUKEE) < NIGHT_SUN_DEG;
+  return sunAltitudeDeg(new Date(), state.origin || state.center) < NIGHT_SUN_DEG;
 }
 
 // The sun's height above the horizon, in degrees (accurate to a fraction of a degree: plenty for dusk).

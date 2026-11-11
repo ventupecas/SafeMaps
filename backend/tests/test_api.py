@@ -379,7 +379,7 @@ def test_routes_come_with_turn_by_turn_directions(api):
 def test_the_openstreetmap_map_never_asks_google(tmp_path, google):
     app = create_app(make_settings(tmp_path, map="osm"), http=httpx.Client(transport=httpx.MockTransport(google)))
     with TestClient(app) as client:
-        assert client.get("/app-config").json() == {"map": "osm", "area": None, "traffic_tiles": False, "bus_routes": False, "bike": False, "walk": False, "transit": False, "fuel_price": 3.25}  # no TomTom key
+        assert client.get("/app-config").json() == {"map": "osm", "area": None, "center": None, "traffic_tiles": False, "bus_routes": False, "bike": False, "walk": False, "transit": False, "fuel_price": 3.25}  # no TomTom key
         trip = client.post("/route", json={"origin": ORIGIN, "destination": DESTINATION, "live_traffic": True}).json()
     assert google.requests == []  # no Google: not even with live traffic asked for
     standard = [route for route in trip["plan"]["candidates"] if route["is_standard"]]
@@ -391,7 +391,7 @@ def test_the_openstreetmap_map_never_asks_google(tmp_path, google):
 def test_googles_default_is_the_standard_route_on_the_google_map(api):
     trip = api.post("/route", json={"origin": ORIGIN, "destination": DESTINATION}).json()
     assert [r["id"] for r in trip["plan"]["candidates"] if r["is_standard"]] == ["google-1"]
-    assert api.get("/app-config").json() == {"map": "google", "area": None, "traffic_tiles": False, "bus_routes": False, "bike": False, "walk": False, "transit": False, "fuel_price": 3.25}
+    assert api.get("/app-config").json() == {"map": "google", "area": None, "center": None, "traffic_tiles": False, "bus_routes": False, "bike": False, "walk": False, "transit": False, "fuel_price": 3.25}
 
 
 class FakeTomTom:
@@ -420,7 +420,7 @@ def test_tomtom_traffic_on_the_openstreetmap_map(tmp_path, google):
     tomtom = FakeTomTom(main_st_closed_both_ways(), google)
     settings = make_settings(tmp_path, map="osm", tomtom_api_key="tt-key")
     with TestClient(create_app(settings, http=httpx.Client(transport=httpx.MockTransport(tomtom)))) as client:
-        assert client.get("/app-config").json() == {"map": "osm", "area": None, "traffic_tiles": True, "bus_routes": False, "bike": False, "walk": False, "transit": False, "fuel_price": 3.25}
+        assert client.get("/app-config").json() == {"map": "osm", "area": None, "center": None, "traffic_tiles": True, "bus_routes": False, "bike": False, "walk": False, "transit": False, "fuel_price": 3.25}
         trip = client.post("/route", json={"origin": ORIGIN, "destination": DESTINATION}).json()
         first = client.get("/traffic-tiles/12/1047/1504.png")
         again = client.get("/traffic-tiles/12/1047/1504.png")
@@ -688,3 +688,118 @@ def test_a_weight_too_big_to_be_a_number_is_a_bad_request(tmp_path, google):
     )
     with TestClient(app) as client:
         assert client.post("/route", content=body, headers={"Content-Type": "application/json"}).status_code == 422
+
+
+def test_a_motorcycle_profile_is_wary_of_tracks_and_closures(api):
+    profiles = {profile["name"]: profile for profile in api.get("/profiles").json()["profiles"]}
+    assert profiles["motorcycle"]["rail_crossing_weight"] > profiles["safe-economy"]["rail_crossing_weight"]
+    assert profiles["motorcycle"]["lane_closure_weight"] > profiles["safe-economy"]["lane_closure_weight"]
+    assert api.post("/route", json={"origin": ORIGIN, "destination": DESTINATION, "profile": "motorcycle"}).status_code == 200
+
+
+def test_the_page_is_told_where_the_middle_of_the_road_map_is(tmp_path, google):
+    box = BBox(south=ORIGIN["lat"] - 0.05, west=ORIGIN["lng"] - 0.07, north=ORIGIN["lat"] + 0.05, east=ORIGIN["lng"] + 0.03)
+    build_graph(grid_city().osm.elements, area="grid", bbox=box).save(tmp_path / "grid.json.gz")
+    with TestClient(create_app(make_settings(tmp_path), http=httpx.Client(transport=httpx.MockTransport(google)))) as api:
+        config = api.get("/app-config").json()
+    assert config["center"] == pytest.approx([ORIGIN["lat"], ORIGIN["lng"] - 0.02])
+    assert config["area"] is None  # on Google's map trips may go anywhere
+
+
+def nearest_m(spot: dict, route: dict) -> float:
+    from app.geo import densify
+
+    return min(haversine_m((spot["lat"], spot["lng"]), at) for at in densify(decode_polyline(route["encoded_polyline"]), 5.0))
+
+
+def test_routes_keep_off_a_road_the_visitor_rules_out(osm_api):
+    trip = {"origin": ORIGIN, "destination": DESTINATION}
+    before = osm_api.post("/route", json=trip).json()
+    line = decode_polyline(before["plan"]["winner"]["encoded_polyline"])
+    a, b = line[len(line) // 2 - 1], line[len(line) // 2]
+    spot = {"lat": (a[0] + b[0]) / 2, "lng": (a[1] + b[1]) / 2}  # on the recommended route, mid-block
+    assert nearest_m(spot, before["plan"]["winner"]) < 6
+    after = osm_api.post("/route", json={**trip, "avoid": [spot]}).json()
+    assert all(nearest_m(spot, route) > 20 for route in after["plan"]["candidates"])
+    assert after["notes"] == before["notes"] and all(event["source"] != "visitor" for event in after["road_events"])
+    # A spot in the middle of a block is on no road: it changes nothing, and the answer says so.
+    block = {"lat": (point(0, 0)[0] + point(1, 1)[0]) / 2, "lng": (point(0, 0)[1] + point(1, 1)[1]) / 2}
+    off_road = osm_api.post("/route", json={**trip, "avoid": [block]}).json()
+    assert off_road["plan"]["winner"]["encoded_polyline"] == before["plan"]["winner"]["encoded_polyline"]
+    assert any("spot to avoid isn't on a road" in note for note in off_road["notes"])
+    assert osm_api.post("/route", json={**trip, "avoid": [spot] * 6}).status_code == 422  # five at most
+
+
+def test_a_trip_leaves_as_late_as_gets_it_there_by_a_time(osm_api):
+    trip = {"origin": ORIGIN, "destination": DESTINATION}
+    in_time = osm_api.post("/route", json={**trip, "arrive_in_min": 120}).json()
+    leaving, by = datetime.fromisoformat(in_time["leaving_at"]), datetime.fromisoformat(in_time["arrive_by"])
+    spare = (by - leaving).total_seconds() / 60 - in_time["plan"]["winner"]["features"]["duration_min"]
+    assert in_time["late_min"] == 0 and -1 <= spare <= 3  # to the minute, as the times are given
+    assert 100 < (leaving - datetime.now()).total_seconds() / 60 < 120
+    too_late = osm_api.post("/route", json={**trip, "arrive_in_min": 0}).json()
+    assert abs((datetime.fromisoformat(too_late["leaving_at"]) - datetime.now()).total_seconds()) < 90  # it leaves now
+    takes = too_late["plan"]["winner"]["features"]["duration_min"]
+    # Late by about as long as the trip takes: told from a whole minute on, as the times are to the minute.
+    assert abs(too_late["late_min"] - takes) <= 0.6 or (takes < 1.6 and too_late["late_min"] == 0)
+    assert osm_api.post("/route", json=trip).json()["arrive_by"] == ""
+
+
+@pytest.mark.parametrize(
+    ("words", "chance", "event", "factor"),
+    [
+        ("Rain Showers Likely", 70, "Rain likely when you leave", 1.2),
+        ("Snow Likely", 80, "Snow likely when you leave", 1.5),
+        ("Chance Rain Showers", 30, None, 1.0),  # not likely enough to count
+        ("Mostly Cloudy", 60, None, 1.0),
+    ],
+)
+def test_rain_or_snow_forecast_for_when_the_trip_leaves_counts(tmp_path, google, words, chance, event, factor):
+    now = datetime.now().astimezone()
+    hour = {
+        "startTime": (now - timedelta(hours=1)).isoformat(),
+        "endTime": (now + timedelta(hours=3)).isoformat(),
+        "shortForecast": words,
+        "probabilityOfPrecipitation": {"value": chance},
+    }
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.host != "api.weather.gov":
+            return google(request)
+        if request.url.path.startswith("/points/"):
+            return httpx.Response(200, json={"properties": {"forecastHourly": "https://api.weather.gov/gridpoints/MKX/88,64/forecast/hourly"}})
+        if request.url.path.startswith("/gridpoints/"):
+            return httpx.Response(200, json={"properties": {"periods": [hour]}})
+        return httpx.Response(200, json={"features": []})  # no alerts in force
+
+    app = create_app(make_settings(tmp_path, weather_alerts=True), http=httpx.Client(transport=httpx.MockTransport(handler)))
+    with TestClient(app) as client:
+        trip = client.post("/route", json={"origin": ORIGIN, "destination": DESTINATION, "live_traffic": False}).json()
+    assert [alert["event"] for alert in trip["weather_alerts"]] == ([event] if event else [])
+    assert trip["plan"]["profile"]["busy_crossing_weight"] == pytest.approx(3.0 * factor)
+    if event:
+        (alert,) = trip["weather_alerts"]
+        assert (alert["wet"], alert["slippery"]) == (factor == 1.2, factor == 1.5) and alert["headline"] == f"{words}, {chance}% chance"
+
+
+def test_road_events_are_fetched_ahead_of_trips_only_while_trips_are_planned(tmp_path, google):
+    import time as clock
+
+    box = BBox(south=ORIGIN["lat"] - 0.05, west=ORIGIN["lng"] - 0.05, north=ORIGIN["lat"] + 0.05, east=ORIGIN["lng"] + 0.05)
+    build_graph(grid_city().osm.elements, area="grid", bbox=box).save(tmp_path / "grid.json.gz")
+    tomtom = FakeTomTom([], google)
+    settings = make_settings(tmp_path, map="osm", tomtom_api_key="tt-key")
+    with TestClient(create_app(settings, http=httpx.Client(transport=httpx.MockTransport(tomtom)))) as client:
+        engine = client.app.state.engine
+        deadline = clock.monotonic() + 30
+        while not engine.warmed_up:
+            assert clock.monotonic() < deadline, "the road events were never matched ahead"
+            clock.sleep(0.05)
+        asked = lambda: sum(1 for request in tomtom.requests if request.url.path.endswith("incidentDetails"))  # noqa: E731
+        assert asked() == 1  # once, as the server started
+        assert not engine.keep_events_fresh(ahead_s=10_000) and asked() == 1  # nobody is planning trips: nothing is fetched
+        assert client.post("/route", json={"origin": ORIGIN, "destination": DESTINATION}).status_code == 200
+        assert engine.keep_events_fresh() and asked() == 1  # a trip was just planned, and the copy isn't due yet
+        assert engine.keep_events_fresh(ahead_s=10_000) and asked() == 2  # due within that: fetched ahead ...
+        assert client.post("/route", json={"origin": ORIGIN, "destination": DESTINATION}).status_code == 200
+        assert asked() == 2  # ... so the next trip doesn't wait for it

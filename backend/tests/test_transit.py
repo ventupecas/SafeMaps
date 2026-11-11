@@ -89,3 +89,28 @@ def test_old_bus_routes_are_served_when_the_feed_is_down(tmp_path):
     assert [route.name for route in old_lines.routes()] == ["4", "30"]  # at once, while a new fetch is tried
     assert old_lines.attribution == "Bus routes: Milwaukee County Transit System"
     assert BusRoutes(down, URL, tmp_path / "never-saved.json").routes() == []
+
+
+def test_several_agencies_routes_are_drawn_together_and_one_failing_leaves_the_rest(tmp_path):
+    from app.transit import AllBusRoutes
+
+    def racine() -> bytes:
+        routes = [{"route_id": "7", "route_short_name": "7", "route_long_name": "Lakeshore", "route_color": "0055AA"}]
+        trips = [{"route_id": "7", "direction_id": "0", "shape_id": "7-main", "trip_id": "r1"}]
+        data = io.BytesIO()
+        with zipfile.ZipFile(data, "w") as gtfs:
+            gtfs.writestr("agency.txt", table([{"agency_id": "RYDE", "agency_name": "Ryde Racine"}]))
+            gtfs.writestr("routes.txt", table(routes))
+            gtfs.writestr("trips.txt", table(trips))
+            gtfs.writestr("shapes.txt", table(shape("7-main", 180)))
+        return data.getvalue()
+
+    feeds = {"transit.example": feed(), "racine.example": racine()}
+    http = httpx.Client(transport=httpx.MockTransport(lambda request: httpx.Response(200, content=feeds[request.url.host])))
+    both = AllBusRoutes.of(http, [URL, "https://racine.example/gtfs.zip"], tmp_path)
+    assert [route.name for route in both.routes()] == ["4", "7", "30"]  # in number order, whoever runs them
+    assert both.attribution == "Bus routes: Milwaukee County Transit System, Ryde Racine"
+    assert (tmp_path / "bus-routes.json").exists() and (tmp_path / "bus-routes-2.json").exists()
+    down = httpx.Client(transport=httpx.MockTransport(lambda request: httpx.Response(200, content=feed()) if request.url.host == "transit.example" else httpx.Response(503)))
+    one = AllBusRoutes.of(down, [URL, "https://racine.example/gtfs.zip"], tmp_path / "fresh")
+    assert [route.name for route in one.routes()] == ["4", "30"]

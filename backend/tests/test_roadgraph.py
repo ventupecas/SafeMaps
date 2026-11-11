@@ -357,3 +357,30 @@ def test_at_a_junction_the_road_named_is_the_one_running_the_way_the_traveler_he
     assert graph.road_name_at(at_junction, 50.0) == "Main St"  # closer to east
     assert graph.road_name_at(at_junction, 220.0) == "2 Ave"  # closer to south
     assert graph.road_name_at(at_junction, 230.0) == "Main St"  # closer to west
+
+
+def test_a_map_reads_the_same_from_its_fast_copy(tmp_path, monkeypatch):
+    import os
+    import time
+
+    from app.roadgraph import _COLUMN_TYPES
+
+    path = tmp_path / "grid.json.gz"
+    build_graph(grid_city().osm.elements, area="grid").save(path)
+    read_json = RoadGraph._load_json.__func__
+    reads = []
+    monkeypatch.setattr(RoadGraph, "_load_json", classmethod(lambda cls, file: reads.append(file) or read_json(cls, file)))
+    first, second = RoadGraph.load(path), RoadGraph.load(path)
+    assert len(reads) == 1 and (tmp_path / "grid.quick.npz").exists()  # the second came from the copy
+    for name in (*_COLUMN_TYPES, "time_s"):
+        assert list(getattr(first, name)) == list(getattr(second, name)), name
+    assert list(first.geometry) == list(second.geometry) and first.banned == second.banned
+    assert (first.area, first.mode, first.bbox, first.stats, first.names, first.classes) == (second.area, second.mode, second.bbox, second.stats, second.names, second.classes)
+    assert [first.out_edges[node] for node in range(first.node_count)] == [second.out_edges[node] for node in range(second.node_count)]
+    assert [first.in_edges[node] for node in range(first.node_count)] == [second.in_edges[node] for node in range(second.node_count)]
+    assert first.school_points == second.school_points and first.rail_crossing_points == second.rail_crossing_points
+    assert second.nearest_node(point(1, 1), 5) == first.nearest_node(point(1, 1), 5) is not None
+    later = time.time() + 5
+    os.utime(path, (later, later))  # the map file built again: the copy was made from another one
+    RoadGraph.load(path)
+    assert len(reads) == 2

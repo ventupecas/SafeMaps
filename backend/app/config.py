@@ -16,6 +16,8 @@ ROAD_EVENT_SOURCES = ("wzdx", "wi511", "tomtom", "google", "apify")
 DEFAULT_ROAD_EVENT_SOURCES = "wzdx+wi511+tomtom,google"
 WZDX_FEED_URL = "https://511wi.gov/api/wzdx"
 BUS_ROUTES_URL = "https://kamino.mcts.org/gtfs/google_transit.zip"  # Milwaukee County Transit System's GTFS
+RACINE_BUS_ROUTES_URL = "https://racine.connexionz.net/rtt/public/utility/gtfs.aspx"  # Ryde Racine's
+BUS_FEEDS = f"{BUS_ROUTES_URL},{RACINE_BUS_ROUTES_URL}"  # the agencies inside the road map's area that publish a current feed
 
 
 @dataclass(frozen=True)
@@ -68,11 +70,17 @@ class Settings:
     fuel_price: float = 3.25
     # Ask the National Weather Service for alerts where each trip starts (free, no key).
     weather_alerts: bool = True
-    # The bus routes the OpenStreetMap map's Transit layer draws: a GTFS feed's address. None: rail only.
-    bus_routes_url: str | None = BUS_ROUTES_URL
+    # The bus routes the OpenStreetMap map's Transit layer draws: a GTFS feed's address, or several
+    # agencies', separated by commas (bus_feeds has them one by one). None: rail only.
+    bus_routes_url: str | None = BUS_FEEDS
     # Transit trips from that feed's schedule (ROUTES_TRANSIT=off skips reading it: a minute or two
     # in the background at startup, and about 200 MB while it reads).
     transit: bool = True
+
+    @property
+    def bus_feeds(self) -> tuple[str, ...]:
+        """Each agency's GTFS feed address, in the order given."""
+        return tuple(url.strip() for url in (self.bus_routes_url or "").split(",") if url.strip())
 
     @classmethod
     def from_env(cls) -> Settings:
@@ -182,15 +190,17 @@ def _bike_graph_path(value: str | None, car_graph: str | None, suffix: str = "-b
 
 
 def _bus_routes_url(value: str | None) -> str | None:
-    """ROUTES_BUS_ROUTES: unset or on means MCTS's feed, off means none, or another GTFS feed's http(s) address."""
+    """ROUTES_BUS_ROUTES: unset or on means MCTS's and Ryde Racine's feeds, off means none, or other GTFS
+    feeds' http(s) addresses, separated by commas."""
     value = (value or "").strip()
     if value.lower() in {"", "1", "true", "yes", "on"}:
-        return BUS_ROUTES_URL
+        return BUS_FEEDS
     if value.lower() in {"0", "false", "no", "off"}:
         return None
-    if not value.lower().startswith(("http://", "https://")):
-        raise ValueError(f"ROUTES_BUS_ROUTES must be on, off or a GTFS feed's http(s) address; got {value!r}")
-    return value
+    feeds = [url.strip() for url in value.split(",") if url.strip()]
+    if not feeds or not all(url.lower().startswith(("http://", "https://")) for url in feeds):
+        raise ValueError(f"ROUTES_BUS_ROUTES must be on, off or GTFS feeds' http(s) addresses, separated by commas; got {value!r}")
+    return ",".join(feeds)
 
 
 def _backend_path(value: str) -> Path:

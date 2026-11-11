@@ -1,8 +1,9 @@
 // Whole trips: in a link (for phones), and the recent ones planned in this browser.
 
-import { $, MAX_RECENT, MAX_STOPS, RECENT_KEY, element, state } from "./core.js";
+import { $, MAX_RECENT, MAX_STOPS, PLACES_KEY, RECENT_KEY, element, state } from "./core.js";
 import { accessCode, clearTrip, findRoute } from "./app.js";
 import { addStop, chosenStops, removeStop, setPoint } from "./editing.js";
+import { setNavStatus } from "./drive.js";
 import { setMode } from "./bike.js";
 
 function recentTrips() {
@@ -49,6 +50,71 @@ export function showRecentTrips() {
       return element("li", {}, button);
     }),
   );
+}
+
+// ---- Home and Work: two places saved in this browser, each picked with one click.
+// Unsaved, a button reads "Set Home": it saves the trip's destination (or its start, with no destination yet).
+// Saved, it puts the place on the trip: as the start, or as the destination once there's a start. The small
+// button beside it forgets the place.
+
+function savedPlaces() {
+  try {
+    const places = JSON.parse(localStorage.getItem(PLACES_KEY));
+    return places && typeof places === "object" ? places : {};
+  } catch {
+    return {};
+  }
+}
+
+function keepPlaces(places) {
+  try {
+    localStorage.setItem(PLACES_KEY, JSON.stringify(places));
+  } catch {
+    note("This browser won't keep places: its storage is blocked.");
+  }
+  showSavedPlaces();
+}
+
+// A short word over the map, as the map's own notes are.
+function note(text) {
+  if (state.nav.active) return;
+  setNavStatus(text);
+  clearTimeout(state.noticeTimer);
+  state.noticeTimer = setTimeout(() => state.nav.active || setNavStatus(null), 3500);
+}
+
+export function showSavedPlaces() {
+  const places = savedPlaces();
+  $("saved-places").replaceChildren(
+    ...[["home", "Home"], ["work", "Work"]].flatMap(([key, name]) => {
+      const place = places[key];
+      const usable = place && Number.isFinite(place.lat) && Number.isFinite(place.lng);
+      const button = element("button", { className: "saved-place", type: "button" }, usable ? name : "Set " + name);
+      button.title = usable ? place.label || "" : "Saves the destination on the map as " + name;
+      button.addEventListener("click", () => (usable ? usePlace(place) : savePlace(key, name)));
+      if (!usable) return [button];
+      const forget = element("button", { className: "link-button link-button--remove saved-place__forget", type: "button" }, "Forget " + name);
+      forget.addEventListener("click", () => {
+        const rest = savedPlaces();
+        delete rest[key];
+        keepPlaces(rest);
+      });
+      return [button, forget];
+    }),
+  );
+}
+
+function savePlace(key, name) {
+  const point = state.destination || state.origin;
+  if (!point) return note("Pick a place first: then Set " + name + " saves it.");
+  const { lat, lng, label, countryCode } = point;
+  keepPlaces({ ...savedPlaces(), [key]: { lat, lng, label: /^(My|Current) location$/.test(label || "") ? null : label, countryCode } });
+  note(name + " saved.");
+}
+
+function usePlace(place) {
+  if (state.nav.active) return;
+  setPoint(state.origin ? "destination" : "origin", { ...place });
 }
 
 // This page's address with the access code and the trip on the map: start, destination and stops.

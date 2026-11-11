@@ -45,6 +45,8 @@ export const LAYERS_KEY = "routes-layers"; // the map layers chosen, remembered 
 export const RECENT_KEY = "routes-recent"; // the last trips planned in this browser
 
 export const MAX_RECENT = 5;
+export const PLACES_KEY = "routes-places"; // Home and Work, saved in this browser
+export const MAX_AVOID = 5; // roads to avoid on one trip (the server's MAX_AVOID)
 
 export const NIGHT_SUN_DEG = -6; // the dark map from dusk (the sun this far below the horizon) to dawn
 
@@ -95,12 +97,17 @@ export const PROFILE_LABELS = {
   calm: "Calm: extra wary of risky turns",
   eco: "Eco: least fuel",
   "new-driver": "New driver: avoids freeways and risky turns",
+  motorcycle: "Motorcycle: wary of tracks, lane closures and bad weather",
 };
 
 export const state = {
   view: null, // the map (see maps.js)
   mapKind: "google", // or "osm": no Google at all; traffic from 511 and TomTom
   area: null, // { south, west, north, east }: where trips have to stay, on the OpenStreetMap map (our road map's area)
+  center: MILWAUKEE, // where the map opens and place search looks first: the middle of the server's road map
+  avoid: [], // roads to keep off: { id, point, marker }, each a spot clicked on the map
+  avoiding: false, // "Avoid a road" was clicked: the next click on the map picks the road
+  nextAvoidId: 1,
   mode: "car", // or "bike" or "walk" (bike.js), or "transit" (transit.js): as the server has maps for
   origin: null, // { lat, lng, label, countryCode }
   destination: null,

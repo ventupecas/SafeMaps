@@ -28,9 +28,10 @@ export function showTrip(trip, { fit = true } = {}) {
   const standard = plan.candidates.find(isStandard);
   const notes = driverNotes(trip.notes);
   const usage = trip.google; // the server's count of route data requests
-  const when = trip.leaving_at && Number($("leave").value) ? `at ${clockTime(trip.leaving_at)}` : "now";
+  const when = trip.leaving_at && (Number($("leave").value) || trip.arrive_by) ? `at ${clockTime(trip.leaving_at)}` : "now";
   $("results").replaceChildren(
     ...(trip.weather_alerts || []).map(weatherAlert),
+    ...(trip.arrive_by ? [arriveByNote(trip)] : []),
     winnerCard(plan, standard),
     element("h2", { className: "results__heading" }, "All routes, best first · pick one to follow it"),
     routeList(plan),
@@ -343,6 +344,15 @@ export function scorePill(score) {
   return element("span", { className: `score-pill score-pill--${band}`, title: "Safety score: 0 to 100, higher is safer" }, `${score}`);
 }
 
+// Asked to be there by a time: when to leave for it, or how late it would be leaving now.
+function arriveByNote(trip) {
+  const by = clockTime(trip.arrive_by);
+  const text = trip.late_min
+    ? "Leaving now gets you there about " + Math.ceil(trip.late_min) + " min after " + by + "."
+    : "Leave by " + clockTime(trip.leaving_at) + " to be there by " + by + ".";
+  return element("p", { className: "status status--leave-by" }, text);
+}
+
 function weatherAlert(alert) {
   const until = alert.ends ? ` until ${clockTime(alert.ends)}` : "";
   return element(
@@ -354,7 +364,9 @@ function weatherAlert(alert) {
       {},
       alert.slippery
         ? "Slippery roads: turns across oncoming traffic count as riskier, so routes avoid more of them."
-        : "Drive with care: the routes account for hazards reported on the roads.",
+        : alert.wet
+          ? "Wet roads: turns across oncoming traffic count as a little riskier."
+          : "Drive with care: the routes account for hazards reported on the roads.",
     ),
   );
 }

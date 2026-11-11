@@ -585,3 +585,40 @@ def test_transit_mode_shows_bus_trips_step_by_step(page, site):
     assert page.locator(".transit-stop").count() == 2  # where to get on and off
     page.click('input[name="mode"][value="walk"] + span')  # another mode: the bus trip goes
     assert page.locator(".route").count() == 0 and page.locator(".transit-stop").count() == 0
+
+
+def test_home_is_saved_once_and_then_picked_with_a_click(page, site):
+    open_map(page, site)
+    assert page.locator("#saved-places .saved-place").all_text_contents() == ["Set Home", "Set Work"]
+    page.mouse.click(*map_spot(page, 0.4, 0.5))
+    page.click("text=Set Home")  # the only place on the map so far
+    assert page.locator("#saved-places .saved-place").all_text_contents() == ["Home", "Set Work"]
+    page.click("#clear")
+    assert pins(page) == [0, 0, 0]
+    open_map(page, site)  # back another day: it was kept in the browser
+    page.click("#saved-places .saved-place >> text=Home")
+    assert pins(page) == [1, 0, 0]
+    page.click("text=Forget Home")
+    assert page.locator("#saved-places .saved-place").all_text_contents() == ["Set Home", "Set Work"]
+
+
+def test_a_road_picked_to_avoid_is_sent_with_the_trip_and_comes_off_with_a_click(page, site):
+    open_map(page, site + TRIP)
+    wait_for_routes(page)
+    page.click("#avoid-road")
+    assert page.locator("#avoid-road").text_content() == "Now click the road on the map"
+    asked = route_request(page, lambda: page.mouse.click(*map_spot(page, 0.5, 0.3)))
+    assert len(asked["avoid"]) == 1 and pins(page) == [1, 1, 0]  # a road to avoid, not a new destination
+    assert page.locator(".map-avoid").count() == 1 and page.locator("#avoid-road").text_content() == "Avoid a road"
+    wait_for_routes(page)
+    again = route_request(page, lambda: page.mouse.click(*center(page, ".map-avoid")))
+    assert again["avoid"] == [] and page.locator(".map-avoid").count() == 0
+
+
+def test_a_time_to_be_there_by_asks_the_server_when_to_leave(page, site):
+    open_map(page, site + TRIP)
+    wait_for_routes(page)
+    asked = route_request(page, lambda: page.fill("#arrive-by", "23:59") or page.dispatch_event("#arrive-by", "change"))
+    assert 0 <= asked["arrive_in_min"] <= 24 * 60
+    wait_for_routes(page)
+    assert re.fullmatch(r"(Leave by .+ to be there by .+\.|Leaving now gets you there about \d+ min after .+\.)", page.locator(".status--leave-by").text_content())
