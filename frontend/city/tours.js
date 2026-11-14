@@ -6,7 +6,7 @@ window.TOURS = [
     blurb: "No Google at all: our router designs every route, and live traffic comes from TomTom and 511.",
     steps: [
       { flow: "f_edit", title: "The visitor sets a trip", body: "The Trip Editor passes the start, destination and any stops to the Trip Planner." },
-      { flow: "t_route", title: "A taxi crosses the river", body: "POST /route carries the trip as JSON. The river is the network: everything crossing it is an HTTP request." },
+      { flow: "t_route", title: "A taxi crosses the canal", body: "POST /route carries the trip as JSON. The Canal is the network: everything crossing it is an HTTP request." },
       { at: "gate", title: "The toll gate", body: "With ROUTES_ACCESS_CODE set, a request without the code stops here with a 401." },
       { flow: "s_weather", title: "Check the weather", body: "Alerts where the trip starts. Winter alerts make turns across traffic count 1.5 times as risky." },
       { flow: "e_nws", title: "A helicopter, if the answer is old", body: "Weather answers are kept 10 minutes per spot, so most trips never send this one up." },
@@ -31,7 +31,7 @@ window.TOURS = [
     id: "car-google", name: "Plan a car trip", tag: "Google's map", map: "google",
     blurb: "The same pipeline, with flights: Google suggests routes and prices our designs with live traffic.",
     steps: [
-      { flow: "t_route", title: "A taxi crosses the river", body: "POST /route with the trip. On this map, Live traffic can be on." },
+      { flow: "t_route", title: "A taxi crosses the canal", body: "POST /route with the trip. On this map, Live traffic can be on." },
       { flow: "s_events", title: "Collect road events", body: "Work zones and 511. TomTom isn't used here: each map takes traffic from its own provider." },
       { flow: "e_511", title: "Closures from the air", body: "Fetched at most every 5 minutes for all trips." },
       { flow: "s_engine", title: "On to Dispatch", body: "The engine fills a pool with Google's suggestions and our own designs." },

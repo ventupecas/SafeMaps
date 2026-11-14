@@ -311,7 +311,7 @@ def test_the_city_opens_from_the_planner_and_says_how_the_app_fits_together(page
     page.click("#s-play")  # paused, so the steps below stay put
     page.click("#s-next")
     assert page.locator("#s-count").text_content() == "Step 2 of 20"
-    assert page.locator(".step.now b").text_content() == "A taxi crosses the river"
+    assert page.locator(".step.now b").text_content() == "A taxi crosses the canal"
 
     page.click("#tab-places")
     page.click("[data-place='main']")
@@ -622,3 +622,29 @@ def test_a_time_to_be_there_by_asks_the_server_when_to_leave(page, site):
     assert 0 <= asked["arrive_in_min"] <= 24 * 60
     wait_for_routes(page)
     assert re.fullmatch(r"(Leave by .+ to be there by .+\.|Leaving now gets you there about \d+ min after .+\.)", page.locator(".status--leave-by").text_content())
+
+
+def test_the_city_shows_what_the_planner_does_and_what_it_is_modeled_on(page, site):
+    page.goto(site + "city.html")
+    page.wait_for_selector(".jrow")
+    if page.locator("#stage canvas").count() == 0:  # no WebGL in this browser: nothing to show in 3D
+        return
+    page.click("[data-sample]")  # the sample trip drawn on the model's streets
+    assert page.locator("#view h2").text_content() == "What the planner does"
+    assert page.locator("#view .legend li").count() == 5  # the two routes, and the three things the fastest drives through
+    assert [ring.text_content() for ring in page.locator("#view .legend .ring").all()] == ["87", "62"]
+    page.click("#view .back")
+    page.click("#tab-places")
+    page.click("[data-place='core']")
+    assert page.locator("#view .like").text_content().startswith("Modeled on Plaza de Olavide")
+
+    assert page.locator("#night").text_content() == "Night"
+    page.click("#night")  # the scene by night, whatever the device is set to
+    assert page.locator("#night").text_content() == "Day" and page.locator("#night").get_attribute("aria-pressed") == "true"
+
+    page.click("#show")  # the showreel: a caption for each shot, until someone touches the page
+    page.wait_for_selector(".caption.in")
+    assert page.locator(".caption b").text_content() == "Safe Route City" and page.locator("#show").text_content() == "Stop the showreel"
+    page.keyboard.press("Escape")
+    assert page.locator(".caption").is_hidden() and page.locator("#show").text_content() == "Showreel"
+    assert page.locator("#night").text_content() == "Day"  # the light it was in before the showreel

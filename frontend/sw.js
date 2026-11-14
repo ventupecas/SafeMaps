@@ -7,7 +7,7 @@
 // terms allow keeping what's been viewed, never downloading areas ahead. Google's
 // map isn't kept (its terms don't allow it), and neither is live traffic.
 
-const PAGE = "page-v14"; // a new name when the page's files change: the old copy is dropped
+const PAGE = "page-v15"; // a new name when the page's files change: the old copy is dropped
 const TILES = "tiles-v1";
 const MAX_TILES = 4000; // about 60 MB: the metro at the zooms people use, several times over
 const TILE_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000;
@@ -46,6 +46,7 @@ const PAGE_FILES = [
   "city/models.js",
   "city/world.js",
   "city/traffic.js",
+  "city/sample.js",
   "city/engine.js",
   "city/ui.js",
   "manifest.json",

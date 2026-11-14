@@ -33,7 +33,7 @@ window.CITY = (() => {
     P("app", "Trip Planner", "frontend/index.html, app.js", "page", -47, -15, "cityhall", 16, "Starts the page, wires its controls and asks the server for routes. All routing happens in the backend; this page collects the trip and shows the answer.", 1),
     P("core", "Town Square", "frontend/core.js", "page", -75, -15, "plaza", 4, "Settings, shared state and helpers that the other page modules read."),
     P("editing", "Trip Editor", "frontend/editing.js", "page", -75, -45, "slab", 11, "The trip on the map: start, destination, stops, dragging pins, and Undo."),
-    P("results", "Route Drawing Office", "frontend/results.js", "page", -47, 15, "slab", 14, "Draws the ranked routes and explains them: the safety score ring, the reasons, Best time to leave?, and Would you take this route?", 1),
+    P("results", "Route Drawing Office", "frontend/results.js", "page", -47, 15, "villa", 14, "Draws the ranked routes and explains them: the safety score ring, the reasons, Best time to leave?, and Would you take this route?", 1),
     P("maps", "Map Hall", "frontend/maps.js", "page", -75, 15, "dome", 13, "The map underneath, Google's or OpenStreetMap's, behind one small interface. Also place search on the OpenStreetMap map.", 1),
     P("layers", "Layer Cake", "frontend/layers.js", "page", -75, 45, "cake", 14, "The map's look: default, satellite, terrain, traffic, biking, the dark map at night, and the bus lines."),
     P("drive", "Driving School", "frontend/drive.js", "page", -47, 45, "slab", 10, "Follows the drive: GPS, progress along the route, spoken directions, asking for a new route after leaving them all, and Preview the drive.", 1),
@@ -43,15 +43,15 @@ window.CITY = (() => {
     P("i18n", "Translators' Office", "frontend/i18n.js", "page", -75, -75, "slab", 10, "Translates the page into Spanish as it appears, including the server's route reasons and directions."),
     P("trips", "Trip Archive", "frontend/trips.js", "page", -105, -15, "slab", 8, "Trip links and the last 5 trips, kept in this browser only."),
     P("expo", "Expo Hall", "frontend/expo.js", "page", -105, -45, "hall", 10, "Demo mode, How it works and the phone link with its QR code.", 1),
-    P("sw", "Tile Depot", "frontend/sw.js", "page", -105, 15, "warehouse", 8, "The service worker. Keeps the page's files and up to 4,000 map images viewed, so the page still opens when the network drops.", 1),
-    P("vendor", "Library Hardware", "frontend/vendor/", "page", -105, 45, "shop", 7, "Local copies of Leaflet, MapLibre GL, MarkerCluster and the QR code generator, so the page needs no CDN."),
+    P("sw", "Tile Depot", "frontend/sw.js", "page", -105, 15, "watertower", 8, "The service worker. Keeps the page's files and up to 4,000 map images viewed, so the page still opens when the network drops.", 1),
+    P("vendor", "Library Hardware", "frontend/vendor/", "page", -105, 45, "market", 7, "Local copies of Leaflet, MapLibre GL, MarkerCluster and the QR code generator, so the page needs no CDN."),
     P("stats", "Scoreboard Arena", "frontend/stats.html, stats.js", "page", -105, -75, "arena", 7, "The second screen at the booth: today's trips, how many got a safer route, and what they avoided."),
     P("answers", "Poll Booth", "frontend/answers.html, answers.js", "page", -135, -75, "shop", 7, "Visitors' answers to Would you take this route?, today and over all days."),
     P("control", "Control Room", "frontend/control.html, control.js", "page", -135, -45, "slab", 11, "Readiness checks, today's paid usage, and the switches that pause demo mode and restart the stats."),
     P("game", "Arcade", "frontend/game.html, game.js", "page", -135, -15, "arcade", 8, "Which route is safer? Two routes without their scores, and the visitor guesses."),
     P("phones", "Visitors' Phones", "the same page, opened from the QR code", "page", -135, 75, "phone", 12, "Phones run the same page as the booth screen. They reach the laptop through the Cloudflare tunnel.", 1),
     P("gps", "Device GPS", "navigator.geolocation", "page", -135, 45, "mast", 14, "The device's location. Browsers only share it with https pages or localhost, which is why phones need the tunnel."),
-    P("tunnel", "Cloudflare Tunnel", "cloudflared (docker compose --profile phones)", "ext", -30, 30, "portal", 5, "A free public https address for the laptop. Requests go under the river and come up on the server side. Set ROUTES_ACCESS_CODE first, because the link is public."),
+    P("tunnel", "Cloudflare Tunnel", "cloudflared (docker compose --profile phones)", "ext", -30, 30, "portal", 5, "A free public https address for the laptop. Requests go under the canal and come up on the server side. Set ROUTES_ACCESS_CODE first, because the link is public."),
 
     // Server Downtown
     P("main", "Central Station", "backend/app/main.py", "server", 13, -14, "station", 15, "The HTTP API (FastAPI). Every request from every page arrives here. It also serves the page's own files, and checks the access code.", 1),
@@ -233,5 +233,44 @@ window.CITY = (() => {
   const SLAB = [-178, 215, -128, 116];
   const TRENCH = [63, 113, 5, 25];
 
-  return { DISTRICTS, MODES, PLACES, FLOWS, STREETS, LAND, SLAB, TRENCH };
+  // The city is built like Chamberí, in Madrid. What some places are modeled on there:
+  const LIKE = {
+    app: "the district hall on Plaza de Chamberí, with its cupola",
+    core: "Plaza de Olavide, the round plaza at the heart of Chamberí",
+    sw: "the Depósito Elevado, the Canal de Isabel II's brick water tower: it stores, as a cache does",
+    vendor: "the Mercado de Chamberí",
+    results: "the Museo Sorolla, the painter's house and garden",
+    drive3d: "the Teatros del Canal",
+    stats: "the Estadio de Vallehermoso",
+    game: "the Frontón Beti-Jai, a pelota court from 1894",
+    main: "Madrid's old termini: brick wings, an iron shed, a clock tower",
+    engine: "the towers along the Paseo de la Castellana",
+    router: "the towers along the Paseo de la Castellana",
+    entrance: "Andén 0, Chamberí's ghost Metro station, closed in 1966",
+    search_rs: "a Madrid Metro platform, in white bevelled tile",
+    geometry_rs: "a Madrid Metro platform, in white bevelled tile",
+    graphs: "the Canal de Isabel II's covered reservoirs",
+  };
+  for (const p of PLACES) if (LIKE[p.id]) p.like = LIKE[p.id];
+
+  // Street names from Chamberí's own map, on the tiles Madrid writes them on: [name, x, z]
+  const NAMES = [
+    ["Calle de Bravo Murillo", -150, -45], ["Calle de Santa Engracia", -90, 45], ["Calle de Fuencarral", -60, -45],
+    ["Calle de José Abascal", -105, -60], ["Calle de Eloy Gonzalo", -105, 0], ["Calle de Alberto Aguilera", -75, 90],
+    ["Parque de Santander", -100, -108], ["Paseo de la Castellana", 58, -45], ["Calle de Ríos Rosas", 43, -60], ["Calle de Almagro", 88, -75],
+  ];
+
+  // A sample trip, drawn on Browser Town's streets as the planner draws one: A to B, the route it recommends,
+  // the fastest one beside it, and what the fastest one drives through. Points are street corners, [x, z].
+  const SAMPLE = {
+    safe: { score: 87, label: "Recommended", path: [[-150, 60], [-150, -60], [-60, -60]] },
+    fast: { score: 62, label: "Fastest", path: [[-150, 60], [-60, 60], [-60, -60]] },
+    hazards: [
+      { kind: "turn", x: -60, z: 60, name: "Left turn across traffic", text: "A crash-prone corner: the fastest route turns left here, across oncoming traffic." },
+      { kind: "school", x: -60, z: 15, name: "School zone", text: "Counted at drop-off and pickup times." },
+      { kind: "work", x: -60, z: -15, name: "Work zone", text: "A lane closed, from the live work-zone feed." },
+    ],
+  };
+
+  return { DISTRICTS, MODES, PLACES, FLOWS, STREETS, LAND, SLAB, TRENCH, NAMES, SAMPLE };
 })();

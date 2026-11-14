@@ -1,14 +1,22 @@
-// The city's ground: land, water, streets, bridges, the subway cut, background buildings and the places themselves.
+// The city's ground: land, water, streets, bridges, the subway cut, the blocks of houses and the places themselves.
+// Laid out as Chamberí is: closed blocks round courtyards, plane trees along every pavement, a park to the north
+// (as the Canal's Parque de Santander is), stone quays where the land meets the water.
 window.WORLD = (() => {
   const { PLACES, STREETS, LAND, SLAB, TRENCH } = CITY;
-  const { Builder, windowTextures, place: placeGeometry, tree, house } = MODELS;
+  const { Builder, windowTextures, place: placeGeometry, tree, cypress, house, manzana, facade, PALE, IRON, TERRACOTTA } = MODELS;
   const ROAD = 8; // street width
+  const PLATE = 0.25; // how far the pavements stand above the street
 
-  const land = new THREE.MeshLambertMaterial({ color: "#8f98a3", vertexColors: false });
+  const land = new THREE.MeshLambertMaterial({ color: "#737980", vertexColors: false });
   const fabric = new THREE.MeshLambertMaterial({ vertexColors: true });
   const water = new THREE.MeshPhongMaterial({ color: "#7db4d0", specular: "#ffffff", shininess: 60 });
   let wave = null;
   const placesById = {};
+  const lamps = []; // where the street lamps stand: lit at night (engine.js)
+
+  // The same city every time the page opens: its blocks are laid out from a fixed seed.
+  let seed = 20261114;
+  const rnd = () => { seed = (seed + 0x6d2b79f5) | 0; let t = Math.imul(seed ^ (seed >>> 15), 1 | seed); t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t; return ((t ^ (t >>> 14)) >>> 0) / 4294967296; };
 
   function buildAll(scene) {
     const tex = windowTextures();
@@ -37,18 +45,20 @@ window.WORLD = (() => {
     scene.add(landMesh(LAND.west, -12), landMesh(LAND.down, -12, [TRENCH]), landMesh(LAND.yard, -12), landMesh(LAND.north, -7));
     const b = new Builder();
     for (const x of [-120, -60]) { // viaducts from the outside services
-      b.box(ROAD, 0.8, 11, x, -0.8, -130.5, "#8f98a3").box(0.4, 0.8, 11, x - 4, 0, -130.5, "#d8dbe0").box(0.4, 0.8, 11, x + 4, 0, -130.5, "#d8dbe0");
+      b.box(ROAD, 0.8, 11, x, -0.8, -130.5, "#737980").box(0.4, 0.8, 11, x - 4, 0, -130.5, PALE).box(0.4, 0.8, 11, x + 4, 0, -130.5, PALE);
     }
-    const span = (x0, x1, z0, z1) => { // a bridge over water, along x or z
+    const span = (x0, x1, z0, z1) => { // a bridge over water, along x or z: stone piers, iron rails, a lamp on each pier
       const alongX = x1 - x0 > z1 - z0, cx = (x0 + x1) / 2, cz = (z0 + z1) / 2, len = alongX ? x1 - x0 : z1 - z0;
       const [w, d] = alongX ? [len, ROAD + 1] : [ROAD + 1, len];
-      b.box(w, 1, d, cx, -1, cz, "#8f98a3");
+      b.box(w, 1, d, cx, -1, cz, "#737980");
+      b.box(alongX ? 3 : ROAD + 2, 9, alongX ? ROAD + 2 : 3, cx, -10, cz, "#cfc8b8"); // the pier in the water
       for (const s of [-1, 1]) {
         const [rx, rz] = alongX ? [cx, cz + s * (ROAD / 2 + 0.6)] : [cx + s * (ROAD / 2 + 0.6), cz];
-        b.box(alongX ? len : 0.5, 1, alongX ? 0.5 : len, rx, 0, rz, "#c84a3a");
+        b.box(alongX ? len : 0.35, 0.9, alongX ? 0.35 : len, rx, 0, rz, IRON);
         for (const e of [-1, 1]) {
           const [tx, tz] = alongX ? [cx + e * (len / 2 - 1), rz] : [rx, cz + e * (len / 2 - 1)];
-          b.box(1.4, 6, 1.4, tx, 0, tz, "#c84a3a").box(1.9, 0.5, 1.9, tx, 6, tz, "#f3f1eb");
+          b.box(1.5, 2.4, 1.5, tx, 0, tz, PALE).cyl(0.12, 0.12, 3, tx, 2.4, tz, IRON, 6).ball(0.5, tx, 5.7, tz, "#ffe9a8");
+          lamps.push([tx, 5.7, tz]);
         }
       }
     };
@@ -58,7 +68,25 @@ window.WORLD = (() => {
     // the runway
     b.box(105, 0.12, 10, 81, 0.25, -119, "#3a424c");
     for (let x = 34; x < 130; x += 9) b.box(5, 0.05, 0.7, x, 0.37, -119, "#f3f1eb");
+    addQuays(b);
     addMesh(scene, b, true);
+  }
+
+  // A stone parapet where the land meets the water, open where a bridge or a viaduct leaves.
+  function addQuays(b) {
+    const wall = (x0, z0, x1, z1, gaps = []) => {
+      const alongX = z0 === z1, from = alongX ? x0 : z0, to = alongX ? x1 : z1;
+      const cuts = [from, ...gaps.flatMap((g) => [g - ROAD / 2 - 1.6, g + ROAD / 2 + 1.6]), to];
+      for (let i = 0; i < cuts.length; i += 2) {
+        const len = cuts[i + 1] - cuts[i], mid = (cuts[i] + cuts[i + 1]) / 2;
+        if (len > 0.5) b.box(alongX ? len : 0.7, 0.95, alongX ? 0.7 : len, alongX ? mid : x0, 0, alongX ? z0 : mid, "#d3ccbc");
+      }
+    };
+    const [wx0, wx1, wz0, wz1] = LAND.west, [dx0, dx1, dz0, dz1] = LAND.down, [yx0, yx1, yz0, yz1] = LAND.yard, [nx0, nx1, nz0, nz1] = LAND.north;
+    wall(wx1 - 0.35, wz0, wx1 - 0.35, wz1, [-60, 0]); wall(wx0 + 0.35, wz0, wx0 + 0.35, wz1); wall(wx0, wz0 + 0.35, wx1, wz0 + 0.35, [-120, -60]); wall(wx0, wz1 - 0.35, wx1, wz1 - 0.35);
+    wall(dx0 + 0.35, dz0, dx0 + 0.35, dz1, [-60, 0, 30]); wall(dx0, dz1 - 0.35, dx1, dz1 - 0.35, [28, 58]); wall(dx1 - 0.35, dz0, dx1 - 0.35, dz1);
+    wall(yx0, yz0 + 0.35, yx1, yz0 + 0.35, [28, 58]); wall(yx0 + 0.35, yz0, yx0 + 0.35, yz1); wall(yx0, yz1 - 0.35, yx1, yz1 - 0.35);
+    wall(nx0, nz1 - 0.35, nx1, nz1 - 0.35, [-120, -60]); wall(nx0, nz0 + 0.35, nx1, nz0 + 0.35);
   }
 
   function addMesh(scene, b, shadows) {
@@ -100,46 +128,104 @@ window.WORLD = (() => {
     scene.add(new THREE.Mesh(geo, mat));
   }
 
-  const FOOT = { cityhall: 11, plaza: 12, station: 15, tower: 10, library: 13, helipad: 12, hall: 11, warehouse: 11, factory: 12, track: 13, containers: 12, terminal: 13, hangar: 12, arena: 12, cake: 10, cinema: 10, phone: 20, pier: 10 };
+  const FOOT = { cityhall: 11, plaza: 12, station: 15, tower: 10, library: 13, helipad: 12, hall: 11, warehouse: 11, factory: 12, track: 13, containers: 12, terminal: 13, hangar: 12, arena: 14, cake: 10, cinema: 10, phone: 20, pier: 10, villa: 11, market: 10, watertower: 8, arcade: 9 };
   const clearOf = (x, z, r) => PLACES.every((p) => (p.x - x) ** 2 + (p.z - z) ** 2 > ((FOOT[p.kind] || 8) + r) ** 2);
-
   const overCut = (x, z) => x > TRENCH[0] && x < TRENCH[1] && z > TRENCH[2] && z < TRENCH[3];
+  const nearCut = (x, z) => x > TRENCH[0] - 6 && x < TRENCH[1] + 6 && z > TRENCH[2] - 6 && z < TRENCH[3] + 6;
+
+  function lamp(b, x, z) {
+    b.cyl(0.09, 0.13, 3.9, x, PLATE, z, IRON, 5).ball(0.34, x, PLATE + 4.1, z, "#ffe9a8");
+    lamps.push([x, PLATE + 4.1, z]);
+  }
 
   function addFabric(scene) {
     const b = new Builder();
     const edges = (list, lo, hi) => { const out = [], s = [lo, ...list, hi]; for (let i = 0; i < s.length - 1; i++) { const a = s[i] === lo ? lo : s[i] + ROAD / 2, c = s[i + 1] === hi ? hi : s[i + 1] - ROAD / 2; if (c - a >= 6) out.push([a, c]); } return out; };
-    const district = (grid, box, tint, maxH, fill) => {
+    const district = (grid, box, tint, kind) => {
       for (const [x0, x1] of edges(grid.xs, box[0], box[1])) for (const [z0, z1] of edges(grid.zs, box[2], box[3])) {
         if (overCut((x0 + x1) / 2, (z0 + z1) / 2)) continue;
-        b.box(x1 - x0, 0.25, z1 - z0, (x0 + x1) / 2, 0, (z0 + z1) / 2, tint);
-        fill(b, x0, x1, z0, z1, maxH);
+        block(b, x0, x1, z0, z1, tint, kind);
       }
     };
-    const inTrench = (x, z) => x > TRENCH[0] - 6 && x < TRENCH[1] + 6 && z > TRENCH[2] - 6 && z < TRENCH[3] + 6;
-    const fill = (b, x0, x1, z0, z1, maxH) => {
-      const n = Math.max(1, Math.round((x1 - x0) / 7.5)), m = Math.max(1, Math.round((z1 - z0) / 7.5));
-      for (let i = 0; i < n; i++) for (let j = 0; j < m; j++) {
-        const x = x0 + ((i + 0.5) * (x1 - x0)) / n, z = z0 + ((j + 0.5) * (z1 - z0)) / m;
-        if (!clearOf(x, z, 3.2) || inTrench(x, z)) continue;
-        if (z0 < -94 && x > -10) continue; // the airport's apron
-        if (z1 < -90 && x < -26) { if (Math.random() < 0.6) tree(b, x, 0.25, z, 1 + Math.random() * 0.5); continue; } // the park on the north side
-        const r = Math.random();
-        if (r < 0.2) tree(b, x, 0.25, z, 0.8 + Math.random() * 0.6);
-        else if (x < -90 && z > 60 && r < 0.95) house(b, x, z, "#c9b89a");
-        else if (r < 0.9) { const h = 2 + Math.random() * maxH, g = 232 + Math.floor(Math.random() * 18), c = `rgb(${g},${g},${g - 3})`; b.box(4.6 + Math.random() * 1.5, h, 4.6 + Math.random() * 1.5, x, 0.25, z, c, true); }
-      }
-    };
-    district(STREETS.west, [LAND.west[0], LAND.west[1], LAND.west[2], LAND.west[3]], "#e4ece4", 6, fill);
-    district(STREETS.down, [LAND.down[0], LAND.down[1], LAND.down[2], LAND.down[3]], "#e2e8ef", 10, fill);
-    district(STREETS.yard, [LAND.yard[0], LAND.yard[1], LAND.yard[2], LAND.yard[3]], "#efe7da", 4, fill);
-    b.box(305, 0.25, 7, -17.5, 0, -163, "#e6e2d2"); // the outside services' strip
-    // lane dashes
-    const dash = (x0, z0, x1, z1) => { const alongX = x1 !== x0, len = alongX ? Math.abs(x1 - x0) : Math.abs(z1 - z0); for (let s = 3; s < len; s += 7) if (!overCut(alongX ? Math.min(x0, x1) + s : x0, alongX ? z0 : Math.min(z0, z1) + s)) b.box(alongX ? 3 : 0.3, 0.04, alongX ? 0.3 : 3, alongX ? Math.min(x0, x1) + s : x0, 0.01, alongX ? z0 : Math.min(z0, z1) + s, "#e8e6df"); };
-    for (const g of Object.values(STREETS)) {
-      for (const x of g.xs) dash(x, g.zs[0], x, g.zs[g.zs.length - 1]);
-      for (const z of g.zs) dash(g.xs[0], z, g.xs[g.xs.length - 1], z);
-    }
+    district(STREETS.west, LAND.west, "#e4dccb", "town");
+    district(STREETS.down, LAND.down, "#dcdde0", "downtown");
+    district(STREETS.yard, LAND.yard, "#e6dbc6", "yard");
+    b.box(305, PLATE, 7, -17.5, 0, -163, "#e6e2d2"); // the outside services' strip
+    crossings(b);
     addMesh(scene, b, true);
+  }
+
+  // One block between four streets: its pavement, and what stands on it.
+  function block(b, x0, x1, z0, z1, tint, kind) {
+    const w = x1 - x0, d = z1 - z0, cx = (x0 + x1) / 2, cz = (z0 + z1) / 2;
+    const apron = z0 < -94 && x0 > -10, park = z1 < -90 && x1 < -26, homes = x1 < -86 && z0 > 56;
+    b.box(w, PLATE, d, cx, 0, cz, apron ? "#cdd1d4" : park ? "#a6c68c" : tint);
+    if (apron) return;
+    if (park) return garden(b, x0, x1, z0, z1);
+    const taken = PLACES.some((p) => p.x > x0 - 3 && p.x < x1 + 3 && p.z > z0 - 3 && p.z < z1 + 3) || nearCut(cx, cz);
+    if (!taken && homes) {
+      for (let x = x0 + 4; x < x1 - 2; x += 7) for (let z = z0 + 4; z < z1 - 2; z += 7) (rnd() < 0.8 ? house(b, x, z) : tree(b, x, PLATE, z, 1));
+    } else if (!taken && w >= 15 && d >= 15) {
+      manzana(b, x0, x1, z0, z1, PLATE, rnd);
+    } else if (!taken && Math.min(w, d) >= 7.5) { // a strip along the edge of town: one row of houses
+      const alongX = w > d, depth = Math.min(alongX ? d : w, 9) - 3.4;
+      for (let a = (alongX ? x0 : z0) + 2; a < (alongX ? x1 : z1) - 6; ) {
+        const len = Math.min(5.5 + rnd() * 5, (alongX ? x1 : z1) - 2 - a);
+        facade(b, alongX ? a + len / 2 : cx, alongX ? cz : a + len / 2, alongX ? len : depth, alongX ? depth : len, PLATE, rnd);
+        a += len;
+      }
+    } else if (kind !== "yard") { // around one of the app's own buildings: lawns and a kiosk, not more houses
+      for (let i = 0; i < 5; i++) {
+        const x = x0 + 2 + rnd() * (w - 4), z = z0 + 2 + rnd() * (d - 4);
+        if (clearOf(x, z, 2.4) && !nearCut(x, z)) (rnd() < 0.2 ? cypress(b, x, PLATE, z, 1) : tree(b, x, PLATE, z, 0.9 + rnd() * 0.3));
+      }
+    }
+    // Plane trees and lamps along the kerb, wherever one of the app's buildings doesn't reach it.
+    if (kind === "yard") return;
+    const kerb = 0.95;
+    for (let x = x0 + 3; x <= x1 - 3; x += 5.4) for (const z of [z0 + kerb, z1 - kerb]) if (clearOf(x, z, 0.6) && !nearCut(x, z)) tree(b, x, PLATE, z, 0.72);
+    for (let z = z0 + 5.6; z <= z1 - 5.6; z += 5.4) for (const x of [x0 + kerb, x1 - kerb]) if (clearOf(x, z, 0.6) && !nearCut(x, z)) tree(b, x, PLATE, z, 0.72);
+    if (w >= 15 && d >= 15) for (const [x, z] of [[x0 + 0.7, z0 + 0.7], [x1 - 0.7, z0 + 0.7], [x0 + 0.7, z1 - 0.7], [x1 - 0.7, z1 - 0.7]]) if (!nearCut(x, z)) lamp(b, x, z);
+  }
+
+  // The park along the north side: lawns, plane trees and cypresses, a pond.
+  function garden(b, x0, x1, z0, z1) {
+    const cx = (x0 + x1) / 2, cz = (z0 + z1) / 2, w = x1 - x0, d = z1 - z0;
+    b.box(w - 2, 0.04, 2.2, cx, PLATE, cz, "#e2d6b8").box(2.2, 0.04, d - 2, cx, PLATE, cz, "#e2d6b8"); // sand paths, crossing
+    const pond = w > 20 && rnd() < 0.6;
+    if (pond) b.cyl(5.2, 5.4, 0.5, cx, PLATE, cz, PALE, 20).cyl(4.7, 4.7, 0.2, cx, PLATE + 0.4, cz, "#6fbfdc", 20).cyl(0.2, 0.4, 2, cx, PLATE + 0.5, cz, PALE, 8);
+    for (let i = 0; i < Math.round((w * d) / 42); i++) {
+      const x = x0 + 2 + rnd() * (w - 4), z = z0 + 2 + rnd() * (d - 4);
+      if (Math.abs(x - cx) < 2.4 || Math.abs(z - cz) < 2.4 || (pond && Math.hypot(x - cx, z - cz) < 7)) continue;
+      if (!clearOf(x, z, 1)) continue;
+      (rnd() < 0.22 ? cypress(b, x, PLATE, z, 1 + rnd() * 0.4) : tree(b, x, PLATE, z, 1 + rnd() * 0.55));
+    }
+  }
+
+  // Zebra crossings where streets meet, and a dashed line down the middle of each street.
+  function crossings(b) {
+    const paint = "#ebe8df";
+    for (const g of Object.values(STREETS)) {
+      const xs = g.xs, zs = g.zs;
+      const dash = (x0, z0, x1, z1) => {
+        const alongX = x1 !== x0, len = alongX ? Math.abs(x1 - x0) : Math.abs(z1 - z0);
+        for (let s = 9.5; s < len - 8; s += 7) {
+          const x = alongX ? Math.min(x0, x1) + s : x0, z = alongX ? z0 : Math.min(z0, z1) + s;
+          const atJunction = alongX ? xs.some((v) => Math.abs(v - x) < 8.5) : zs.some((v) => Math.abs(v - z) < 8.5);
+          if (!overCut(x, z) && !atJunction) b.box(alongX ? 3 : 0.3, 0.04, alongX ? 0.3 : 3, x, 0.01, z, paint);
+        }
+      };
+      for (const x of xs) dash(x, zs[0], x, zs[zs.length - 1]);
+      for (const z of zs) dash(xs[0], z, xs[xs.length - 1], z);
+      for (const [i, x] of xs.entries()) for (const [j, z] of zs.entries()) {
+        if (nearCut(x, z)) continue;
+        const arms = [[1, 0, i + 1 < xs.length], [-1, 0, i > 0], [0, 1, j + 1 < zs.length], [0, -1, j > 0]];
+        for (const [ux, uz, there] of arms) {
+          if (!there) continue;
+          for (let k = -2; k <= 2; k++) b.box(ux ? 2.4 : 0.75, 0.04, ux ? 0.75 : 2.4, x + ux * 5.9 + (ux ? 0 : k * 1.45), 0.012, z + uz * 5.9 + (uz ? 0 : k * 1.45), paint);
+        }
+      }
+    }
   }
 
   function addTrench(scene) {
@@ -150,11 +236,11 @@ window.WORLD = (() => {
     for (let x = a + 3; x < c; x += 3) floor.box(0.6, 0.08, 6, x, -8.56, cz, "#55606c");
     for (let x = a + 6; x < c; x += 12) floor.box(0.5, 0.5, 0.5, x, -1.2, e + 0.4, "#ffb066").box(0.5, 0.5, 0.5, x, -1.2, f - 0.4, "#ffb066");
     // railings at street level
-    for (const z of [e - 0.2, f + 0.2]) floor.box(w + 1, 1, 0.3, cx, 0, z, "#f3f1eb");
-    for (const x of [a - 0.2, c + 0.2]) floor.box(0.3, 1, d + 1, x, 0, cz, "#f3f1eb");
+    for (const z of [e - 0.2, f + 0.2]) floor.box(w + 1, 1, 0.3, cx, 0, z, IRON);
+    for (const x of [a - 0.2, c + 0.2]) floor.box(0.3, 1, d + 1, x, 0, cz, IRON);
     addMesh(scene, floor, false);
-    // Inner walls, lit from the rails up.
-    const wall = new THREE.Mesh(new THREE.BoxGeometry(w, 9, d), new THREE.MeshBasicMaterial({ color: "#3f4852", side: THREE.BackSide }));
+    // Inner walls: the Metro's white tile, lit from the rails up.
+    const wall = new THREE.Mesh(new THREE.BoxGeometry(w, 9, d), new THREE.MeshBasicMaterial({ color: "#59636e", side: THREE.BackSide }));
     wall.position.set(cx, -4.5, cz);
     scene.add(wall);
   }
@@ -165,9 +251,7 @@ window.WORLD = (() => {
       const mat = new THREE.MeshLambertMaterial({ vertexColors: true, map: tex.map, emissiveMap: tex.glow, emissive: new THREE.Color("#ffffff"), emissiveIntensity: 0 });
       const m = new THREE.Mesh(placeGeometry(p), mat);
       const under = p.kind === "rust";
-      m.position.set(p.x, under ? -8.6 : p.kind === "lighthouse" || p.kind === "island" ? -1.6 : 0.25, p.z);
-      if (p.kind === "track") m.rotation.y = 0;
-      if (p.kind === "portal") m.rotation.y = 0;
+      m.position.set(p.x, under ? -8.6 : p.kind === "lighthouse" || p.kind === "island" ? -1.6 : PLATE, p.z);
       m.castShadow = !under; m.receiveShadow = true;
       m.userData.place = p; m.userData.mat = mat;
       p.mesh = m;
@@ -181,5 +265,5 @@ window.WORLD = (() => {
     return meshes;
   }
 
-  return { buildAll, land, fabric, water, wave: () => wave, placesById };
+  return { buildAll, land, fabric, water, wave: () => wave, placesById, lamps };
 })();

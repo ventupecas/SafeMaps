@@ -14,11 +14,12 @@
         <div class="labels"></div>
         <div class="payload" hidden></div>
         <div class="tip" hidden><b></b><small></small></div>
+        <div class="caption" hidden><b></b><span></span></div>
         <header class="title-sign">
-          <span class="tab" title="The server runs on port 3143">EXIT 3143</span>
+          <span class="tab" title="The server runs on port 3143"><i aria-hidden="true"></i>Chamberí · 3143</span>
           <div class="plate">
             <h1>Safe Route City</h1>
-            <p>Every part of the Safe Route Planner, and how data travels between them.</p>
+            <p>Every part of the Safe Route Planner, and how data travels between them. Built like Chamberí, in Madrid.</p>
           </div>
         </header>
         <div class="tools">
@@ -28,6 +29,8 @@
             <button type="button" id="map-google" aria-pressed="true">Google</button>
             <button type="button" id="map-osm" aria-pressed="false">OpenStreetMap</button>
           </div>
+          <button type="button" class="tool" id="night" aria-pressed="false">Night</button>
+          <button type="button" class="tool" id="show" aria-pressed="false" title="The city shows itself, shot by shot. It also starts by itself when nobody touches the page for a while.">Showreel</button>
           <button type="button" class="tool" id="pause">Pause traffic</button>
           <button type="button" class="tool" id="reset">Whole city</button>
         </div>
@@ -49,6 +52,7 @@
     <script src="city/models.js"></script>
     <script src="city/world.js"></script>
     <script src="city/traffic.js"></script>
+    <script src="city/sample.js"></script>
     <script src="city/engine.js"></script>
     <script src="city/ui.js"></script>
   </body>

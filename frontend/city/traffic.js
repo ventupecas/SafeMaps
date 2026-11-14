@@ -274,5 +274,5 @@ window.TRAFFIC = (() => {
     for (const f of FLOWS) if (f.vehicle) f.vehicle.traverse((o) => { if (o.isMesh) o.material = mat; });
   }
 
-  return { build, update, flows, vehicleFor, pose, setMap, setFocus, setTheme, running, getMap: () => mapMode };
+  return { build, update, flows, vehicleFor, pose, makePath, strip, setMap, setFocus, setTheme, running, getMap: () => mapMode };
 })();

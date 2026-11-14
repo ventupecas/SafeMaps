@@ -1,6 +1,6 @@
 // The page around the city: the key, the panel, and the journey controls.
 (() => {
-  const { DISTRICTS, MODES, PLACES, FLOWS } = CITY;
+  const { DISTRICTS, MODES, PLACES, FLOWS, SAMPLE: TRIP } = CITY;
   const $ = (id) => document.getElementById(id);
   const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
   const view = $("view"), stage = $("stage");
@@ -50,20 +50,41 @@
     view.innerHTML = `
       <h2>How a trip moves through the app</h2>
       <p class="lede">${PLACES.length} parts of the repo as places, ${FLOWS.length} real data paths as lines. Pick a journey and follow one vehicle at a time.</p>
+      ${live ? tripCard() : ""}
       <div class="jlist">${TOURS.map((t) => live
         ? `<button type="button" class="jrow" data-tour="${t.id}"><b>${esc(t.name)}</b><span class="tag">${esc(t.tag)}</span><span class="b">${esc(t.blurb)}</span></button>`
         : `<details class="jrow"><summary><b>${esc(t.name)}</b><span class="tag">${esc(t.tag)}</span></summary><ol>${t.steps.map((s) => `<li><b>${esc(s.title)}</b> ${esc(s.body)}</li>`).join("")}</ol></details>`).join("")}</div>
       <h3>Reading the city</h3>
       <ul class="read">
         <li><b>Vehicle</b><span>The kind of transfer. Each one in the key means one thing.</span></li>
-        <li><b>River</b><span>The network. Everything crossing it is an HTTP request between browser and server.</span></li>
+        <li><b>Canal</b><span>The network. Everything crossing it is an HTTP request between browser and server.</span></li>
+        <li><b>Green</b><span>A sample trip, as the planner draws one: the route it recommends, beside the fastest in gray.</span></li>
+        <li><b>Madrid</b><span>The city is built like Chamberí: its closed blocks, its plazas, its Metro. A place modeled on a landmark there says so.</span></li>
         <li><b>Color</b><span><span style="color:var(--s-green)">■</span> browser, <span style="color:var(--s-blue)">■</span> server, <span style="color:var(--s-rust)">■</span> Rust, <span style="color:var(--s-brown)">■</span> files, <span style="color:var(--s-orange)">■</span> tools, <span style="color:var(--s-yellow)">■</span> outside services.</span></li>
         <li><b>Plain</b><span>Background buildings, not part of the app. A part goes plain when the current view doesn't use it.</span></li>
       </ul>
       <p class="scale-note">Click any building or vehicle, or a vehicle in the key. Vehicle speeds and how often they run aren't to scale. The ROUTES_MAP switch starts on what this server is set to, and shows the other way it can run.</p>`;
     view.scrollTop = 0;
   }
+  // What the planner itself does, on Browser Town's streets: the card that leads to it, and what it says there.
+  const ring = (route, color) => '<span class="ring" style="--c:' + color + ";--p:" + route.score + '"><b>' + route.score + "</b></span>";
+  function tripCard() {
+    return '<button type="button" class="trip-card" data-sample>' + ring(TRIP.safe, "var(--accent)") + "<span><b>What the planner does</b><span class=\"b\">A sample trip on the model's streets: the safest route in green, the fastest in gray, and what the fastest drives through.</span></span></button>";
+  }
+  function showSample() {
+    const row = (mark, title, text) => '<li><span class="mark">' + mark + "</span><span><b>" + esc(title) + "</b>" + esc(text) + "</span></li>";
+    const dot = (c) => '<i class="dot" style="background:' + c + '"></i>';
+    view.innerHTML = backLink() + "<h2>What the planner does</h2><p class=\"lede\">Most map apps pick the fastest route. This one picks the safest first, then the one that uses the least fuel, then the quickest. The sample trip from A to B shows the difference.</p>" +
+      '<ul class="legend">' +
+      row(ring(TRIP.safe, "var(--accent)"), "Recommended: the green route", " Right turns only, and none of what's below. Its safety score is " + TRIP.safe.score + " out of 100.") +
+      row(ring(TRIP.fast, "#66707c"), "Fastest: the gray dashed route", " The route to compare with. It scores " + TRIP.fast.score + ", because of what it drives through:") +
+      TRIP.hazards.map((h) => row(dot(h.kind === "turn" ? "#e5484d" : h.kind === "school" ? "#cfe41b" : "#f58220"), h.name, " " + h.text)).join("") +
+      "</ul><p>The real planner counts these on every route, along with railroad crossings, closures, weather hazards and driving into a low sun, and says how much safer the recommended route is and how many minutes it costs.</p>" +
+      '<p class="scale-note">The journeys show how it gets there: the trip crossing the Canal to the server, the search in Rust, the scoring.</p>';
+    view.scrollTop = 0;
+  }
   view.addEventListener("click", (e) => {
+    if (e.target.closest("[data-sample]")) { ENGINE.showSample(); return; }
     const t = e.target.closest("[data-tour]"); if (t) { ENGINE.startTour(t.dataset.tour); return; }
     const p = e.target.closest("[data-place]"); if (p) { live ? ENGINE.select(p.dataset.place) : showPlace(byId[p.dataset.place]); return; }
     const f = e.target.closest("[data-flow]"); if (f && live) { ENGINE.selectFlow(f.dataset.flow); return; }
@@ -92,7 +113,7 @@
       return lineRow(f, `${outward ? "to" : "from"} ${esc(other)}: ${esc(f.carries)}${reply ? ` · reply: ${esc(reply)}` : ""}`);
     };
     view.innerHTML = `${backLink()}<div class="sign inline-sign sign-${DISTRICTS[p.d].sign}"><b>${esc(DISTRICTS[p.d].name)}</b></div>
-      <h2>${esc(p.name)}</h2><p class="files">${esc(p.files)}</p><p>${esc(p.text)}</p>
+      <h2>${esc(p.name)}</h2><p class="files">${esc(p.files)}</p><p>${esc(p.text)}</p>${p.like ? `<p class="like">Modeled on ${esc(p.like)}.</p>` : ""}
       ${running.length ? `<h3>Lines here</h3>${running.map(row).join("")}` : ""}
       ${resting.length ? `<h3>Not running on this map</h3><p class="lede" style="font-size:12.5px">Switch ROUTES_MAP to see ${resting.length === 1 ? "this one" : "these"} working.</p>${resting.map(row).join("")}` : ""}`;
     view.scrollTop = 0;
@@ -155,9 +176,9 @@
 
   // ---- Wiring
   if (live) {
-    ENGINE.on("focus", ({ place, mode, flow }) => {
+    ENGINE.on("focus", ({ place, mode, flow, sample }) => {
       pressChip(mode);
-      if (place) showPlace(place); else if (mode) showMode(mode); else if (flow) showFlow(flow); else showTab();
+      if (place) showPlace(place); else if (mode) showMode(mode); else if (flow) showFlow(flow); else if (sample) showSample(); else showTab();
     });
     ENGINE.on("tour", (t) => { tourBuiltFor = null; if (t) pressChip(null); else showTab(); });
     ENGINE.on("step", showStep);
@@ -173,6 +194,13 @@
     ENGINE.on("traffic", label); label();
     pause.addEventListener("click", () => ENGINE.setTraffic(!ENGINE.traffic()));
     $("reset").addEventListener("click", () => ENGINE.clear(true));
+    // The scene by day or by night, whatever the device is set to; and the showreel.
+    const night = $("night"), show = $("show");
+    const lit = () => { night.textContent = ENGINE.isDark() ? "Day" : "Night"; night.setAttribute("aria-pressed", String(ENGINE.isDark())); };
+    ENGINE.on("night", lit); lit();
+    night.addEventListener("click", () => ENGINE.setNight(!ENGINE.isDark()));
+    ENGINE.on("reel", (on) => { show.textContent = on ? "Stop the showreel" : "Showreel"; show.setAttribute("aria-pressed", String(on)); stage.classList.toggle("reeling", on); });
+    show.addEventListener("click", () => ENGINE.toggleReel());
     addEventListener("keydown", (e) => {
       if (e.key === "Escape") ENGINE.clear(true);
       if (ENGINE.getTour() && e.key === "ArrowRight") ENGINE.nextStep();

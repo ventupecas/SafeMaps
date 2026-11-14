@@ -130,3 +130,51 @@ button.jrow:hover { border-color: var(--accent); background: var(--accent-soft);
   .tabs button { padding-block: 8px 6px; }
   .sign b { font-size: 10px; } .sign small { display: none; }
 }
+
+/* ---- Chamberí. The city is built like that district of Madrid, so its signs are Madrid's too: the white
+   ceramic tiles street names are written on there, blue letters inside a blue line. A place's tile keeps a
+   band in its district's color; the districts' own signs stay in full color. */
+.sign { background: #fdfbf4; color: #16306e; border-radius: 3px; padding: 3px 7px 3px 11px; box-shadow: inset 0 0 0 1.5px #1c3f8f, 0 1px 3px rgba(0,0,0,.35); }
+.sign::before { content: ""; position: absolute; left: 0; top: 0; bottom: 0; width: 5px; border-radius: 3px 0 0 3px; background: var(--band, var(--s-green)); }
+.sign small { color: #44598f; opacity: 1; }
+.sign-green { background: #fdfbf4; --band: var(--s-green); } .sign-blue { background: #fdfbf4; --band: var(--s-blue); } .sign-orange { background: #fdfbf4; --band: var(--s-orange); }
+.sign-brown { background: #fdfbf4; --band: var(--s-brown); } .sign-rust { background: #fdfbf4; --band: var(--s-rust); } .sign-river { background: #fdfbf4; --band: var(--s-river); }
+.sign-yellow { background: #fdfbf4; color: #16306e; --band: var(--s-yellow); box-shadow: inset 0 0 0 1.5px #1c3f8f, 0 1px 3px rgba(0,0,0,.35); }
+.note { background: var(--band); color: #fff; padding: 4px 9px; box-shadow: inset 0 0 0 1px rgba(255,255,255,.8), 0 1px 3px rgba(0,0,0,.35); }
+.note::before { display: none; }
+.note small { color: inherit; opacity: .92; }
+.note.sign-yellow { color: #16181b; box-shadow: inset 0 0 0 1px rgba(0,0,0,.75), 0 1px 3px rgba(0,0,0,.35); }
+.inline-sign { position: relative; display: flex; width: fit-content; }
+.plaque { pointer-events: none; padding: 5px 10px; color: #1c3f8f; font: 700 10.5px/1.2 Georgia, "Times New Roman", serif; letter-spacing: .03em; border-radius: 2px; box-shadow: inset 0 0 0 1.5px #1c3f8f, inset 0 0 0 3px #fdfbf4, inset 0 0 0 4px #c9a63a, 0 1px 2px rgba(0,0,0,.3); }
+.plaque::before { display: none; }
+
+.title-sign .tab { display: inline-flex; align-items: center; gap: 7px; background: #fdfbf4; color: #1c3f8f; box-shadow: inset 0 0 0 1.5px #1c3f8f; letter-spacing: .06em; text-transform: uppercase; }
+.title-sign .tab i { width: 9px; height: 9px; background: #d7282f; transform: rotate(45deg); } /* the Metro's diamond */
+.tool[aria-pressed="true"] { background: var(--accent); border-color: var(--accent); color: var(--on-accent); }
+
+/* The showreel's caption: read from across a hall. */
+.caption { position: absolute; left: max(18px, env(safe-area-inset-left, 0px)); bottom: 18px; max-width: min(640px, 72%); display: flex; flex-direction: column; gap: 5px; padding: 14px 22px 17px; border-radius: 12px; border-left: 7px solid #3fc495; background: rgba(13, 17, 23, .84); color: #fff; pointer-events: none; z-index: 4; box-shadow: 0 10px 34px rgba(0,0,0,.4); }
+.caption b { font: 800 clamp(22px, 2.7vw, 40px)/1.08 var(--font); letter-spacing: -.01em; text-wrap: balance; }
+.caption span { font: 500 clamp(14px, 1.4vw, 21px)/1.35 var(--font); opacity: .93; text-wrap: pretty; }
+.caption.in { animation: caption-in .7s ease both; }
+@keyframes caption-in { from { opacity: 0; transform: translateY(14px); } to { opacity: 1; transform: none; } }
+#stage.reeling .title-sign p { display: none; }
+
+/* What the planner does: the card that leads to the sample trip, and what's said there. */
+.trip-card { display: grid; grid-template-columns: 52px minmax(0, 1fr); gap: 12px; align-items: center; width: 100%; text-align: left; margin-top: 10px; padding: 10px 12px; border: 1px solid var(--accent); border-radius: 10px; background: var(--accent-soft); }
+.trip-card:hover { box-shadow: 0 0 0 1px var(--accent); }
+.trip-card > span > b { display: block; font-size: 14px; font-weight: 800; }
+.trip-card .b { display: block; font-size: 12.5px; color: var(--muted); line-height: 1.35; margin-top: 2px; }
+.ring { --p: 80; width: 50px; height: 50px; border-radius: 50%; display: grid; place-items: center; background: radial-gradient(closest-side, var(--panel) 71%, transparent 73%), conic-gradient(var(--c) calc(var(--p) * 1%), var(--line) 0); }
+.ring b { font: 800 17px/1 var(--font); color: var(--ink); }
+.legend { list-style: none; margin: 12px 0; padding: 0; display: grid; gap: 11px; }
+.legend li { display: grid; grid-template-columns: 52px minmax(0, 1fr); gap: 12px; align-items: center; font-size: 13px; line-height: 1.4; }
+.legend li > span > b { display: block; font-weight: 700; }
+.legend .mark { display: grid; place-items: center; }
+.legend .dot { width: 22px; height: 22px; border-radius: 50%; box-shadow: inset 0 0 0 2px rgba(0,0,0,.28); }
+.like { font-size: 12.5px; color: var(--muted); border-left: 3px solid #1c3f8f; padding-left: 9px; }
+
+@media (max-width: 860px) {
+  .caption { left: 8px; bottom: 8px; padding: 9px 13px 11px; border-left-width: 5px; }
+  .plaque { font-size: 9.5px; padding: 4px 7px; }
+}
