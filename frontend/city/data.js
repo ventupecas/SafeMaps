@@ -233,25 +233,47 @@ window.CITY = (() => {
   const SLAB = [-178, 215, -128, 116];
   const TRENCH = [63, 113, 5, 25];
 
-  // The city is built like Chamberí, in Madrid. What some places are modeled on there:
+  // The city is built like Chamberí, in Madrid, and the app's main parts are Spain's landmarks: Madrid's in
+  // town, the rest of Spain's out on the islands and along the ridge to the north. [model in landmarks.js, what it is]
+  const MILL = ["windmill", "the windmills of Consuegra, on their ridge in La Mancha"];
+  const LANDMARKS = {
+    app: ["cibeles", "the Palacio de Cibeles, Madrid's city hall, with the Cibeles fountain before it"],
+    core: ["sol", "the Puerta del Sol and Kilómetro Cero, the point Spain's roads are measured from"],
+    results: ["prado", "the Museo del Prado, where Spain keeps its paintings"],
+    maps: ["metropolis", "the Edificio Metrópolis, its slate dome and its winged Victory"],
+    drive3d: ["carrion", "the Edificio Carrión on the Gran Vía, home of the Capitol cinema"],
+    vendor: ["sanmiguel", "the Mercado de San Miguel, in iron and glass"],
+    stats: ["bernabeu", "the Santiago Bernabéu, with its screen all the way round"],
+    expo: ["cristal", "the Palacio de Cristal in the Retiro, built for an exposition in 1887"],
+    gps: ["piruli", "Torrespaña, Madrid's television tower, known as El Pirulí"],
+    main: ["atocha", "the old Atocha station: an iron and glass shed between brick towers"],
+    gate: ["alcala", "the Puerta de Alcalá, a gate in Madrid's old customs wall, where duties were paid to enter the city"],
+    engine: ["foster", "Norman Foster's tower among the Cuatro Torres, open to the sky at the top"],
+    router: ["kio", "the Puerta de Europa, two towers leaning toward each other over the Paseo de la Castellana"],
+    roadgraph: ["biblioteca", "the Biblioteca Nacional de España"],
+    sun: ["observatorio", "the Real Observatorio de Madrid, by Juan de Villanueva"],
+    scoring: ["congreso", "the Congreso de los Diputados, with its two bronze lions"],
+    terminal: ["barajas", "Barajas Terminal 4: a roof like a wave on pillars in every color"],
+    nws: ["hercules", "the Torre de Hércules in A Coruña, the oldest Roman lighthouse still lit"],
+    google: ["guggenheim", "the Guggenheim Bilbao, in titanium"],
+    mcts: ["torreoro", "the Torre del Oro, on Seville's river"],
+    overpass: ["acueducto", "the Aqueduct of Segovia: the road data reaches the city over a Roman overpass"],
+    nhtsa: ["sagrada", "the Sagrada Família in Barcelona, with its crane"],
+    suppliers: MILL, openfree: MILL, photon: MILL, gmaps: MILL, wi511: MILL, wzdx: MILL, tomtom: MILL, apify: MILL,
+  };
+  // And what some other places are modeled on, in Chamberí itself.
   const LIKE = {
-    app: "the district hall on Plaza de Chamberí, with its cupola",
-    core: "Plaza de Olavide, the round plaza at the heart of Chamberí",
     sw: "the Depósito Elevado, the Canal de Isabel II's brick water tower: it stores, as a cache does",
-    vendor: "the Mercado de Chamberí",
-    results: "the Museo Sorolla, the painter's house and garden",
-    drive3d: "the Teatros del Canal",
-    stats: "the Estadio de Vallehermoso",
     game: "the Frontón Beti-Jai, a pelota court from 1894",
-    main: "Madrid's old termini: brick wings, an iron shed, a clock tower",
-    engine: "the towers along the Paseo de la Castellana",
-    router: "the towers along the Paseo de la Castellana",
     entrance: "Andén 0, Chamberí's ghost Metro station, closed in 1966",
     search_rs: "a Madrid Metro platform, in white bevelled tile",
     geometry_rs: "a Madrid Metro platform, in white bevelled tile",
     graphs: "the Canal de Isabel II's covered reservoirs",
   };
-  for (const p of PLACES) if (LIKE[p.id]) p.like = LIKE[p.id];
+  for (const p of PLACES) {
+    if (LANDMARKS[p.id]) [p.look, p.like] = LANDMARKS[p.id];
+    else if (LIKE[p.id]) p.like = LIKE[p.id];
+  }
 
   // Street names from Chamberí's own map, on the tiles Madrid writes them on: [name, x, z]
   const NAMES = [

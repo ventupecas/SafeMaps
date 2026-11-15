@@ -59,11 +59,11 @@
         <li><b>Vehicle</b><span>The kind of transfer. Each one in the key means one thing.</span></li>
         <li><b>Canal</b><span>The network. Everything crossing it is an HTTP request between browser and server.</span></li>
         <li><b>Green</b><span>A sample trip, as the planner draws one: the route it recommends, beside the fastest in gray.</span></li>
-        <li><b>Madrid</b><span>The city is built like Chamberí: its closed blocks, its plazas, its Metro. A place modeled on a landmark there says so.</span></li>
-        <li><b>Color</b><span><span style="color:var(--s-green)">■</span> browser, <span style="color:var(--s-blue)">■</span> server, <span style="color:var(--s-rust)">■</span> Rust, <span style="color:var(--s-brown)">■</span> files, <span style="color:var(--s-orange)">■</span> tools, <span style="color:var(--s-yellow)">■</span> outside services.</span></li>
+        <li><b>Spain</b><span>The streets are Chamberí's, in Madrid. The main parts are Spain's landmarks: Madrid's in town, the rest of Spain's out on the islands and the ridge. Each place says what it's modeled on.</span></li>
+        <li><b>Color</b><span><span style="color:var(--s-green)">■</span> browser, <span style="color:var(--s-blue)">■</span> server, <span style="color:var(--s-rust)">■</span> Rust, <span style="color:var(--s-brown)">■</span> files, <span style="color:var(--s-orange)">■</span> tools, <span style="color:var(--s-yellow)">■</span> outside services: a building's walls, or a landmark's flag.</span></li>
         <li><b>Plain</b><span>Background buildings, not part of the app. A part goes plain when the current view doesn't use it.</span></li>
       </ul>
-      <p class="scale-note">Click any building or vehicle, or a vehicle in the key. Vehicle speeds and how often they run aren't to scale. The ROUTES_MAP switch starts on what this server is set to, and shows the other way it can run.</p>`;
+      <p class="scale-note">Click any building or vehicle, or a vehicle in the key. Scroll toward any spot to zoom in on it, or double-click it. Vehicle speeds and how often they run aren't to scale. The ROUTES_MAP switch starts on what this server is set to, and shows the other way it can run.</p>`;
     view.scrollTop = 0;
   }
   // What the planner itself does, on Browser Town's streets: the card that leads to it, and what it says there.
@@ -201,7 +201,11 @@
     night.addEventListener("click", () => ENGINE.setNight(!ENGINE.isDark()));
     ENGINE.on("reel", (on) => { show.textContent = on ? "Stop the showreel" : "Showreel"; show.setAttribute("aria-pressed", String(on)); stage.classList.toggle("reeling", on); });
     show.addEventListener("click", () => ENGINE.toggleReel());
+    $("zoom-in").addEventListener("click", () => ENGINE.zoom(1));
+    $("zoom-out").addEventListener("click", () => ENGINE.zoom(-1));
     addEventListener("keydown", (e) => {
+      const typing = e.target.closest && e.target.closest("input, textarea, select");
+      if (!typing && !e.ctrlKey && !e.metaKey && !e.altKey && (e.key === "+" || e.key === "=" || e.key === "-" || e.key === "_")) ENGINE.zoom(e.key === "+" || e.key === "=" ? 1 : -1);
       if (e.key === "Escape") ENGINE.clear(true);
       if (ENGINE.getTour() && e.key === "ArrowRight") ENGINE.nextStep();
       if (ENGINE.getTour() && e.key === "ArrowLeft") ENGINE.prevStep();
@@ -209,6 +213,7 @@
   } else {
     stage.insertAdjacentHTML("beforeend", `<div class="nogl"><p>The 3D city needs WebGL, and this browser isn't offering it. The journeys and places beside it still read as text.</p></div>`);
     document.querySelector(".tools").hidden = true;
+    document.querySelector(".zoom").hidden = true;
   }
   showTab();
 })();

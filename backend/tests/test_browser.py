@@ -636,7 +636,24 @@ def test_the_city_shows_what_the_planner_does_and_what_it_is_modeled_on(page, si
     page.click("#view .back")
     page.click("#tab-places")
     page.click("[data-place='core']")
-    assert page.locator("#view .like").text_content().startswith("Modeled on Plaza de Olavide")
+    assert page.locator("#view .like").text_content().startswith("Modeled on the Puerta del Sol")
+    page.click("#view .back")
+    page.click("[data-place='nhtsa']")  # the services outside the computer are landmarks from the rest of Spain
+    assert page.locator("#view .like").text_content().startswith("Modeled on the Sagrada Família")
+
+    page.click("#reset")  # zooming: toward the spot under the pointer, and with the buttons
+    page.wait_for_timeout(2500)
+    far = page.evaluate("ENGINE.stats().distance")
+    box = page.locator("#stage canvas").bounding_box()
+    page.mouse.move(box["x"] + box["width"] * 0.3, box["y"] + box["height"] * 0.6)
+    for _ in range(6):
+        page.mouse.wheel(0, -240)
+    page.wait_for_timeout(1500)
+    near = page.evaluate("ENGINE.stats().distance")
+    assert near < far * 0.6
+    page.click("#zoom-out")
+    page.wait_for_timeout(1500)
+    assert page.evaluate("ENGINE.stats().distance") > near
 
     assert page.locator("#night").text_content() == "Night"
     page.click("#night")  # the scene by night, whatever the device is set to

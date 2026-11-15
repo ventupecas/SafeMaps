@@ -3,23 +3,25 @@
 // (as the Canal's Parque de Santander is), stone quays where the land meets the water.
 window.WORLD = (() => {
   const { PLACES, STREETS, LAND, SLAB, TRENCH } = CITY;
-  const { Builder, windowTextures, place: placeGeometry, tree, cypress, house, manzana, facade, PALE, IRON, TERRACOTTA } = MODELS;
+  const { Builder, windowTextures, paintOver, place: placeGeometry, tree, cypress, house, manzana, facade, debod, PALE, IRON } = MODELS;
   const ROAD = 8; // street width
   const PLATE = 0.25; // how far the pavements stand above the street
 
   const land = new THREE.MeshLambertMaterial({ color: "#737980", vertexColors: false });
-  const fabric = new THREE.MeshLambertMaterial({ vertexColors: true });
+  const fabric = paintOver(new THREE.MeshLambertMaterial({ vertexColors: true }));
   const water = new THREE.MeshPhongMaterial({ color: "#7db4d0", specular: "#ffffff", shininess: 60 });
   let wave = null;
   const placesById = {};
   const lamps = []; // where the street lamps stand: lit at night (engine.js)
+  const solids = []; // the ground, the water and everything standing on them: what zooming aims at (engine.js)
 
   // The same city every time the page opens: its blocks are laid out from a fixed seed.
   let seed = 20261114;
   const rnd = () => { seed = (seed + 0x6d2b79f5) | 0; let t = Math.imul(seed ^ (seed >>> 15), 1 | seed); t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t; return ((t ^ (t >>> 14)) >>> 0) / 4294967296; };
 
-  function buildAll(scene) {
-    const tex = windowTextures();
+  // anisotropy: how sharp the facades stay seen at a slant: the most this computer's graphics offer.
+  function buildAll(scene, anisotropy) {
+    const tex = windowTextures(anisotropy);
     fabric.map = tex.map; fabric.emissiveMap = tex.glow; fabric.emissive = new THREE.Color("#ffffff"); fabric.emissiveIntensity = 0;
     addLand(scene);
     addWater(scene);
@@ -38,6 +40,7 @@ window.WORLD = (() => {
     g.translate(0, y0, 0);
     const m = new THREE.Mesh(g, land);
     m.receiveShadow = true;
+    solids.push(m);
     return m;
   }
 
@@ -92,7 +95,7 @@ window.WORLD = (() => {
   function addMesh(scene, b, shadows) {
     const m = new THREE.Mesh(b.geometry(), fabric);
     m.receiveShadow = true; m.castShadow = !!shadows;
-    scene.add(m);
+    scene.add(m); solids.push(m);
     return m;
   }
 
@@ -115,7 +118,7 @@ window.WORLD = (() => {
     wave = new THREE.CanvasTexture(c); wave.wrapS = wave.wrapT = THREE.RepeatWrapping; wave.encoding = THREE.sRGBEncoding;
     water.map = wave;
     const m = new THREE.Mesh(g, water); m.receiveShadow = true;
-    scene.add(m);
+    scene.add(m); solids.push(m);
   }
 
   function addBase(scene) {
@@ -128,8 +131,12 @@ window.WORLD = (() => {
     scene.add(new THREE.Mesh(geo, mat));
   }
 
-  const FOOT = { cityhall: 11, plaza: 12, station: 15, tower: 10, library: 13, helipad: 12, hall: 11, warehouse: 11, factory: 12, track: 13, containers: 12, terminal: 13, hangar: 12, arena: 14, cake: 10, cinema: 10, phone: 20, pier: 10, villa: 11, market: 10, watertower: 8, arcade: 9 };
-  const clearOf = (x, z, r) => PLACES.every((p) => (p.x - x) ** 2 + (p.z - z) ** 2 > ((FOOT[p.kind] || 8) + r) ** 2);
+  const FOOT = {
+    cityhall: 11, plaza: 12, station: 15, tower: 10, library: 13, helipad: 12, hall: 11, warehouse: 11, factory: 12, track: 13, containers: 12, terminal: 13, hangar: 12, arena: 14, cake: 10, cinema: 10, phone: 20, pier: 10, villa: 11, market: 10, watertower: 8, arcade: 9,
+    // the landmarks (landmarks.js)
+    cibeles: 12, sol: 13, prado: 11, metropolis: 11, carrion: 10, sanmiguel: 10, bernabeu: 13, cristal: 12, piruli: 5, windmill: 4, atocha: 13, alcala: 4, foster: 10, kio: 12, biblioteca: 12, observatorio: 7, congreso: 10, barajas: 13,
+  };
+  const clearOf = (x, z, r) => PLACES.every((p) => (p.x - x) ** 2 + (p.z - z) ** 2 > ((FOOT[p.look] || FOOT[p.kind] || 8) + r) ** 2);
   const overCut = (x, z) => x > TRENCH[0] && x < TRENCH[1] && z > TRENCH[2] && z < TRENCH[3];
   const nearCut = (x, z) => x > TRENCH[0] - 6 && x < TRENCH[1] + 6 && z > TRENCH[2] - 6 && z < TRENCH[3] + 6;
 
@@ -171,7 +178,7 @@ window.WORLD = (() => {
       const alongX = w > d, depth = Math.min(alongX ? d : w, 9) - 3.4;
       for (let a = (alongX ? x0 : z0) + 2; a < (alongX ? x1 : z1) - 6; ) {
         const len = Math.min(5.5 + rnd() * 5, (alongX ? x1 : z1) - 2 - a);
-        facade(b, alongX ? a + len / 2 : cx, alongX ? cz : a + len / 2, alongX ? len : depth, alongX ? depth : len, PLATE, rnd);
+        facade(b, alongX ? a + len / 2 : cx, alongX ? cz : a + len / 2, alongX ? len : depth, alongX ? depth : len, PLATE, rnd, alongX ? [[0, 1], [0, -1]] : [[1, 0], [-1, 0]]);
         a += len;
       }
     } else if (kind !== "yard") { // around one of the app's own buildings: lawns and a kiosk, not more houses
@@ -188,15 +195,17 @@ window.WORLD = (() => {
     if (w >= 15 && d >= 15) for (const [x, z] of [[x0 + 0.7, z0 + 0.7], [x1 - 0.7, z0 + 0.7], [x0 + 0.7, z1 - 0.7], [x1 - 0.7, z1 - 0.7]]) if (!nearCut(x, z)) lamp(b, x, z);
   }
 
-  // The park along the north side: lawns, plane trees and cypresses, a pond.
+  // The park along the north side: lawns, plane trees and cypresses, a pond; in one part, the Templo de Debod.
   function garden(b, x0, x1, z0, z1) {
     const cx = (x0 + x1) / 2, cz = (z0 + z1) / 2, w = x1 - x0, d = z1 - z0;
-    b.box(w - 2, 0.04, 2.2, cx, PLATE, cz, "#e2d6b8").box(2.2, 0.04, d - 2, cx, PLATE, cz, "#e2d6b8"); // sand paths, crossing
-    const pond = w > 20 && rnd() < 0.6;
+    const temple = x0 < -105 && x1 > -105;
+    if (temple) debod(b, cx, PLATE, cz);
+    else b.box(w - 2, 0.04, 2.2, cx, PLATE, cz, "#e2d6b8").box(2.2, 0.04, d - 2, cx, PLATE, cz, "#e2d6b8"); // sand paths, crossing
+    const pond = !temple && w > 20 && rnd() < 0.6;
     if (pond) b.cyl(5.2, 5.4, 0.5, cx, PLATE, cz, PALE, 20).cyl(4.7, 4.7, 0.2, cx, PLATE + 0.4, cz, "#6fbfdc", 20).cyl(0.2, 0.4, 2, cx, PLATE + 0.5, cz, PALE, 8);
     for (let i = 0; i < Math.round((w * d) / 42); i++) {
       const x = x0 + 2 + rnd() * (w - 4), z = z0 + 2 + rnd() * (d - 4);
-      if (Math.abs(x - cx) < 2.4 || Math.abs(z - cz) < 2.4 || (pond && Math.hypot(x - cx, z - cz) < 7)) continue;
+      if (temple ? Math.abs(x - cx) < 9.5 && Math.abs(z - cz) < 8.5 : Math.abs(x - cx) < 2.4 || Math.abs(z - cz) < 2.4 || (pond && Math.hypot(x - cx, z - cz) < 7)) continue;
       if (!clearOf(x, z, 1)) continue;
       (rnd() < 0.22 ? cypress(b, x, PLATE, z, 1 + rnd() * 0.4) : tree(b, x, PLATE, z, 1 + rnd() * 0.55));
     }
@@ -248,7 +257,7 @@ window.WORLD = (() => {
   function addPlaces(scene, tex) {
     const meshes = [];
     for (const p of PLACES) {
-      const mat = new THREE.MeshLambertMaterial({ vertexColors: true, map: tex.map, emissiveMap: tex.glow, emissive: new THREE.Color("#ffffff"), emissiveIntensity: 0 });
+      const mat = paintOver(new THREE.MeshLambertMaterial({ vertexColors: true, map: tex.map, emissiveMap: tex.glow, emissive: new THREE.Color("#ffffff"), emissiveIntensity: 0 }));
       const m = new THREE.Mesh(placeGeometry(p), mat);
       const under = p.kind === "rust";
       m.position.set(p.x, under ? -8.6 : p.kind === "lighthouse" || p.kind === "island" ? -1.6 : PLATE, p.z);
@@ -265,5 +274,5 @@ window.WORLD = (() => {
     return meshes;
   }
 
-  return { buildAll, land, fabric, water, wave: () => wave, placesById, lamps };
+  return { buildAll, land, fabric, water, wave: () => wave, placesById, lamps, solids };
 })();

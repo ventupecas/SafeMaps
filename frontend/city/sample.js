@@ -10,9 +10,10 @@ window.SAMPLE = (() => {
 
   // A picture that always faces the viewer, standing on its bottom edge: a pin, a road sign, a score.
   function sign(w, h, size, paint) {
-    const c = document.createElement("canvas"); c.width = w; c.height = h;
-    paint(c.getContext("2d"), w, h);
-    const t = new THREE.CanvasTexture(c); t.encoding = THREE.sRGBEncoding; t.anisotropy = 4;
+    const c = document.createElement("canvas"); c.width = w * 2; c.height = h * 2; // drawn at twice the size: sharp close up
+    const x = c.getContext("2d"); x.scale(2, 2);
+    paint(x, w, h);
+    const t = new THREE.CanvasTexture(c); t.encoding = THREE.sRGBEncoding; t.anisotropy = 8;
     const s = new THREE.Sprite(new THREE.SpriteMaterial({ map: t, transparent: true, depthWrite: false }));
     s.center.set(0.5, 0);
     s.scale.set((size * w) / h, size, 1);
