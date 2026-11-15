@@ -12,11 +12,14 @@ window.ENGINE = (() => {
   let traffic = !reduced, clock = 0, last = 0, frame = 0;
   // Sharpness: the scene is drawn with more pixels than the screen shows (twice as many each way on an ordinary
   // screen), and each screen pixel is the average of several: edges and far windows come out smooth. Where the
-  // computer can't keep up it's drawn with fewer, a step at a time. ?res=2 in the address fixes it instead.
+  // computer can't keep up it's drawn with fewer, a step at a time; one with no graphics card at all, where a
+  // frame takes seconds, goes straight down, to fewer pixels than the screen's. ?res=2 in the address fixes it instead.
   const fixedRes = Number(new URLSearchParams(location.search).get("res")) || 0;
-  const MAX_PIXELS = fixedRes ? 4e7 : 6.5e6;
+  const MAX_PIXELS = fixedRes ? 4e7 : 6.5e6, LEAST = 0.5;
   let sharpness = fixedRes ? Math.min(fixedRes, 4) : Math.min(3, Math.max(2, (window.devicePixelRatio || 1) * 1.5));
-  let timed = 0, span = 0;
+  let timed = 0, span = 0, crawl = 0, resumed = false, software = false;
+  // rAF stops while the page is out of sight: the frame it comes back with is no measure of anything.
+  document.addEventListener("visibilitychange", () => { resumed = true; });
   // ?show=0 in the address: never start the showreel unasked. ?show=1: start it straight away (a booth screen).
   const wanted = new URLSearchParams(location.search).get("show");
   const attract = wanted !== "0" && !reduced;
@@ -38,16 +41,34 @@ window.ENGINE = (() => {
     { text: "Rust Subway", sub: "backend/rust_kernel", x: 88, y: 0, z: 46, sign: "rust" },
   ];
 
+  // A browser drawing without a graphics card, on the processor (SwiftShader, llvmpipe): there every pixel is
+  // costly, and smoothing the edges most of all, so frames take seconds at full sharpness.
+  function drawsInSoftware() {
+    try {
+      const gl = document.createElement("canvas").getContext("webgl");
+      if (!gl) return false;
+      const info = gl.getExtension("WEBGL_debug_renderer_info");
+      const name = String(gl.getParameter(info ? info.UNMASKED_RENDERER_WEBGL : gl.RENDERER));
+      const lose = gl.getExtension("WEBGL_lose_context");
+      if (lose) lose.loseContext();
+      return /swiftshader|llvmpipe|softpipe|software|basic render/i.test(name);
+    } catch (error) {
+      return false;
+    }
+  }
+
   function init(el) {
     wrap = el;
+    software = drawsInSoftware();
+    if (software && !fixedRes) sharpness = 1; // and no smoothing or shadows: plain, but it keeps up
     try {
-      renderer = new THREE.WebGLRenderer({ antialias: true, powerPreference: "high-performance" });
+      renderer = new THREE.WebGLRenderer({ antialias: !software, powerPreference: "high-performance" });
     } catch (error) {
       return false;
     }
     renderer.setPixelRatio(sharpness);
     renderer.outputEncoding = THREE.sRGBEncoding;
-    renderer.shadowMap.enabled = true;
+    renderer.shadowMap.enabled = !software;
     renderer.shadowMap.type = THREE.PCFSoftShadowMap;
     renderer.shadowMap.autoUpdate = false;
     wrap.prepend(renderer.domElement);
@@ -610,11 +631,18 @@ window.ENGINE = (() => {
     requestAnimationFrame(loop);
     const took = (now - last) / 1000 || 0;
     const dt = Math.min(0.05, took);
-    // Under about 24 frames a second over three seconds (once the page has settled): fewer pixels from here on.
-    if (!fixedRes && sharpness > 1 && took < 1 && now > 5000 && !document.hidden) {
-      timed++; span += took;
-      if (span >= 3) { if (timed / span < 24) { sharpness = Math.max(1, sharpness - 0.5); resize(); } timed = span = 0; }
+    // Once the page has settled, fewer pixels from here on: a step down under about 24 frames a second over
+    // three seconds; straight down under 6, or when two frames running take half a second or more each.
+    if (!fixedRes && sharpness > LEAST && !resumed && now > 3000 && !document.hidden) {
+      crawl = took > 0.5 ? crawl + 1 : 0;
+      timed++; span += Math.min(took, 1); // one long hitch counts for no more than a second
+      if (crawl >= 2 || span >= 3) {
+        const rate = crawl >= 2 ? 0 : timed / span;
+        if (rate < 24) { sharpness = rate < 6 ? (sharpness > 1 ? 1 : LEAST) : Math.max(1, sharpness - 0.5); resize(); }
+        timed = span = crawl = 0;
+      }
     }
+    resumed = false;
     last = now; clock += dt; frame++;
     idle += dt;
     if (reel) updateReel(dt);
@@ -655,8 +683,8 @@ window.ENGINE = (() => {
 
   const setTraffic = (v) => { traffic = v; emit("traffic", v); };
   // What the last frame took to draw, and how sharply: ENGINE.stats() in the browser's console, to see how a computer copes.
-  // distance: from the camera to the point it turns round, which zooming changes.
-  const stats = () => ({ triangles: renderer.info.render.triangles, calls: renderer.info.render.calls, pixelRatio: renderer.getPixelRatio(), width: renderer.domElement.width, height: renderer.domElement.height, distance: Math.round(camera.position.distanceTo(controls.target) * 10) / 10 });
+  // distance: from the camera to the point it turns round, which zooming changes. software: drawn without a graphics card.
+  const stats = () => ({ triangles: renderer.info.render.triangles, calls: renderer.info.render.calls, pixelRatio: renderer.getPixelRatio(), width: renderer.domElement.width, height: renderer.domElement.height, distance: Math.round(camera.position.distanceTo(controls.target) * 10) / 10, software });
   // The camera put straight at a spot on the ground: from how far, how steeply (0 is from overhead) and from which side.
   const lookAt = (x, z, dist = 120, polar = 0.9, azimuth = 0.4) => flyTo(view(new THREE.Vector3(x, 0, z), dist, polar, azimuth), 0);
   return { init, on, select, selectMode, selectFlow, clear, setMap, startTour, stopTour, nextStep, prevStep, goStep, togglePlay, overview, setTraffic, traffic: () => traffic, byId, reduced, getTour: () => tour, showSample, toggleReel, stopReel, setNight, isDark, lookAt, stats, zoom };
