@@ -192,6 +192,7 @@ function wireControls() {
   $("closures-layer").addEventListener("change", drawClosures);
   $("about-open").addEventListener("click", showAbout);
   $("phone-open").addEventListener("click", showPhoneLink);
+  $("me-open").addEventListener("click", () => $("me").showModal());
   $("add-stop").addEventListener("click", () => addStop());
   $("avoid-road").addEventListener("click", () => toggleAvoiding());
   $("arrive-by").addEventListener("change", tripChanged);

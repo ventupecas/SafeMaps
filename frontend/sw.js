@@ -53,6 +53,7 @@ const PAGE_FILES = [
   "manifest.json",
   "results.json",
   "icons/icon-192.png",
+  "icons/qr-portfolio.png",
   "vendor/leaflet/leaflet.js",
   "vendor/leaflet/leaflet.css",
   "vendor/leaflet/images/layers.png",

@@ -30,6 +30,7 @@
   --icon-navigate: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath d='M12 2.5 20 21l-8-4-8 4z'/%3E%3C/svg%3E");
   --icon-locate: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2.2' stroke-linecap='round'%3E%3Ccircle cx='12' cy='12' r='7'/%3E%3Ccircle cx='12' cy='12' r='2.5' fill='black'/%3E%3Cpath d='M12 2v3M12 19v3M2 12h3M19 12h3'/%3E%3C/svg%3E");
   --icon-info: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2.2' stroke-linecap='round'%3E%3Ccircle cx='12' cy='12' r='9.5'/%3E%3Cpath d='M12 11v6'/%3E%3Ccircle cx='12' cy='7.5' r='1.2' fill='black' stroke='none'/%3E%3C/svg%3E");
+  --icon-person: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2.2' stroke-linecap='round'%3E%3Ccircle cx='12' cy='8' r='4'/%3E%3Cpath d='M4 21c0-4.4 3.6-7 8-7s8 2.6 8 7'/%3E%3C/svg%3E");
   --icon-phone: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2.2' stroke-linecap='round'%3E%3Crect x='6' y='2.5' width='12' height='19' rx='3'/%3E%3Cpath d='M11 18h2'/%3E%3C/svg%3E");
   --icon-shield: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2.2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M12 2.5 4.5 5.5v6c0 4.6 3.2 8.4 7.5 10 4.3-1.6 7.5-5.4 7.5-10v-6z'/%3E%3Cpath d='m8.8 12 2.2 2.2 4.3-4.4'/%3E%3C/svg%3E");
   --icon-undo: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2.4' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M9 14 4 9l5-5'/%3E%3Cpath d='M4 9h10.5a5.5 5.5 0 0 1 0 11H11'/%3E%3C/svg%3E");
@@ -167,6 +168,10 @@ body {
 
 .chip--phone {
   --icon: var(--icon-phone);
+}
+
+.chip--me {
+  --icon: var(--icon-person);
 }
 
 .chip--lang {
@@ -1861,6 +1866,38 @@ body:not(.map-osm) .osm-only {
   margin-bottom: 0;
   font-size: 0.76rem;
   color: var(--muted);
+}
+
+/* "About me": the QR code keeps a white background so phones can read it */
+.me-qr {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  margin: 18px 0 0;
+  padding: 12px;
+  border-radius: var(--radius);
+  background: var(--accent-soft);
+}
+
+.me-qr img {
+  width: 128px;
+  height: auto;
+  flex: none;
+  border-radius: 10px;
+  background: #fff;
+}
+
+.me-qr figcaption {
+  font-size: 0.9rem;
+}
+
+.me-links {
+  margin-bottom: 0;
+  font-weight: 600;
+}
+
+.me-links a {
+  color: var(--accent-strong);
 }
 
 .dialog--narrow {

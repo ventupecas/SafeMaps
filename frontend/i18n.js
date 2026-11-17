@@ -47,6 +47,28 @@ const PHRASES = [
   ["Safety first, then fuel, then time.", "Primero la seguridad, luego el combustible, luego el tiempo."],
   ["How it works", "Cómo funciona"],
   ["Open on your phone", "Abrir en tu celular"],
+  // "About me": who made the app, and why
+  ["About me", "Sobre mí"],
+  [
+    "I'm Ventura Perez. I was born and raised in Madrid, Spain, and moved to the US right before my tenth birthday without knowing a word of English. Since then I've lived in New Jersey, Miami and now Milwaukee, where I'm a business analyst and QA in i.c.stars, a technology and leadership program.",
+    "Soy Ventura Perez. Nací y crecí en Madrid (España) y me mudé a Estados Unidos poco antes de cumplir diez años, sin saber ni una palabra de inglés. Desde entonces he vivido en Nueva Jersey, Miami y ahora Milwaukee, donde soy analista de negocios y de control de calidad en i.c.stars, un programa de capacitación en tecnología y liderazgo.",
+  ],
+  ["Why I made SafeMaps", "Por qué hice SafeMaps"],
+  [
+    "I was planning routes long before I wrote code: at Domino's in Miami Beach, I planned delivery routes and timed the ovens to keep orders on schedule.",
+    "Ya planeaba rutas mucho antes de programar: en Domino's, en Miami Beach, planeaba las rutas de reparto y coordinaba los tiempos del horno para que los pedidos salieran a tiempo.",
+  ],
+  [
+    "Most map apps answer one question: what's the fastest way? But the fastest route often turns left across oncoming traffic at a busy or crash-prone junction, or drives through a lane closure, and the app never tells you.",
+    "La mayoría de las apps de mapas responden a una sola pregunta: ¿cuál es el camino más rápido? Pero la ruta más rápida muchas veces da vuelta a la izquierda cruzando el sentido contrario en un cruce concurrido o donde ha habido choques, o pasa por un carril cerrado, y la app no te lo dice.",
+  ],
+  [
+    "I got into programming to build the tools I wish existed, so I built this one. It finds the safest route first, then the one that uses the least fuel, and only then the quickest, and it explains its choice in plain words. I first built it as a prototype for a tech expo.",
+    "Empecé a programar para crear las herramientas que me gustaría que existieran, así que hice esta. Primero busca la ruta más segura, luego la que gasta menos combustible y solo entonces la más rápida, y explica su elección con palabras sencillas. La hice primero como prototipo para una feria de tecnología.",
+  ],
+  ["QR code that opens my portfolio", "Código QR que abre mi portafolio"],
+  ["Scan it with your phone to see my portfolio and my other projects.", "Escanéalo con tu celular para ver mi portafolio y mis otros proyectos."],
+  ["Portfolio", "Portafolio"],
   ["Trip planner", "Planificador de viaje"],
   ["About this app", "Acerca de esta app"],
   ["Visitors' answers", "Respuestas de los visitantes"],

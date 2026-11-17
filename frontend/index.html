@@ -32,6 +32,7 @@
           </div>
           <nav class="header-links" aria-label="About this app">
             <button id="about-open" class="chip chip--info" type="button" aria-haspopup="dialog">How it works</button>
+            <button id="me-open" class="chip chip--me" type="button" aria-haspopup="dialog">About me</button>
             <button id="phone-open" class="chip chip--phone" type="button" aria-haspopup="dialog">Open on your phone</button>
             <a class="chip chip--game" href="game.html">Which route is safer?</a>
             <a class="chip chip--city" href="city.html">Inside the app</a>
@@ -326,6 +327,26 @@
       <form method="dialog"><button class="dialog__close" aria-label="Close">×</button></form>
       <h2 id="phone-title">Open on your phone</h2>
       <div id="phone-body"></div>
+    </dialog>
+
+    <!-- Who made the app. Each paragraph is one line, so i18n.js can match it whole. -->
+    <dialog id="me" class="dialog" aria-labelledby="me-title">
+      <form method="dialog"><button class="dialog__close" aria-label="Close">×</button></form>
+      <h2 id="me-title">About me</h2>
+      <p>I'm Ventura Perez. I was born and raised in Madrid, Spain, and moved to the US right before my tenth birthday without knowing a word of English. Since then I've lived in New Jersey, Miami and now Milwaukee, where I'm a business analyst and QA in i.c.stars, a technology and leadership program.</p>
+      <h3>Why I made SafeMaps</h3>
+      <p>I was planning routes long before I wrote code: at Domino's in Miami Beach, I planned delivery routes and timed the ovens to keep orders on schedule.</p>
+      <p>Most map apps answer one question: what's the fastest way? But the fastest route often turns left across oncoming traffic at a busy or crash-prone junction, or drives through a lane closure, and the app never tells you.</p>
+      <p>I got into programming to build the tools I wish existed, so I built this one. It finds the safest route first, then the one that uses the least fuel, and only then the quickest, and it explains its choice in plain words. I first built it as a prototype for a tech expo.</p>
+      <figure class="me-qr">
+        <img src="icons/qr-portfolio.png" width="480" height="480" alt="QR code that opens my portfolio">
+        <figcaption>Scan it with your phone to see my portfolio and my other projects.</figcaption>
+      </figure>
+      <p class="me-links">
+        <a href="https://vperez-stars.github.io/Portfolio-Site/" target="_blank" rel="noopener">Portfolio</a> ·
+        <a href="https://www.linkedin.com/in/ventura-perez/" target="_blank" rel="noopener" translate="no">LinkedIn</a> ·
+        <a href="https://github.com/vperez-stars" target="_blank" rel="noopener" translate="no">GitHub</a>
+      </p>
     </dialog>
 
     <script src="config.js" onerror="window.ROUTES_CONFIG_MISSING = true"></script>
