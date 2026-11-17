@@ -26,8 +26,10 @@ const TEXT = new Set(['.js', '.css', '.html', '.json', '.md', '.svg', '.txt']);
 
 if (!existsSync(join(RECORDED, 'trips'))) throw new Error(`No recorded trips in ${RECORDED}: run demo/record-trips.mjs first.`);
 
+// from is exact text, or a pattern where a line may change (to can then use $&, the text found)
 function patch(text, from, to, file) {
-  if (!text.includes(from)) throw new Error(`${file}: the text to patch was not found: ${from.slice(0, 90)}`);
+  const found = from instanceof RegExp ? from.test(text) : text.includes(from);
+  if (!found) throw new Error(`${file}: the text to patch was not found: ${String(from).slice(0, 90)}`);
   return text.replace(from, to);
 }
 function edit(file, ...pairs) {
@@ -163,8 +165,9 @@ edit('editing.js',
   'export async function setPoint(kind, point, { fromSearch = false, onMap = false } = {}) {\n  if (window.SAFEMAPS_DEMO) point = window.SAFEMAPS_DEMO.snap(point);\n',
   'export async function addStop({ point = null, index = state.stops.length, id = state.nextStopId++ } = {}) {\n',
   'export async function addStop({ point = null, index = state.stops.length, id = state.nextStopId++ } = {}) {\n  if (window.SAFEMAPS_DEMO) return window.SAFEMAPS_DEMO.say("Stops need the live routing server. This demo plans trips straight between its 12 sample places.");\n',
-  'export function addStopOnMap(point) {\n  if (!mapTouchAllowed()) return;\n',
-  'export function addStopOnMap(point) {\n  if (!mapTouchAllowed()) return;\n  if (window.SAFEMAPS_DEMO && state.origin && state.destination) return window.SAFEMAPS_DEMO.say("Stops need the live routing server. This demo plans trips straight between its 12 sample places.");\n');
+  // after the line that ignores taps the map can't take, whatever else that line checks
+  /export function addStopOnMap\(point\) \{\n  if \(!mapTouchAllowed\(\)[^\n]*\n/,
+  '$&  if (window.SAFEMAPS_DEMO && state.origin && state.destination) return window.SAFEMAPS_DEMO.say("Stops need the live routing server. This demo plans trips straight between its 12 sample places.");\n');
 edit('drive.js',
   'export async function startDriving() {\n',
   'export async function startDriving() {\n  if (window.SAFEMAPS_DEMO) return window.SAFEMAPS_DEMO.say("Following your location needs the live routing server. Press Preview the drive to watch this trip played back, with spoken directions.", 8000);\n');

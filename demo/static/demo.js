@@ -215,6 +215,10 @@
     const q = (url.searchParams.get("q") || "").trim().toLowerCase();
     let found = PLACES.filter((p) => p.label.toLowerCase().includes(q) || q.split(/\s+/).some((w) => w.length > 2 && p.label.toLowerCase().includes(w)));
     if (!found.length) found = PLACES; // nothing by that name: show what there is
+    // Nominatim's search (asked when Photon can't be reached) answers a list in its own shape
+    if (url.hostname.includes("nominatim")) {
+      return json(found.map((p) => ({ name: p.label, lat: String(p.lat), lon: String(p.lng), address: { city: "Milwaukee", state: "Wisconsin", country_code: "us" } })));
+    }
     return json({ type: "FeatureCollection", features: found.map(photonFeature) });
   }
   function placeName(url) {
@@ -258,7 +262,7 @@
   window.fetch = async function (input, init) {
     const options = init || {};
     const url = new URL(typeof input === "string" || input instanceof URL ? String(input) : input.url, location.href);
-    if (url.hostname === "photon.komoot.io" && url.pathname.startsWith("/api")) return placeSearch(url);
+    if ((url.hostname === "photon.komoot.io" && url.pathname.startsWith("/api")) || (url.hostname === "nominatim.openstreetmap.org" && url.pathname.startsWith("/search"))) return placeSearch(url);
     if ((url.hostname === "photon.komoot.io" && url.pathname.startsWith("/reverse")) || url.hostname === "nominatim.openstreetmap.org") return placeName(url);
     const name = url.pathname.split("/").pop();
     if (url.origin !== location.origin || !ENDPOINTS.has(name)) return realFetch(input, init);
